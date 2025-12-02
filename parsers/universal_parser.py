@@ -57,19 +57,30 @@ class UniversalParser(BaseParser):
             logger.info(f"🔍 UniversalParser (API): Начало парсинга")
             logger.info(f"   URL: {self.url}")
 
-            # Увеличиваем таймаут до 30 секунд и добавляем retry стратегию
-            logger.debug(f"📡 Отправка GET запроса к API...")
-            response = self.session.get(
-                self.url,
-                timeout=(10, 30),  # (connect_timeout, read_timeout)
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Accept': 'application/json, text/plain, */*',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                }
-            )
+            # Используем make_request из BaseParser для поддержки прокси и ротации
+            logger.debug(f"📡 Отправка GET запроса к API через систему ротации...")
+
+            # Улучшенные реалистичные headers для обхода защиты
+            # Имитируем запрос от реального браузера (на основе успешных запросов)
+            headers = {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Connection': 'keep-alive',
+                'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'priority': 'u=0, i',
+                'cache-control': 'max-age=0',
+                'DNT': '1',
+                'Upgrade-Insecure-Requests': '1',
+            }
+
+            response = self.make_request(self.url, headers=headers, timeout=(10, 30))
+
+            if not response:
+                logger.error(f"❌ Не удалось получить ответ от API")
+                return []
 
             logger.info(f"✅ Ответ получен: статус {response.status_code}")
             response.raise_for_status()
@@ -150,17 +161,21 @@ class UniversalParser(BaseParser):
 
     def _has_promo_fields(self, obj: Dict) -> bool:
         """Проверяет, похож ли объект на промоакцию"""
+        if not isinstance(obj, dict):
+            return False
+
         promo_keywords = [
             'name', 'title', 'description', 'reward', 'prize', 'token',
             'start', 'end', 'url', 'link', 'id', 'code', 'campaign',
-            'promotion', 'activity', 'event', 'launchpad', 'staking'
+            'promotion', 'activity', 'event', 'launchpad', 'staking',
+            'coin', 'symbol', 'amount', 'pool', 'time', 'date'
         ]
 
         # Считаем сколько промо-ключей есть в объекте
         promo_keys_count = sum(1 for key in obj.keys() if any(kw in key.lower() for kw in promo_keywords))
 
-        # Если есть хотя бы 3 промо-ключа, считаем это промоакцией
-        return promo_keys_count >= 3
+        # Если есть хотя бы 2 промо-ключа, считаем это промоакцией (было 3)
+        return promo_keys_count >= 2
 
     def _create_promo_from_object(self, obj: Dict) -> Dict[str, Any]:
         """Создает стандартизированную промоакцию из любого объекта"""
@@ -168,27 +183,87 @@ class UniversalParser(BaseParser):
             # Автоматически определяем название из домена URL
             exchange_name = self._extract_domain_name(self.url)
 
+            # Универсальный маппинг полей для всех бирж
             promo_data = {
                 'exchange': exchange_name,
                 'promo_id': self.extract_promo_id(obj),
-                'title': self._get_value(obj, ['name', 'title', 'campaignName', 'activityName', 'projectName']),
-                'description': self._get_value(obj, ['description', 'desc', 'details', 'info', 'introduction']),
-                'total_prize_pool': self._get_value(obj, ['totalPrizePool', 'reward', 'prize', 'amount', 'prizePool', 'totalReward']),
-                'award_token': self._get_value(obj, ['awardToken', 'token', 'coin', 'symbol', 'currency', 'rewardToken']),
-                'participants_count': self._get_value(obj, ['participants', 'users', 'joiners', 'totalUsers']),
-                'start_time': self._get_value(obj, ['startTime', 'start', 'startDate', 'beginTime', 'openTime']),
-                'end_time': self._get_value(obj, ['endTime', 'end', 'endDate', 'expireTime', 'closeTime']),
-                'link': self._get_value(obj, ['campaignUrl', 'url', 'link', 'detailUrl', 'jumpUrl', 'joinUrl']),
-                'icon': self._get_value(obj, ['tokenIcon', 'iconUrl', 'icon', 'imageUrl', 'logo']),
+                # Title: ищем в максимально широком списке (Bybit, MEXC, Binance, Gate.io и др.)
+                'title': self._get_value(obj, [
+                    'name', 'title', 'campaignName', 'activityName', 'projectName',
+                    'tokenFullName', 'activityCoinFullName', 'coinFullName',  # Полные названия токенов
+                    'eventName', 'promotionName', 'launchpadName'
+                ]),
+                # Description
+                'description': self._get_value(obj, [
+                    'description', 'desc', 'details', 'info', 'introduction',
+                    'content', 'remark', 'note', 'summary'
+                ]),
+                # Prize pool
+                'total_prize_pool': self._get_value(obj, [
+                    'totalPrizePool', 'reward', 'prize', 'amount', 'prizePool', 'totalReward',
+                    'rewardAmount', 'totalAmount', 'poolSize'
+                ]),
+                # Award token: расширенный список для разных бирж
+                'award_token': self._get_value(obj, [
+                    'token', 'coin', 'symbol', 'currency',  # Общие
+                    'activityCoin', 'awardToken', 'rewardToken',  # MEXC, Binance
+                    'tradeCoin', 'targetCoin', 'assetSymbol',  # Gate.io, OKX
+                    'currencyId', 'coinSymbol', 'tokenSymbol'  # Другие биржи
+                ]),
+                # Participants
+                'participants_count': self._get_value(obj, [
+                    'participants', 'users', 'joiners', 'totalUsers',
+                    'participantCount', 'userCount', 'joinedUsers'
+                ]),
+                # Time
+                'start_time': self._get_value(obj, [
+                    'startTime', 'start', 'startDate', 'beginTime', 'openTime',
+                    'startTimestamp', 'beginTimestamp'
+                ]),
+                'end_time': self._get_value(obj, [
+                    'endTime', 'end', 'endDate', 'expireTime', 'closeTime',
+                    'endTimestamp', 'expireTimestamp'
+                ]),
+                # Links
+                'link': self._get_value(obj, [
+                    'url', 'link', 'detailUrl', 'jumpUrl', 'joinUrl',
+                    'campaignUrl', 'activityUrl', 'projectUrl', 'href'
+                ]),
+                # Icon/Image
+                'icon': self._get_value(obj, [
+                    'icon', 'iconUrl', 'imageUrl', 'logo', 'logoUrl',
+                    'tokenIcon', 'coinIcon', 'img', 'image', 'thumbnail'
+                ]),
                 'raw_data': obj  # Сохраняем исходные данные
             }
 
             # Очищаем None значения
             promo_data = {k: v for k, v in promo_data.items() if v is not None}
 
-            # Если нет хотя бы title или description - не считаем промоакцией
-            if not promo_data.get('title') and not promo_data.get('description'):
+            # Минимальная валидация: должен быть хотя бы title или любое поле кроме raw_data
+            fields_count = len([k for k in promo_data.keys() if k not in ['raw_data', 'exchange', 'promo_id']])
+
+            if fields_count < 1:
                 return None
+
+            # Если нет title - пытаемся создать его из других полей
+            if not promo_data.get('title'):
+                # Приоритет 1: токен + биржа
+                if promo_data.get('award_token'):
+                    token = promo_data['award_token']
+                    exchange = promo_data.get('exchange', 'Promotion')
+                    promo_data['title'] = f"{token} {exchange} Promotion"
+
+                # Приоритет 2: описание (первые 50 символов)
+                elif promo_data.get('description'):
+                    desc = promo_data['description']
+                    promo_data['title'] = desc[:50] + ('...' if len(desc) > 50 else '')
+
+                # Приоритет 3: название биржи + ID
+                else:
+                    exchange = promo_data.get('exchange', 'Unknown')
+                    promo_id = promo_data.get('promo_id', 'N/A')
+                    promo_data['title'] = f"{exchange} Promo {promo_id}"
 
             return promo_data
 

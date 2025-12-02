@@ -19,14 +19,23 @@ logger = logging.getLogger(__name__)
 class UniversalFallbackParser(BaseParser):
     """Универсальный парсер с автоматическим fallback между API и HTML"""
 
-    def __init__(self, url: str, api_urls: List[str] = None, html_urls: List[str] = None):
+    def __init__(self, url: str, api_url: str = None, html_url: str = None, api_urls: List[str] = None, html_urls: List[str] = None):
         super().__init__(url)
         self.strategy_used = None
         self.combined_data = []
-        self.exchange = self._extract_exchange_from_url(url)  # ✅ ДОБАВИТЬ
-        # Дополнительные URL для FALLBACK системы
-        self.api_urls = api_urls or []
-        self.html_urls = html_urls or []
+        self.exchange = self._extract_exchange_from_url(url)
+
+        # НОВАЯ СИСТЕМА: одиночные URL
+        self.api_url = api_url
+        self.html_url = html_url
+
+        # LEGACY: обратная совместимость со старой системой (списки)
+        if api_urls:
+            logger.warning("⚠️ Используется устаревшая система api_urls (список). Используйте api_url (одиночный).")
+            self.api_url = api_urls[0] if api_urls else None
+        if html_urls:
+            logger.warning("⚠️ Используется устаревшая система html_urls (список). Используйте html_url (одиночный).")
+            self.html_url = html_urls[0] if html_urls else None
         
     def _extract_exchange_from_url(self, url: str) -> str:
         """Извлекает название биржи из URL"""
@@ -105,6 +114,21 @@ class UniversalFallbackParser(BaseParser):
                     else:
                         logger.warning(f"⚠️ HTML парсинг не вернул результатов")
 
+                elif strategy == "browser":
+                    logger.info(f"🌐 Начало Browser парсинга для {self.exchange}")
+                    browser_results = self._parse_via_browser()
+
+                    if browser_results:
+                        results.extend(browser_results)
+                        self.strategy_used = "browser" if not self.strategy_used else "combined"
+                        logger.info(f"✅ Browser парсинг УСПЕШЕН: найдено {len(browser_results)} промоакций")
+                        for j, promo in enumerate(browser_results[:5], 1):
+                            logger.info(f"   {j}. {promo.get('title', 'Без названия')}")
+                        if len(browser_results) > 5:
+                            logger.info(f"   ... и еще {len(browser_results) - 5} промоакций")
+                    else:
+                        logger.warning(f"⚠️ Browser парсинг не вернул результатов")
+
                 else:
                     if strategy == "api" and not self._is_api_url():
                         logger.info(f"⏭️ Пропускаем API парсинг: URL не является API endpoint")
@@ -131,14 +155,14 @@ class UniversalFallbackParser(BaseParser):
     def _get_strategy_priority(self) -> List[str]:
         """Определяет приоритет стратегий для каждой биржи"""
         strategy_map = {
-            "bybit": ["html", "api"],
-            "mexc": ["api", "html"],
-            "binance": ["html"],
-            "gate": ["html"],
-            "okx": ["html"],
-            "bitget": ["html"]
+            "bybit": ["html", "api", "browser"],
+            "mexc": ["api", "html", "browser"],
+            "binance": ["html", "browser"],
+            "gate": ["html", "browser"],
+            "okx": ["html", "browser"],
+            "bitget": ["html", "browser"]
         }
-        return strategy_map.get(self.exchange, ["html", "api"])
+        return strategy_map.get(self.exchange, ["html", "api", "browser"])
     
     def _is_api_url(self) -> bool:
         """Проверяет, является ли URL API endpoint'ом"""
@@ -146,7 +170,7 @@ class UniversalFallbackParser(BaseParser):
         return any(indicator in self.url.lower() for indicator in api_indicators)
     
     def _parse_via_api(self) -> List[Dict[str, Any]]:
-        """Парсинг через API (использует UniversalParser) с поддержкой множественных URL"""
+        """Парсинг через API (использует UniversalParser) с одиночным URL"""
         try:
             from .universal_parser import UniversalParser
 
@@ -167,27 +191,24 @@ class UniversalFallbackParser(BaseParser):
                 all_api_promos.extend(promotions)
                 logger.info(f"✅ Основной API URL вернул {len(promotions)} промоакций")
 
-            # Парсим дополнительные API URLs
-            if self.api_urls:
-                logger.info(f"📡 Парсинг {len(self.api_urls)} дополнительных API URLs...")
-                for i, api_url in enumerate(self.api_urls, 1):
-                    try:
-                        logger.info(f"   [{i}/{len(self.api_urls)}] Парсинг {api_url}")
-                        api_parser = UniversalParser(api_url)
-                        promotions = api_parser.get_promotions()
+            # Парсим дополнительный API URL (НОВОЕ: одиночный)
+            if self.api_url and self.api_url != self.url:
+                logger.info(f"📡 Парсинг дополнительного API URL: {self.api_url}")
+                try:
+                    api_parser = UniversalParser(self.api_url)
+                    promotions = api_parser.get_promotions()
 
-                        for promo in promotions:
-                            promo['data_source'] = 'api'
-                            promo['source_url'] = api_url
-                            if not promo.get('promo_id'):
-                                promo['promo_id'] = self._generate_html_promo_id(promo)
+                    for promo in promotions:
+                        promo['data_source'] = 'api'
+                        promo['source_url'] = self.api_url
+                        if not promo.get('promo_id'):
+                            promo['promo_id'] = self._generate_html_promo_id(promo)
 
-                        all_api_promos.extend(promotions)
-                        logger.info(f"   ✅ API URL #{i} вернул {len(promotions)} промоакций")
+                    all_api_promos.extend(promotions)
+                    logger.info(f"✅ Дополнительный API URL вернул {len(promotions)} промоакций")
 
-                    except Exception as e:
-                        logger.error(f"   ❌ Ошибка парсинга API URL #{i}: {e}")
-                        continue
+                except Exception as e:
+                    logger.error(f"❌ Ошибка парсинга дополнительного API URL: {e}")
 
             logger.info(f"📊 Всего получено {len(all_api_promos)} промоакций из всех API URLs")
             return all_api_promos
@@ -196,8 +217,33 @@ class UniversalFallbackParser(BaseParser):
             logger.error(f"❌ Ошибка API парсинга: {e}")
             return []
     
+    def _parse_via_browser(self) -> List[Dict[str, Any]]:
+        """Парсинг через браузер (Playwright) для динамических сайтов"""
+        try:
+            from .browser_parser import BrowserParser
+
+            # Парсим основной URL через браузер
+            logger.info(f"🌐 Парсинг через браузер: {self.url}")
+            browser_parser = BrowserParser(self.url)
+            promotions = browser_parser.get_promotions()
+
+            for promo in promotions:
+                promo['data_source'] = 'browser'
+                promo['source_url'] = self.url
+
+            logger.info(f"📊 Browser парсер вернул {len(promotions)} промоакций")
+            return promotions
+
+        except ImportError as e:
+            logger.error(f"❌ Playwright не установлен: {e}")
+            logger.error(f"   Установите: pip install playwright && python -m playwright install chromium")
+            return []
+        except Exception as e:
+            logger.error(f"❌ Ошибка Browser парсинга: {e}", exc_info=True)
+            return []
+
     def _parse_via_html(self) -> List[Dict[str, Any]]:
-        """Парсинг через HTML страницы с поддержкой множественных URL"""
+        """Парсинг через HTML страницы с одиночным URL"""
         try:
             all_html_urls = []
 
@@ -206,10 +252,10 @@ class UniversalFallbackParser(BaseParser):
                 all_html_urls.append(self.url)
                 logger.info(f"🌐 Добавлен основной HTML URL: {self.url}")
 
-            # Добавляем дополнительные HTML URLs из базы данных
-            if self.html_urls:
-                all_html_urls.extend(self.html_urls)
-                logger.info(f"🌐 Добавлено {len(self.html_urls)} дополнительных HTML URLs из БД")
+            # Добавляем дополнительный HTML URL из базы данных (НОВОЕ: одиночный)
+            if self.html_url and self.html_url not in all_html_urls:
+                all_html_urls.append(self.html_url)
+                logger.info(f"🌐 Добавлен дополнительный HTML URL из БД: {self.html_url}")
 
             # Если нет URL из БД, пытаемся получить из шаблонов
             if not all_html_urls:

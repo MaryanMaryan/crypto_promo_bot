@@ -18,21 +18,29 @@ class BaseParser:
 
     def _extract_exchange_from_url(self, url: str) -> str:
         """Извлечение названия биржи из URL"""
-        if 'binance' in url:
+        url_lower = url.lower()
+
+        if 'binance' in url_lower:
             return 'binance'
-        elif 'bybit' in url:
+        elif 'bybit' in url_lower:
             return 'bybit'
-        elif 'kucoin' in url:
+        elif 'mexc' in url_lower:
+            return 'mexc'
+        elif 'kucoin' in url_lower:
             return 'kucoin'
-        elif 'okx' in url:
+        elif 'okx' in url_lower or 'okex' in url_lower:
             return 'okx'
-        elif 'huobi' in url:
+        elif 'gate.io' in url_lower or 'gateio' in url_lower:
+            return 'gate'
+        elif 'huobi' in url_lower:
             return 'huobi'
+        elif 'bitget' in url_lower:
+            return 'bitget'
         else:
             return 'unknown'
 
     def make_request(self, url: str, method: str = 'GET', **kwargs) -> Optional[requests.Response]:
-        """Обновленный метод запроса с интеграцией системы менеджеров"""
+        """Обновленный метод запроса с интеграцией системы менеджеров и fallback режимом"""
         # Соблюдаем интервал между запросами
         self._respect_request_interval()
 
@@ -45,23 +53,33 @@ class BaseParser:
         self.logger.debug(f"🔄 Получение оптимальной комбинации прокси + User-Agent для {exchange}")
         proxy, user_agent = self.rotation_manager.get_optimal_combination(exchange)
 
+        # FALLBACK РЕЖИМ: Работа без прокси если их нет
+        use_fallback = False
         if not proxy or not user_agent:
-            self.logger.error(f"❌ Не удалось получить комбинацию прокси/User-Agent для {exchange}")
-            return None
-
-        self.logger.info(f"🔧 Используем прокси: {proxy.address} (протокол: {proxy.protocol})")
-        self.logger.info(f"🔧 Используем User-Agent: {user_agent.browser_type} {user_agent.browser_version} на {user_agent.platform}")
+            self.logger.warning(f"⚠️ Прокси/User-Agent не доступны для {exchange}")
+            self.logger.warning(f"🔄 FALLBACK: Работаем БЕЗ прокси с улучшенными headers")
+            use_fallback = True
+        else:
+            self.logger.info(f"🔧 Используем прокси: {proxy.address} (протокол: {proxy.protocol})")
+            self.logger.info(f"🔧 Используем User-Agent: {user_agent.browser_type} {user_agent.browser_version} на {user_agent.platform}")
 
         # Подготавливаем параметры запроса
-        proxies = {
-            'http': f"{proxy.protocol}://{proxy.address}",
-            'https': f"{proxy.protocol}://{proxy.address}"
-        }
-
         headers = kwargs.get('headers', {})
-        headers['User-Agent'] = user_agent.user_agent_string
+
+        if use_fallback:
+            # Fallback User-Agent - современный Chrome на Windows
+            headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            # Не используем прокси в fallback режиме
+        else:
+            headers['User-Agent'] = user_agent.user_agent_string
+            # Используем прокси
+            proxies = {
+                'http': f"{proxy.protocol}://{proxy.address}",
+                'https': f"{proxy.protocol}://{proxy.address}"
+            }
+            kwargs['proxies'] = proxies
+
         kwargs['headers'] = headers
-        kwargs['proxies'] = proxies
         kwargs['timeout'] = kwargs.get('timeout', 30)
 
         start_time = time.time()
@@ -72,7 +90,7 @@ class BaseParser:
 
         try:
             self.logger.debug(f"📡 Отправка запроса...")
-            response = requests.request(method, url, **kwargs)
+            response = self.session.request(method, url, **kwargs)  # ✅ Используем session для сохранения cookies
             response_time_ms = (time.time() - start_time) * 1000
             response_code = response.status_code
 
@@ -88,27 +106,34 @@ class BaseParser:
             # Обрабатываем блокировки
             if response.status_code in [403, 429]:
                 self.logger.warning(f"🚫 Запрос ЗАБЛОКИРОВАН для {exchange}. Код: {response.status_code}")
-                self.logger.warning(f"   Прокси: {proxy.address}, User-Agent: {user_agent.browser_type}")
+                if not use_fallback and proxy and user_agent:
+                    self.logger.warning(f"   Прокси: {proxy.address}, User-Agent: {user_agent.browser_type}")
+                elif use_fallback:
+                    self.logger.warning(f"   Режим: FALLBACK (без прокси)")
 
         except requests.exceptions.Timeout:
             response_time_ms = (time.time() - start_time) * 1000
             self.logger.error(f"⏰ ТАЙМАУТ запроса для {exchange} ({response_time_ms:.0f}мс)")
         except requests.exceptions.ProxyError as e:
             self.logger.error(f"🔌 ОШИБКА ПРОКСИ для {exchange}: {e}")
-            self.logger.error(f"   Прокси: {proxy.address}")
+            if proxy:
+                self.logger.error(f"   Прокси: {proxy.address}")
         except Exception as e:
             self.logger.error(f"❌ ОШИБКА запроса для {exchange}: {e}", exc_info=True)
         finally:
-            # Всегда логируем результат запроса
-            self.logger.debug(f"📊 Логирование результата запроса в систему статистики")
-            self.rotation_manager.handle_request_result(
-                exchange=exchange,
-                proxy_id=proxy.id,
-                user_agent_id=user_agent.id,
-                success=success,
-                response_time_ms=response_time_ms,
-                response_code=response_code
-            )
+            # Логируем результат запроса только если НЕ fallback режим
+            if not use_fallback and proxy and user_agent:
+                self.logger.debug(f"📊 Логирование результата запроса в систему статистики")
+                self.rotation_manager.handle_request_result(
+                    exchange=exchange,
+                    proxy_id=proxy.id,
+                    user_agent_id=user_agent.id,
+                    success=success,
+                    response_time_ms=response_time_ms,
+                    response_code=response_code
+                )
+            elif use_fallback:
+                self.logger.debug(f"⏭️ Пропускаем логирование статистики (fallback режим)")
 
         return response
 
