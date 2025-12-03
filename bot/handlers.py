@@ -15,9 +15,10 @@ from datetime import datetime
 
 # ИМПОРТЫ ДЛЯ НОВЫХ СИСТЕМ
 from utils.proxy_manager import get_proxy_manager
-from utils.user_agent_manager import get_user_agent_manager  
+from utils.user_agent_manager import get_user_agent_manager
 from utils.statistics_manager import get_statistics_manager
 from utils.rotation_manager import get_rotation_manager
+from utils.url_template_builder import URLTemplateAnalyzer, get_url_builder
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -31,7 +32,8 @@ class AddLinkStates(StatesGroup):
     waiting_for_name = State()  # Шаг 1: Название биржи
     waiting_for_api_url = State()  # Шаг 2: API ссылка (обязательно)
     waiting_for_html_url = State()  # Шаг 3: HTML ссылка (опционально)
-    waiting_for_interval = State()  # Шаг 4: Интервал проверки
+    waiting_for_example_url = State()  # Шаг 4: Пример ссылки на промоакцию (опционально)
+    waiting_for_interval = State()  # Шаг 5: Интервал проверки
 
 class IntervalStates(StatesGroup):
     waiting_for_interval = State()
@@ -318,27 +320,23 @@ async def skip_html_url(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     custom_name = data.get('custom_name')
 
-    # Создаем кнопки выбора интервала
+    # Создаем кнопки для выбора: добавить пример или пропустить
     builder = InlineKeyboardBuilder()
-    presets = [
-        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
-        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
-        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
-    ]
-
-    for text, seconds in presets:
-        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
-    builder.adjust(2)
+    builder.add(InlineKeyboardButton(text="➕ Добавить пример ссылки", callback_data="add_example_url"))
+    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
+    builder.adjust(1)
 
     await callback.message.edit_text(
         f"⏭️ HTML ссылка пропущена\n\n"
-        f"⏰ <b>Шаг 4/4: Выберите интервал проверки</b>\n\n"
+        f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
         f"<b>Имя:</b> {custom_name}\n\n"
-        f"Как часто проверять эту ссылку на новые промоакции?",
+        f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
+        f"<b>Пример:</b>\n"
+        f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
+        f"Это опционально, но очень полезно!",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
-    await state.set_state(AddLinkStates.waiting_for_interval)
     await callback.answer()
 
 @router.message(AddLinkStates.waiting_for_html_url)
@@ -356,6 +354,50 @@ async def process_html_url_input(message: Message, state: FSMContext):
     data = await state.get_data()
     custom_name = data.get('custom_name')
 
+    # Создаем кнопки для выбора: добавить пример или пропустить
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="➕ Добавить пример ссылки", callback_data="add_example_url"))
+    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
+    builder.adjust(1)
+
+    await message.answer(
+        f"✅ HTML ссылка сохранена!\n\n"
+        f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
+        f"<b>Имя:</b> {custom_name}\n\n"
+        f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
+        f"<b>Пример:</b>\n"
+        f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
+        f"Это опционально, но очень полезно!",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+
+# =============================================================================
+# НОВЫЕ ОБРАБОТЧИКИ ДЛЯ ПРИМЕРА ССЫЛКИ
+# =============================================================================
+
+@router.callback_query(F.data == "add_example_url")
+async def add_example_url(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки 'Добавить пример ссылки'"""
+    await callback.message.edit_text(
+        "🔗 <b>Введите пример ссылки на промоакцию:</b>\n\n"
+        "Примеры:\n"
+        "• MEXC Launchpad:\n"
+        "<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
+        "• Bybit Token Splash:\n"
+        "<code>https://www.bybit.com/en/trade/spot/token-splash/detail?code=20251201080514</code>\n\n"
+        "Бот автоматически проанализирует ссылку и создаст шаблон для генерации ссылок.",
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_example_url)
+    await callback.answer()
+
+@router.callback_query(F.data == "skip_example_url")
+async def skip_example_url(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки 'Пропустить' пример ссылки"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+
     # Создаем кнопки выбора интервала
     builder = InlineKeyboardBuilder()
     presets = [
@@ -368,15 +410,125 @@ async def process_html_url_input(message: Message, state: FSMContext):
         builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
     builder.adjust(2)
 
-    await message.answer(
-        f"✅ HTML ссылка сохранена!\n\n"
-        f"⏰ <b>Шаг 4/4: Выберите интервал проверки</b>\n\n"
+    await callback.message.edit_text(
+        f"⏭️ Пример ссылки пропущен\n\n"
+        f"⏰ <b>Шаг 5/5: Выберите интервал проверки</b>\n\n"
         f"<b>Имя:</b> {custom_name}\n\n"
         f"Как часто проверять эту ссылку на новые промоакции?",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_interval)
+    await callback.answer()
+
+@router.message(AddLinkStates.waiting_for_example_url)
+async def process_example_url_input(message: Message, state: FSMContext):
+    """Обработка ввода примера ссылки на промоакцию"""
+    example_url = message.text.strip()
+
+    if not example_url.startswith(('http://', 'https://')):
+        await message.answer("❌ URL должен начинаться с http:// или https://\nПопробуйте снова:")
+        return
+
+    # Сохраняем example URL
+    await state.update_data(example_url=example_url)
+
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    api_url = data.get('api_url')
+
+    # Показываем сообщение о процессе анализа
+    analysis_msg = await message.answer(
+        "🔍 <b>Анализирую ссылку...</b>\n\n"
+        "1. Запрашиваю API...\n"
+        "2. Ищу соответствующую промоакцию...\n"
+        "3. Создаю шаблон...",
+        parse_mode="HTML"
+    )
+
+    try:
+        # Запрашиваем API и парсим промоакции
+        from parsers.universal_parser import UniversalParser
+        parser = UniversalParser(api_url)
+        api_promotions = parser.get_promotions()
+
+        if not api_promotions:
+            await analysis_msg.edit_text(
+                "⚠️ <b>Не удалось получить данные из API</b>\n\n"
+                "Возможно, API временно недоступен или требует специальных заголовков.\n"
+                "Шаблон не был создан, но ссылка будет добавлена.",
+                parse_mode="HTML"
+            )
+        else:
+            # Анализируем URL и создаем шаблон
+            analyzer = URLTemplateAnalyzer(example_url, api_promotions)
+            template = analyzer.analyze()
+
+            if template:
+                # Сохраняем шаблон
+                url_builder = get_url_builder()
+
+                # Определяем exchange из домена
+                from urllib.parse import urlparse
+                parsed = urlparse(example_url)
+                domain = parsed.netloc.replace('www.', '')
+                exchange = domain.split('.')[0]  # mexc, bybit, binance и т.д.
+
+                # Определяем тип промоакции из path
+                path_parts = [p for p in parsed.path.split('/') if p]
+                template_type = path_parts[1] if len(path_parts) > 1 else 'default'
+
+                url_builder.add_template(exchange, template_type, template)
+
+                await analysis_msg.edit_text(
+                    f"✅ <b>Шаблон успешно создан!</b>\n\n"
+                    f"<b>Биржа:</b> {exchange.upper()}\n"
+                    f"<b>Тип:</b> {template_type}\n"
+                    f"<b>Паттерн:</b> <code>{template['pattern']}</code>\n\n"
+                    f"Теперь бот будет автоматически генерировать ссылки для всех промоакций этого типа!",
+                    parse_mode="HTML"
+                )
+            else:
+                await analysis_msg.edit_text(
+                    "⚠️ <b>Не удалось создать шаблон</b>\n\n"
+                    "Не найдено достаточно совпадений между URL и данными API.\n"
+                    "Ссылка будет добавлена без шаблона.",
+                    parse_mode="HTML"
+                )
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка анализа примера URL: {e}", exc_info=True)
+        await analysis_msg.edit_text(
+            f"❌ <b>Ошибка анализа ссылки</b>\n\n"
+            f"Детали: {str(e)}\n\n"
+            f"Ссылка будет добавлена без шаблона.",
+            parse_mode="HTML"
+        )
+
+    # Переходим к выбору интервала
+    builder = InlineKeyboardBuilder()
+    presets = [
+        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+    ]
+
+    for text, seconds in presets:
+        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.adjust(2)
+
+    await message.answer(
+        f"⏰ <b>Шаг 5/5: Выберите интервал проверки</b>\n\n"
+        f"<b>Имя:</b> {custom_name}\n\n"
+        f"Как часто проверять эту ссылку на новые промоакции?",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_interval)
+
+# =============================================================================
+# ЗАВЕРШЕНИЕ ДОБАВЛЕНИЯ ССЫЛКИ
+# =============================================================================
 
 @router.callback_query(AddLinkStates.waiting_for_interval, F.data.startswith("add_interval_"))
 async def process_interval_selection(callback: CallbackQuery, state: FSMContext):

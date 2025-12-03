@@ -4,6 +4,7 @@ import hashlib
 import requests
 from typing import List, Dict, Any
 from .base_parser import BaseParser
+from utils.url_template_builder import get_url_builder
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +275,23 @@ class UniversalParser(BaseParser):
                     exchange = promo_data.get('exchange', 'Unknown')
                     promo_id = promo_data.get('promo_id', 'N/A')
                     promo_data['title'] = f"{exchange} Promo {promo_id}"
+
+            # ========================================================================
+            # АВТОМАТИЧЕСКАЯ ГЕНЕРАЦИЯ ССЫЛОК
+            # ========================================================================
+            # Если в API нет ссылки, пытаемся сгенерировать её используя шаблоны
+            if not promo_data.get('link'):
+                try:
+                    url_builder = get_url_builder()
+                    generated_link = url_builder.build_url(exchange_name, obj)
+
+                    if generated_link:
+                        promo_data['link'] = generated_link
+                        logger.debug(f"✅ Ссылка сгенерирована автоматически: {generated_link}")
+                    else:
+                        logger.debug(f"⚠️ Не удалось сгенерировать ссылку для {exchange_name}")
+                except Exception as e:
+                    logger.debug(f"⚠️ Ошибка генерации ссылки: {e}")
 
             return promo_data
 

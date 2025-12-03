@@ -15,6 +15,7 @@ from playwright_stealth import Stealth
 
 from .base_parser import BaseParser
 from .html_templates import get_html_selectors
+from utils.url_template_builder import get_url_builder
 
 logger = logging.getLogger(__name__)
 
@@ -621,6 +622,24 @@ class BrowserParser(BaseParser):
                 image_element = container.select_one(image_selector)
                 if image_element and image_element.get('src'):
                     promo['icon'] = image_element.get('src')
+
+            # ========================================================================
+            # АВТОМАТИЧЕСКАЯ ГЕНЕРАЦИЯ ССЫЛОК
+            # ========================================================================
+            # Если не удалось извлечь ссылку из HTML, пытаемся сгенерировать её
+            if not promo.get('link'):
+                try:
+                    url_builder = get_url_builder()
+                    # Передаем promo как исходные данные для генерации
+                    generated_link = url_builder.build_url(self.exchange, promo)
+
+                    if generated_link:
+                        promo['link'] = generated_link
+                        logger.debug(f"✅ Ссылка сгенерирована автоматически: {generated_link}")
+                    else:
+                        logger.debug(f"⚠️ Не удалось сгенерировать ссылку для {self.exchange}")
+                except Exception as e:
+                    logger.debug(f"⚠️ Ошибка генерации ссылки: {e}")
 
             # Генерируем promo_id
             logger.debug(f"DEBUG: Checking return condition - has title: {bool(promo.get('title'))}, has link: {bool(promo.get('link'))}")
