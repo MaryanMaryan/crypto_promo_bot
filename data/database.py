@@ -125,7 +125,8 @@ class DatabaseMigration:
         self.migrations.extend([
             self._migration_001_initial,
             self._migration_002_add_indexes,
-            self._migration_003_add_multiple_urls
+            self._migration_003_add_multiple_urls,
+            self._migration_004_convert_to_single_urls
         ])
     
     def _migration_001_initial(self, session):
@@ -156,6 +157,66 @@ class DatabaseMigration:
             session.commit()
         except Exception as e:
             logging.error(f"❌ Ошибка в миграции 003: {e}")
+            raise
+
+    def _migration_004_convert_to_single_urls(self, session):
+        """Миграция 004: Конвертация множественных URL в одиночные"""
+        import json
+
+        try:
+            # Шаг 1: Проверка существующих столбцов
+            result = session.execute(text("PRAGMA table_info(api_links)"))
+            columns = [row[1] for row in result.fetchall()]
+
+            # Шаг 2: Добавление новых столбцов
+            if 'api_url' not in columns:
+                session.execute(text("ALTER TABLE api_links ADD COLUMN api_url TEXT"))
+                logging.info("✅ Добавлен столбец api_url")
+
+            if 'html_url' not in columns:
+                session.execute(text("ALTER TABLE api_links ADD COLUMN html_url TEXT"))
+                logging.info("✅ Добавлен столбец html_url")
+
+            session.commit()
+
+            # Шаг 3: Конвертация данных
+            links = session.query(ApiLink).all()
+            converted_count = 0
+
+            for link in links:
+                if link.api_url:  # Уже конвертировано
+                    continue
+
+                # Конвертируем API URLs (берем первый из массива)
+                try:
+                    api_urls_list = json.loads(link.api_urls) if link.api_urls else []
+                    if api_urls_list:
+                        link.api_url = api_urls_list[0]
+                    elif link.url:
+                        link.api_url = link.url  # Fallback
+                except:
+                    if link.url:
+                        link.api_url = link.url
+
+                # Конвертируем HTML URLs (берем первый из массива)
+                try:
+                    html_urls_list = json.loads(link.html_urls) if link.html_urls else []
+                    if html_urls_list:
+                        link.html_url = html_urls_list[0]
+                except:
+                    pass  # HTML опциональный
+
+                # Очищаем exchange (больше не используется)
+                link.exchange = None
+                converted_count += 1
+
+            session.commit()
+            logging.info(f"✅ Миграция 004: Конвертировано {converted_count} ссылок")
+            logging.info(f"   - JSON массивы → одиночные URL")
+            logging.info(f"   - Поле exchange очищено")
+
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 004: {e}")
             raise
     
     def run_migrations(self):

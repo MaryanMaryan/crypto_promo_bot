@@ -75,19 +75,128 @@ class NotificationService:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки уведомления в чат {chat_id}: {e}")
 
+    def format_compact_promo_list(self, promos: List[Dict[str, Any]]) -> str:
+        """Форматирует компактный список промоакций для одного сообщения"""
+        try:
+            if not promos:
+                return ""
+
+            # Группируем по биржам
+            exchanges = {}
+            for promo in promos:
+                exchange = promo.get('exchange', 'Unknown')
+                if exchange not in exchanges:
+                    exchanges[exchange] = []
+                exchanges[exchange].append(promo)
+
+            message = f"🎉 <b>НАЙДЕНО {len(promos)} НОВЫХ ПРОМОАКЦИЙ!</b>\n\n"
+
+            for exchange, exchange_promos in exchanges.items():
+                message += f"<b>🏢 {exchange} ({len(exchange_promos)} шт.):</b>\n"
+
+                for i, promo in enumerate(exchange_promos, 1):
+                    title = promo.get('title', 'Без названия')
+                    # Обрезаем длинные названия
+                    if len(title) > 60:
+                        title = title[:60] + "..."
+
+                    message += f"{i}. {title}\n"
+
+                    # Добавляем призовой фонд если есть
+                    if promo.get('total_prize_pool'):
+                        message += f"   💰 {promo['total_prize_pool']}\n"
+
+                    # Добавляем ссылку если есть
+                    if promo.get('link'):
+                        message += f"   🔗 {promo['link']}\n"
+
+                    message += "\n"
+
+                message += "\n"
+
+            message += "━━━━━━━━━━━━━━━━━\n"
+            message += f"<i>Всего добавлено в базу: {len(promos)} промоакций</i>"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования списка: {e}")
+            return f"🎉 Найдено {len(promos)} новых промоакций!"
+
     async def send_bulk_notifications(self, chat_id: int, promos: List[Dict[str, Any]]):
-        """Отправляет уведомления о нескольких промоакциях"""
+        """Отправляет уведомления о нескольких промоакциях
+
+        Логика:
+        - Если <= 5 промоакций: отправляем по отдельности (детальная информация)
+        - Если > 5 промоакций: объединяем в одно сообщение (компактный список)
+        """
         if not promos:
             return
 
         logger.info(f"📨 Отправка {len(promos)} уведомлений в чат {chat_id}")
 
-        for i, promo in enumerate(promos, 1):
-            await self.send_promo_notification(chat_id, promo)
-            # Небольшая задержка между сообщениями чтобы не спамить
-            if i < len(promos):
-                import asyncio
-                await asyncio.sleep(0.5)
+        # Если промоакций много (больше 5), отправляем одним сообщением
+        if len(promos) > 5:
+            logger.info(f"📦 Объединяем {len(promos)} промоакций в одно сообщение")
+            try:
+                message = self.format_compact_promo_list(promos)
+
+                # Telegram ограничение: 4096 символов
+                if len(message) > 4096:
+                    logger.warning(f"⚠️ Сообщение слишком длинное ({len(message)} символов), разбиваем")
+                    # Разбиваем на части
+                    parts = self._split_long_message(message, promos)
+                    for part in parts:
+                        await self.bot.send_message(
+                            chat_id=chat_id,
+                            text=part,
+                            parse_mode="HTML",
+                            disable_web_page_preview=True
+                        )
+                        import asyncio
+                        await asyncio.sleep(0.5)
+                else:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True
+                    )
+
+                logger.info(f"✅ Отправлено объединенное уведомление с {len(promos)} промоакциями")
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки объединенного сообщения: {e}")
+        else:
+            # Если промоакций мало (≤5), отправляем по отдельности с полной информацией
+            logger.info(f"📤 Отправляем {len(promos)} промоакций по отдельности")
+            for i, promo in enumerate(promos, 1):
+                await self.send_promo_notification(chat_id, promo)
+                # Небольшая задержка между сообщениями чтобы не спамить
+                if i < len(promos):
+                    import asyncio
+                    await asyncio.sleep(0.5)
+
+    def _split_long_message(self, message: str, promos: List[Dict[str, Any]]) -> List[str]:
+        """Разбивает длинное сообщение на части по 4000 символов"""
+        parts = []
+        current_part = f"🎉 <b>НАЙДЕНО {len(promos)} НОВЫХ ПРОМОАКЦИЙ!</b>\n\n"
+
+        lines = message.split('\n')
+        for line in lines[2:]:  # Пропускаем заголовок, т.к. уже добавили
+            if len(current_part) + len(line) + 1 > 4000:
+                parts.append(current_part)
+                current_part = ""
+            current_part += line + "\n"
+
+        if current_part:
+            parts.append(current_part)
+
+        # Добавляем номера частей
+        if len(parts) > 1:
+            for i in range(len(parts)):
+                parts[i] = f"<b>Часть {i+1}/{len(parts)}</b>\n\n" + parts[i]
+
+        return parts
 
     async def send_check_completion_message(self, chat_id: int, total_checked: int, new_promos: int):
         """Отправляет сообщение о завершении проверки"""

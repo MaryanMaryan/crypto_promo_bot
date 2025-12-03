@@ -11,9 +11,13 @@ class ApiLink(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String)
     url = Column(String)  # Основной URL (для обратной совместимости)
-    api_urls = Column(Text, default='[]')  # JSON массив API URL
-    html_urls = Column(Text, default='[]')  # JSON массив HTML URL
-    exchange = Column(String)
+    # LEGACY: для обратной совместимости (будут удалены в будущих версиях)
+    api_urls = Column(Text, default='[]')  # DEPRECATED: JSON массив API URL
+    html_urls = Column(Text, default='[]')  # DEPRECATED: JSON массив HTML URL
+    exchange = Column(String, nullable=True)  # DEPRECATED: не используется
+    # НОВЫЕ ОДИНОЧНЫЕ ПОЛЯ
+    api_url = Column(String, nullable=True)  # Одиночный API URL
+    html_url = Column(String, nullable=True)  # Одиночный HTML URL (опциональный)
     check_interval = Column(Integer, default=300)
     is_active = Column(Boolean, default=True)
     added_by = Column(Integer)
@@ -50,6 +54,26 @@ class ApiLink(Base):
             'api': self.get_api_urls(),
             'html': self.get_html_urls()
         }
+
+    def get_primary_api_url(self):
+        """Получить основной API URL (новая система или первый из старых)"""
+        if self.api_url:
+            return self.api_url
+        # Fallback для старых данных
+        legacy_urls = self.get_api_urls()
+        return legacy_urls[0] if legacy_urls else None
+
+    def get_primary_html_url(self):
+        """Получить основной HTML URL (новая система или первый из старых)"""
+        if self.html_url:
+            return self.html_url
+        # Fallback для старых данных
+        legacy_urls = self.get_html_urls()
+        return legacy_urls[0] if legacy_urls else None
+
+    def has_legacy_data(self):
+        """Проверяет, использует ли запись старую систему"""
+        return (not self.api_url and len(self.get_api_urls()) > 0)
 
 class PromoHistory(Base):
     __tablename__ = 'promo_history'

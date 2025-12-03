@@ -28,11 +28,10 @@ user_selections = {}
 
 # СУЩЕСТВУЮЩИЕ СОСТОЯНИЯ FSM
 class AddLinkStates(StatesGroup):
-    waiting_for_url = State()
-    waiting_for_api_urls = State()
-    waiting_for_html_urls = State()
-    waiting_for_name = State()
-    waiting_for_interval = State()
+    waiting_for_name = State()  # Шаг 1: Название биржи
+    waiting_for_api_url = State()  # Шаг 2: API ссылка (обязательно)
+    waiting_for_html_url = State()  # Шаг 3: HTML ссылка (опционально)
+    waiting_for_interval = State()  # Шаг 4: Интервал проверки
 
 class IntervalStates(StatesGroup):
     waiting_for_interval = State()
@@ -221,7 +220,6 @@ async def menu_list_links(message: Message):
                 status = "✅ Активна" if link.is_active else "❌ Остановлена"
                 interval_minutes = link.check_interval // 60
                 response += f"<b>{link.name}</b>\n"
-                response += f"Биржа: {link.exchange}\n"
                 response += f"Статус: {status}\n"
                 response += f"Интервал: {interval_minutes} мин\n"
                 response += f"URL: <code>{link.url}</code>\n\n"
@@ -235,225 +233,130 @@ async def menu_list_links(message: Message):
 @router.message(F.text == "➕ Добавить ссылку")
 async def menu_add_link(message: Message, state: FSMContext):
     await message.answer(
-        "🔗 <b>Добавление новой ссылки для парсинга</b>\n\n"
-        "📌 Вы можете добавить несколько URL для одной биржи:\n"
-        "• API ссылки (для API парсинга)\n"
-        "• HTML ссылки (для HTML парсинга)\n\n"
-        "Система FALLBACK будет использовать эти ссылки автоматически!\n\n"
-        "Отправьте основной URL биржи (API или HTML):",
-        parse_mode="HTML"
-    )
-    await state.set_state(AddLinkStates.waiting_for_url)
-
-@router.message(AddLinkStates.waiting_for_url)
-async def process_url_input(message: Message, state: FSMContext):
-    url = message.text.strip()
-
-    if not url.startswith(('http://', 'https://')):
-        await message.answer("❌ URL должен начинаться с http:// или https://. Попробуйте снова:")
-        return
-
-    await state.update_data(url=url, api_urls_list=[], html_urls_list=[])
-
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc.lower()
-
-    exchange_name = "Unknown"
-    if 'bybit' in domain:
-        exchange_name = "Bybit"
-    elif 'binance' in domain:
-        exchange_name = "Binance"
-    elif 'gate' in domain:
-        exchange_name = "Gate.io"
-    elif 'mexc' in domain:
-        exchange_name = "MEXC"
-    elif 'okx' in domain:
-        exchange_name = "OKX"
-    else:
-        parts = domain.split('.')
-        if len(parts) >= 2:
-            exchange_name = parts[-2].title()
-
-    await state.update_data(exchange_name=exchange_name)
-
-    # Спрашиваем про дополнительные API URL
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="✅ Добавить API ссылки", callback_data="add_more_api_urls"))
-    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_api_urls"))
-    builder.adjust(1)
-
-    await message.answer(
-        f"📡 <b>Дополнительные API ссылки для FALLBACK</b>\n\n"
-        f"<b>Биржа:</b> {exchange_name}\n"
-        f"<b>Основной URL:</b> <code>{url}</code>\n\n"
-        f"Хотите добавить дополнительные API ссылки для этой биржи?\n"
-        f"(Для мульти-стратегического парсинга)",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-
-# ОБРАБОТЧИКИ ДЛЯ ДОБАВЛЕНИЯ API ССЫЛОК
-@router.callback_query(F.data == "add_more_api_urls")
-async def add_more_api_urls(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "📡 <b>Добавление API ссылок</b>\n\n"
-        "Отправьте API ссылки (по одной или несколько через запятую):\n\n"
-        "Пример:\n"
-        "<code>https://api.bybit.com/v5/promotion/list</code>\n"
-        "или\n"
-        "<code>https://api1.com, https://api2.com</code>\n\n"
-        "Отправьте <b>\"готово\"</b> когда закончите или <b>\"пропустить\"</b> чтобы пропустить.",
-        parse_mode="HTML"
-    )
-    await state.set_state(AddLinkStates.waiting_for_api_urls)
-    await callback.answer()
-
-@router.callback_query(F.data == "skip_api_urls")
-async def skip_api_urls(callback: CallbackQuery, state: FSMContext):
-    # Переходим к HTML ссылкам
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="✅ Добавить HTML ссылки", callback_data="add_more_html_urls"))
-    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_urls"))
-    builder.adjust(1)
-
-    await callback.message.edit_text(
-        "🌐 <b>Дополнительные HTML ссылки для FALLBACK</b>\n\n"
-        "Хотите добавить HTML ссылки для этой биржи?\n"
-        "(Система будет использовать HTML парсинг если API не сработает)",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-@router.message(AddLinkStates.waiting_for_api_urls)
-async def process_api_urls_input(message: Message, state: FSMContext):
-    text = message.text.strip().lower()
-
-    if text in ["готово", "done", "skip", "пропустить"]:
-        # Переходим к HTML ссылкам
-        builder = InlineKeyboardBuilder()
-        builder.add(InlineKeyboardButton(text="✅ Добавить HTML ссылки", callback_data="add_more_html_urls"))
-        builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_urls"))
-        builder.adjust(1)
-
-        data = await state.get_data()
-        api_urls = data.get('api_urls_list', [])
-
-        await message.answer(
-            f"✅ <b>API ссылки добавлены: {len(api_urls)}</b>\n\n"
-            "🌐 Теперь добавим HTML ссылки?",
-            reply_markup=builder.as_markup(),
-            parse_mode="HTML"
-        )
-        return
-
-    # Парсим ссылки (разделенные запятыми или пробелами)
-    urls = [url.strip() for url in message.text.replace(',', ' ').split() if url.strip().startswith('http')]
-
-    if not urls:
-        await message.answer("❌ Не найдено валидных URL. Попробуйте снова или отправьте 'готово':")
-        return
-
-    data = await state.get_data()
-    api_urls_list = data.get('api_urls_list', [])
-    api_urls_list.extend(urls)
-    await state.update_data(api_urls_list=api_urls_list)
-
-    await message.answer(
-        f"✅ <b>Добавлено {len(urls)} API ссылок</b>\n"
-        f"Всего API ссылок: {len(api_urls_list)}\n\n"
-        f"Отправьте еще ссылки или <b>\"готово\"</b> для продолжения.",
-        parse_mode="HTML"
-    )
-
-# ОБРАБОТЧИКИ ДЛЯ ДОБАВЛЕНИЯ HTML ССЫЛОК
-@router.callback_query(F.data == "add_more_html_urls")
-async def add_more_html_urls(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "🌐 <b>Добавление HTML ссылок</b>\n\n"
-        "Отправьте HTML ссылки (по одной или несколько через запятую):\n\n"
-        "Пример:\n"
-        "<code>https://www.bybit.com/en/trade/spot/token-splash</code>\n"
-        "или\n"
-        "<code>https://site1.com, https://site2.com</code>\n\n"
-        "Отправьте <b>\"готово\"</b> когда закончите или <b>\"пропустить\"</b> чтобы пропустить.",
-        parse_mode="HTML"
-    )
-    await state.set_state(AddLinkStates.waiting_for_html_urls)
-    await callback.answer()
-
-@router.callback_query(F.data == "skip_html_urls")
-async def skip_html_urls(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    exchange_name = data.get('exchange_name')
-    url = data.get('url')
-
-    # Переходим к вводу имени
-    await callback.message.edit_text(
-        f"🏷️ <b>Введите имя для этой ссылки:</b>\n\n"
-        f"<b>Биржа:</b> {exchange_name}\n"
-        f"<b>Основной URL:</b> <code>{url}</code>\n\n"
-        f"Например: <i>\"Bybit Promotions\"</i> или <i>\"MEXC Launchpad\"</i>",
+        "🔗 <b>Добавление новой ссылки</b>\n\n"
+        "🏷️ <b>Шаг 1/4:</b> Введите название биржи\n\n"
+        "Примеры:\n"
+        "• <i>Bybit Promotions</i>\n"
+        "• <i>MEXC Launchpad</i>\n"
+        "• <i>OKX Earn</i>\n\n"
+        "Это название поможет вам легко находить ссылку в списке.",
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_name)
-    await callback.answer()
-
-@router.message(AddLinkStates.waiting_for_html_urls)
-async def process_html_urls_input(message: Message, state: FSMContext):
-    text = message.text.strip().lower()
-
-    if text in ["готово", "done", "skip", "пропустить"]:
-        # Переходим к вводу имени
-        data = await state.get_data()
-        exchange_name = data.get('exchange_name')
-        url = data.get('url')
-        html_urls = data.get('html_urls_list', [])
-
-        await message.answer(
-            f"✅ <b>HTML ссылки добавлены: {len(html_urls)}</b>\n\n"
-            f"🏷️ <b>Введите имя для этой ссылки:</b>\n\n"
-            f"<b>Биржа:</b> {exchange_name}\n"
-            f"<b>Основной URL:</b> <code>{url}</code>\n\n"
-            f"Например: <i>\"Bybit Promotions\"</i> или <i>\"MEXC Launchpad\"</i>",
-            parse_mode="HTML"
-        )
-        await state.set_state(AddLinkStates.waiting_for_name)
-        return
-
-    # Парсим ссылки
-    urls = [url.strip() for url in message.text.replace(',', ' ').split() if url.strip().startswith('http')]
-
-    if not urls:
-        await message.answer("❌ Не найдено валидных URL. Попробуйте снова или отправьте 'готово':")
-        return
-
-    data = await state.get_data()
-    html_urls_list = data.get('html_urls_list', [])
-    html_urls_list.extend(urls)
-    await state.update_data(html_urls_list=html_urls_list)
-
-    await message.answer(
-        f"✅ <b>Добавлено {len(urls)} HTML ссылок</b>\n"
-        f"Всего HTML ссылок: {len(html_urls_list)}\n\n"
-        f"Отправьте еще ссылки или <b>\"готово\"</b> для продолжения.",
-        parse_mode="HTML"
-    )
 
 @router.message(AddLinkStates.waiting_for_name)
 async def process_name_input(message: Message, state: FSMContext):
+    """Обработка ввода названия биржи"""
     custom_name = message.text.strip()
 
     if not custom_name:
-        await message.answer("❌ Имя не может быть пустым. Пожалуйста, введите имя:")
+        await message.answer("❌ Название не может быть пустым. Попробуйте снова:")
         return
 
     if len(custom_name) > 100:
-        await message.answer("❌ Имя слишком длинное (максимум 100 символов). Введите другое имя:")
+        await message.answer("❌ Название слишком длинное (максимум 100 символов). Введите другое:")
         return
 
+    # Сохраняем название
     await state.update_data(custom_name=custom_name)
 
+    await message.answer(
+        f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
+        f"📡 <b>Шаг 2/4:</b> Введите API ссылку\n\n"
+        f"Пример:\n"
+        f"<code>https://api.bybit.com/v5/promotion/list</code>\n\n"
+        f"API ссылка используется для автоматического парсинга.",
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_api_url)
+
+@router.message(AddLinkStates.waiting_for_api_url)
+async def process_api_url_input(message: Message, state: FSMContext):
+    """Обработка ввода API ссылки"""
+    api_url = message.text.strip()
+
+    if not api_url.startswith(('http://', 'https://')):
+        await message.answer("❌ URL должен начинаться с http:// или https://")
+        return
+
+    # Сохраняем API URL
+    await state.update_data(api_url=api_url)
+
+    # Создаем кнопки для выбора
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="➕ Добавить HTML ссылку", callback_data="add_html_url"))
+    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_url"))
+    builder.adjust(1)
+
+    await message.answer(
+        f"✅ API ссылка сохранена!\n\n"
+        f"🌐 <b>Шаг 3/4:</b> Добавить HTML ссылку?\n\n"
+        f"HTML ссылка используется как резервный метод парсинга, если API не сработает.\n\n"
+        f"Выберите действие:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+
+# ОБРАБОТЧИКИ ДЛЯ ДОБАВЛЕНИЯ HTML ССЫЛКИ
+
+@router.callback_query(F.data == "add_html_url")
+async def add_html_url(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки 'Добавить HTML ссылку'"""
+    await callback.message.edit_text(
+        "🌐 <b>Введите HTML ссылку:</b>\n\n"
+        "Пример:\n"
+        "<code>https://www.bybit.com/en/trade/spot/token-splash</code>\n\n"
+        "HTML используется как резервный метод парсинга.",
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_html_url)
+    await callback.answer()
+
+@router.callback_query(F.data == "skip_html_url")
+async def skip_html_url(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки 'Пропустить' HTML"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+
+    # Создаем кнопки выбора интервала
+    builder = InlineKeyboardBuilder()
+    presets = [
+        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+    ]
+
+    for text, seconds in presets:
+        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.adjust(2)
+
+    await callback.message.edit_text(
+        f"⏭️ HTML ссылка пропущена\n\n"
+        f"⏰ <b>Шаг 4/4: Выберите интервал проверки</b>\n\n"
+        f"<b>Имя:</b> {custom_name}\n\n"
+        f"Как часто проверять эту ссылку на новые промоакции?",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_interval)
+    await callback.answer()
+
+@router.message(AddLinkStates.waiting_for_html_url)
+async def process_html_url_input(message: Message, state: FSMContext):
+    """Обработка ввода HTML ссылки"""
+    html_url = message.text.strip()
+
+    if not html_url.startswith(('http://', 'https://')):
+        await message.answer("❌ URL должен начинаться с http:// или https://")
+        return
+
+    # Сохраняем HTML URL
+    await state.update_data(html_url=html_url)
+
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+
+    # Создаем кнопки выбора интервала
     builder = InlineKeyboardBuilder()
     presets = [
         ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
@@ -466,7 +369,8 @@ async def process_name_input(message: Message, state: FSMContext):
     builder.adjust(2)
 
     await message.answer(
-        f"⏰ <b>Выберите интервал проверки для ссылки:</b>\n\n"
+        f"✅ HTML ссылка сохранена!\n\n"
+        f"⏰ <b>Шаг 4/4: Выберите интервал проверки</b>\n\n"
         f"<b>Имя:</b> {custom_name}\n\n"
         f"Как часто проверять эту ссылку на новые промоакции?",
         reply_markup=builder.as_markup(),
@@ -479,23 +383,19 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
     try:
         interval_seconds = int(callback.data.split("_")[2])
         data = await state.get_data()
-        url = data.get('url')
+        api_url = data.get('api_url')
+        html_url = data.get('html_url')  # Может быть None
         custom_name = data.get('custom_name')
-        exchange_name = data.get('exchange_name')
-        api_urls_list = data.get('api_urls_list', [])
-        html_urls_list = data.get('html_urls_list', [])
 
         def add_link_operation(session):
             new_link = ApiLink(
                 name=custom_name,
-                url=url,
-                exchange=exchange_name,
+                url=api_url,  # Для совместимости
+                api_url=api_url,  # НОВОЕ
+                html_url=html_url,  # НОВОЕ (может быть None)
                 check_interval=interval_seconds,
                 added_by=callback.from_user.id
             )
-            # Сохраняем множественные URL
-            new_link.set_api_urls(api_urls_list)
-            new_link.set_html_urls(html_urls_list)
             session.add(new_link)
             session.flush()
             return new_link
@@ -506,29 +406,14 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
 
         # Формируем детальное сообщение
         message_parts = [
-            "✅ <b>Ссылка успешно добавлена!</b>\n",
+            "✅ <b>Ссылка успешно добавлена!</b>\n\n",
             f"<b>Имя:</b> {custom_name}\n",
-            f"<b>Биржа:</b> {exchange_name}\n",
-            f"<b>Интервал проверки:</b> {interval_minutes} минут\n",
-            f"<b>Основной URL:</b> <code>{url}</code>\n"
+            f"<b>Интервал проверки:</b> {interval_minutes} минут\n\n",
+            f"<b>📡 API URL:</b>\n<code>{api_url}</code>\n"
         ]
 
-        if api_urls_list:
-            message_parts.append(f"\n<b>📡 API URLs ({len(api_urls_list)}):</b>\n")
-            for i, api_url in enumerate(api_urls_list[:3], 1):
-                message_parts.append(f"{i}. <code>{api_url}</code>\n")
-            if len(api_urls_list) > 3:
-                message_parts.append(f"... и еще {len(api_urls_list) - 3} URL\n")
-
-        if html_urls_list:
-            message_parts.append(f"\n<b>🌐 HTML URLs ({len(html_urls_list)}):</b>\n")
-            for i, html_url in enumerate(html_urls_list[:3], 1):
-                message_parts.append(f"{i}. <code>{html_url}</code>\n")
-            if len(html_urls_list) > 3:
-                message_parts.append(f"... и еще {len(html_urls_list) - 3} URL\n")
-
-        message_parts.append(f"\n<b>Система FALLBACK активирована!</b>\n")
-        message_parts.append(f"Бот автоматически выберет лучший метод парсинга.")
+        if html_url:
+            message_parts.append(f"\n<b>🌐 HTML URL (fallback):</b>\n<code>{html_url}</code>\n")
 
         await callback.message.edit_text(
             "".join(message_parts),
@@ -614,7 +499,6 @@ async def process_link_selection(callback: CallbackQuery):
             await callback.message.edit_text(
                 f"⚠️ <b>Вы уверены что хотите удалить ссылку?</b>\n\n"
                 f"<b>Название:</b> {link.name}\n"
-                f"<b>Биржа:</b> {link.exchange}\n"
                 f"<b>URL:</b> <code>{link.url}</code>\n\n"
                 f"Это действие нельзя отменить!",
                 reply_markup=keyboard,
@@ -637,18 +521,16 @@ async def process_confirmation(callback: CallbackQuery):
             link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
             if not link:
                 raise ValueError("Ссылка не найдена")
-            
-            link_name = link.name
-            link_exchange = link.exchange
-            session.delete(link)
-            return link_name, link_exchange
 
-        link_name, link_exchange = atomic_operation(delete_link_operation)
-        
+            link_name = link.name
+            session.delete(link)
+            return link_name
+
+        link_name = atomic_operation(delete_link_operation)
+
         await callback.message.edit_text(
             f"✅ <b>Ссылка успешно удалена!</b>\n\n"
-            f"<b>Название:</b> {link_name}\n"
-            f"<b>Биржа:</b> {link_exchange}\n\n"
+            f"<b>Название:</b> {link_name}\n\n"
             f"Ссылка больше не будет проверяться.",
             parse_mode="HTML"
         )

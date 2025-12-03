@@ -6,23 +6,25 @@ HTML ШАБЛОНЫ ДЛЯ ПАРСИНГА ПРОМОАКЦИЙ С БИРЖ
 
 HTML_PROMO_STRUCTURE = {
     "bybit": {
-        "container": "div.event-item, div.promo-item, div.activity-item, [class*='event'], [class*='promo'], [class*='activity']",
-        "title": "h3, h4, .title, .name, [class*='title'], [class*='name']",
-        "description": ".description, .desc, .details, .info, [class*='desc'], [class*='detail']",
-        "link": "a[href], button[onclick], [class*='btn'], [class*='link'], [class*='join']",
-        "time": ".time, .date, .period, [class*='time'], [class*='date']",
-        "prize": ".prize, .reward, .pool, [class*='prize'], [class*='reward']",
-        "participants": ".participants, .users, .count, [class*='participant']",
-        "image": "img[src], [class*='image'], [class*='icon'], [class*='logo']"
+        "container": "div[class*='OnGoingProjectCard_projectCard'], div[class*='ProjectCard']",
+        "title": "div[class*='OnGoingProjectCard_title'], h3, h4",
+        "description": "div[class*='OnGoingProjectCard_info'], div[class*='info']",
+        "link": "a[href]",
+        "time": "div[class*='time'], div[class*='date'], span[class*='countdown']",
+        "prize": "div[class*='infoItemLabel'], div[class*='prize'], div[class*='pool']",
+        "participants": "div[class*='participant'], div[class*='users']",
+        "image": "img[src]"
     },
     "mexc": {
-        "container": "div.launchpad-item, div.project-item, [class*='launchpad'], [class*='project']",
-        "title": "h4, h3, .project-name, .project-title, [class*='name'], [class*='title']",
-        "description": ".project-desc, .project-info, .description, [class*='desc'], [class*='info']",
-        "link": "a.join-button, a[href*='launchpad'], button, [class*='btn'], [class*='join']",
-        "progress": ".progress, .progress-bar, [class*='progress']",
-        "time": ".time, .date, .period, [class*='time'], [class*='date']",
-        "token": ".token, .symbol, [class*='token'], [class*='symbol']"
+        "container": "a[class*='CardLink_card-activity'], a[class*='card_card-activity']",
+        "title": "h3[class*='card_leftText'], div[class*='card_itemTitle'], h3, h4",
+        "description": "div[class*='card_item'], div[class*='desc']",
+        "link": "self",  # Special: container itself is a link
+        "progress": "div[class*='progress']",
+        "time": "div[class*='time'], div[class*='date']",
+        "token": "div[class*='token'], span[class*='symbol']",
+        "prize": "div[class*='prize'], div[class*='reward']",
+        "image": "img[src]"
     },
     "binance": {
         "container": "div.activity-item, div.launchpad-item, [class*='activity'], [class*='launchpad']",
@@ -61,10 +63,12 @@ HTML_PROMO_STRUCTURE = {
 HTML_BASE_URLS = {
     "bybit": [
         "https://www.bybit.com/en/trade/spot/token-splash",
+        "https://www.bybit.com/trade/spot/token-splash"
     ],
     "mexc": [
         "https://www.mexc.com/launchpad",
-        "https://www.mexc.com/activity"
+        "https://www.mexc.com/token-airdrop",
+        "https://www.mexc.com/ru-RU/launchpad"
     ],
     "binance": [
         "https://www.binance.com/ru/activity",

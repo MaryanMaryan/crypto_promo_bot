@@ -35,6 +35,9 @@ class BrowserParser(BaseParser):
             logger.info(f"   Биржа: {self.exchange}")
             logger.info(f"   URL: {self.url}")
 
+            # Проверяем, API это или HTML
+            is_api_request = self._is_api_url(self.url)
+
             # Получаем прокси и User-Agent из системы ротации
             proxy, user_agent = self.rotation_manager.get_optimal_combination(self.exchange)
 
@@ -42,27 +45,211 @@ class BrowserParser(BaseParser):
                 logger.warning(f"⚠️ Прокси/User-Agent не доступны для {self.exchange}")
                 logger.warning(f"🔄 Работаем БЕЗ прокси (может быть заблокировано)")
 
-            # Запускаем браузер
-            html_content = self._fetch_with_browser(proxy, user_agent)
+            if is_api_request:
+                # Для API получаем JSON напрямую
+                logger.info(f"📡 Обнаружен API endpoint, получаем JSON через браузер")
+                json_data = self._fetch_json_with_browser(proxy, user_agent)
 
-            if not html_content:
-                logger.error(f"❌ Не удалось получить HTML контент")
-                return []
+                if not json_data:
+                    logger.error(f"❌ Не удалось получить JSON из API")
+                    return []
 
-            logger.info(f"✅ HTML контент получен, размер: {len(html_content)} символов")
+                # Парсим JSON (используем логику из universal_parser)
+                from .universal_parser import UniversalParser
+                parser = UniversalParser(self.url)
+                # Передаем уже полученный JSON через публичный метод
+                promotions = parser.parse_json_data(json_data)
 
-            # Парсим HTML
-            promotions = self._parse_html_content(html_content)
+                logger.info(f"✅ BrowserParser (API): Найдено {len(promotions)} промоакций")
+                return promotions
+            else:
+                # Для HTML парсим страницу
+                html_content = self._fetch_with_browser(proxy, user_agent)
 
-            logger.info(f"✅ BrowserParser: Найдено {len(promotions)} промоакций")
-            for i, promo in enumerate(promotions[:5], 1):
-                logger.info(f"   {i}. {promo.get('title', 'Без названия')}")
+                if not html_content:
+                    logger.error(f"❌ Не удалось получить HTML контент")
+                    return []
 
-            return promotions
+                logger.info(f"✅ HTML контент получен, размер: {len(html_content)} символов")
+
+                # Парсим HTML
+                promotions = self._parse_html_content(html_content)
+
+                logger.info(f"✅ BrowserParser: Найдено {len(promotions)} промоакций")
+                for i, promo in enumerate(promotions[:5], 1):
+                    logger.info(f"   {i}. {promo.get('title', 'Без названия')}")
+
+                return promotions
 
         except Exception as e:
             logger.error(f"❌ Ошибка BrowserParser: {e}", exc_info=True)
             return []
+
+    def _is_api_url(self, url: str) -> bool:
+        """Проверяет, является ли URL API endpoint'ом"""
+        api_indicators = ['/api/', '/x-api/', '/v1/', '/v2/', '/v3/', '/v4/', '/v5/']
+        return any(indicator in url.lower() for indicator in api_indicators)
+
+    def _fetch_json_with_browser(self, proxy, user_agent) -> Optional[dict]:
+        """Загружает JSON из API через Playwright с прокси и User-Agent"""
+        playwright = None
+        try:
+            import json
+            playwright = sync_playwright().start()
+
+            # Настройки браузера
+            browser_args = [
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-web-security',
+            ]
+
+            # Настройки прокси (для ротирующихся прокси cooldown не нужен)
+            proxy_config = None
+
+            if proxy:
+                proxy_address = proxy.address
+                username = None
+                password = None
+
+                if '@' in proxy_address:
+                    auth_part, server_part = proxy_address.split('@', 1)
+                    if ':' in auth_part:
+                        username, password = auth_part.split(':', 1)
+                        proxy_address = server_part
+
+                proxy_config = {
+                    'server': f"{proxy.protocol}://{proxy_address}",
+                }
+
+                if username and password:
+                    proxy_config['username'] = username
+                    proxy_config['password'] = password
+                    logger.info(f"🔧 Используем ротирующийся прокси: {proxy_address} (с авторизацией)")
+                else:
+                    logger.info(f"🔧 Используем ротирующийся прокси: {proxy_address}")
+            else:
+                logger.info(f"🌐 Работаем БЕЗ прокси (direct connection)")
+
+            # Запускаем браузер
+            logger.debug(f"🚀 Запуск Chromium браузера для API запроса...")
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=browser_args,
+                proxy=proxy_config
+            )
+
+            # Создаём контекст с User-Agent (Chrome 141)
+            user_agent_string = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+            if user_agent and user_agent.user_agent_string:
+                user_agent_string = user_agent.user_agent_string
+
+            context_options = {
+                'viewport': {'width': 1920, 'height': 1080},
+                'locale': 'de-DE',
+                'timezone_id': 'Europe/Berlin',
+                'user_agent': user_agent_string,
+            }
+
+            context = browser.new_context(**context_options)
+
+            # API headers (более простые для JSON запросов)
+            context.set_extra_http_headers({
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'sec-ch-ua': '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+                'Priority': 'u=0, i',
+            })
+
+            # Маскируем автоматизацию
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                window.chrome = {
+                    runtime: {}
+                };
+            """)
+
+            # Открываем страницу
+            page = context.new_page()
+            logger.info(f"📡 Загрузка API: {self.url}")
+
+            start_time = time.time()
+            response = page.goto(self.url, wait_until='networkidle', timeout=30000)
+            response_time_ms = (time.time() - start_time) * 1000
+
+            if response and response.ok:
+                logger.info(f"✅ API запрос успешен: {response.status} ({response_time_ms:.0f}мс)")
+
+                # Получаем JSON из page content
+                content = page.content()
+
+                # Извлекаем JSON из pre tag если он там
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(content, 'html.parser')
+                pre_tag = soup.find('pre')
+
+                if pre_tag:
+                    json_text = pre_tag.get_text()
+                else:
+                    # Если нет pre tag, пробуем напрямую
+                    json_text = content
+
+                try:
+                    json_data = json.loads(json_text)
+                    logger.info(f"✅ JSON успешно распарсен")
+
+                    # Закрываем браузер
+                    context.close()
+                    browser.close()
+                    playwright.stop()
+
+                    # Логируем результат
+                    if proxy and user_agent:
+                        self.rotation_manager.handle_request_result(
+                            exchange=self.exchange,
+                            proxy_id=proxy.id,
+                            user_agent_id=user_agent.id,
+                            success=True,
+                            response_time_ms=response_time_ms,
+                            response_code=response.status
+                        )
+
+                    return json_data
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Ошибка парсинга JSON: {e}")
+                    logger.debug(f"Первые 500 символов контента: {json_text[:500]}")
+                    return None
+            else:
+                status = response.status if response else 'N/A'
+                logger.warning(f"⚠️ API запрос завершился с кодом: {status} ({response_time_ms:.0f}мс)")
+                return None
+
+        except PlaywrightError as e:
+            logger.error(f"❌ Playwright ошибка при API запросе: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Неожиданная ошибка при API запросе через браузер: {e}", exc_info=True)
+            return None
+        finally:
+            try:
+                if playwright:
+                    playwright.stop()
+            except:
+                pass
 
     def _fetch_with_browser(self, proxy, user_agent) -> Optional[str]:
         """Загружает страницу через Playwright с прокси и User-Agent"""
@@ -79,8 +266,9 @@ class BrowserParser(BaseParser):
                 '--disable-web-security',
             ]
 
-            # Настройки прокси если есть
+            # Настройки прокси (для ротирующихся прокси cooldown не нужен)
             proxy_config = None
+
             if proxy:
                 # Парсим прокси для Playwright (поддержка username:password@host:port)
                 proxy_address = proxy.address
@@ -102,9 +290,11 @@ class BrowserParser(BaseParser):
                 if username and password:
                     proxy_config['username'] = username
                     proxy_config['password'] = password
-                    logger.info(f"🔧 Используем прокси: {proxy_address} (с авторизацией)")
+                    logger.info(f"🔧 Используем ротирующийся прокси: {proxy_address} (с авторизацией)")
                 else:
-                    logger.info(f"🔧 Используем прокси: {proxy_address}")
+                    logger.info(f"🔧 Используем ротирующийся прокси: {proxy_address}")
+            else:
+                logger.info(f"🌐 Работаем БЕЗ прокси (direct connection)")
 
             # Запускаем браузер
             logger.debug(f"🚀 Запуск Chromium браузера...")
@@ -114,24 +304,31 @@ class BrowserParser(BaseParser):
                 proxy=proxy_config
             )
 
-            # Создаём контекст с User-Agent
+            # Создаём контекст с User-Agent (Chrome 141 для обхода Akamai)
+            user_agent_string = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+            if user_agent and user_agent.user_agent_string:
+                user_agent_string = user_agent.user_agent_string
+                logger.info(f"🔧 Используем User-Agent: {user_agent.browser_type} {user_agent.browser_version}")
+            else:
+                logger.info(f"🔧 Используем User-Agent по умолчанию: Chrome 141.0.0.0")
+
             context_options = {
                 'viewport': {'width': 1920, 'height': 1080},
-                'locale': 'en-US',
-                'timezone_id': 'America/New_York',
+                'locale': 'de-DE',  # Обновлено для соответствия антидетект-браузеру
+                'timezone_id': 'Europe/Berlin',  # Обновлено для соответствия DE locale
+                'user_agent': user_agent_string,
             }
-
-            if user_agent:
-                context_options['user_agent'] = user_agent.user_agent_string
-                logger.info(f"🔧 Используем User-Agent: {user_agent.browser_type} {user_agent.browser_version}")
 
             context = browser.new_context(**context_options)
 
-            # Добавляем реалистичные headers
+            # Добавляем реалистичные headers с sec-ch-ua (критично для обхода Akamai Bot Manager)
             context.set_extra_http_headers({
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',  # Добавлен zstd
+                'sec-ch-ua': '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
                 'DNT': '1',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
@@ -140,6 +337,7 @@ class BrowserParser(BaseParser):
                 'Sec-Fetch-Site': 'none',
                 'Sec-Fetch-User': '?1',
                 'Cache-Control': 'max-age=0',
+                'Priority': 'u=0, i',
             })
 
             # Маскируем автоматизацию

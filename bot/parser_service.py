@@ -2,6 +2,7 @@
 import logging
 import time
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 from data.database import get_db, get_db_session, PromoHistory, ApiLink
 from parsers.universal_fallback_parser import UniversalFallbackParser
 
@@ -9,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 class ParserService:
     """Сервис для управления парсерами с улучшенной обработкой ошибок"""
-    
+
     def __init__(self):
         self.parsers = {}
         self.stats = {
@@ -19,6 +20,55 @@ class ParserService:
             'new_promos_found': 0,
             'last_check_time': None
         }
+
+    def _convert_to_datetime(self, time_value: Any) -> Optional[datetime]:
+        """Конвертирует различные форматы времени в datetime объект"""
+        if not time_value:
+            return None
+
+        # Если уже datetime объект
+        if isinstance(time_value, datetime):
+            return time_value
+
+        # Если timestamp (миллисекунды)
+        if isinstance(time_value, (int, float)):
+            try:
+                # Если timestamp в миллисекундах (больше чем 10^10)
+                if time_value > 10**10:
+                    return datetime.fromtimestamp(time_value / 1000)
+                else:
+                    return datetime.fromtimestamp(time_value)
+            except (ValueError, OSError) as e:
+                logger.warning(f"⚠️ Не удалось конвертировать timestamp {time_value}: {e}")
+                return None
+
+        # Если строка
+        if isinstance(time_value, str):
+            # Пробуем различные форматы даты
+            date_formats = [
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%dT%H:%M:%S',
+                '%Y-%m-%dT%H:%M:%SZ',
+                '%Y-%m-%dT%H:%M:%S.%fZ',
+                '%Y-%m-%d',
+                '%d.%m.%Y %H:%M',
+                '%d.%m.%Y',
+                '%d/%m/%Y %H:%M',
+                '%d/%m/%Y',
+            ]
+
+            for fmt in date_formats:
+                try:
+                    return datetime.strptime(time_value, fmt)
+                except ValueError:
+                    continue
+
+            # Если не удалось распарсить как дату, возвращаем None
+            logger.debug(f"⚠️ Не удалось конвертировать строку времени: {time_value}")
+            return None
+
+        logger.warning(f"⚠️ Неизвестный формат времени: {type(time_value)} - {time_value}")
+        return None
     
     def check_for_new_promos(self, link_id: int, url: str) -> List[Dict[str, Any]]:
         """Проверяет новые промоакции для указанной ссылки"""
@@ -29,29 +79,22 @@ class ParserService:
             logger.info(f"🔍 ParserService: Начало проверки ссылки {link_id}")
             logger.info(f"   Основной URL: {url}")
 
-            # Получаем дополнительные URL из базы данных
-            api_urls = []
-            html_urls = []
+            # Получаем URL из базы данных (новая система)
+            api_url = None
+            html_url = None
 
             with get_db_session() as db:
                 link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
                 if link:
-                    api_urls = link.get_api_urls()
-                    html_urls = link.get_html_urls()
+                    api_url = link.get_primary_api_url()
+                    html_url = link.get_primary_html_url()
 
-            logger.info(f"📡 Дополнительные API URLs: {len(api_urls)}")
-            if api_urls:
-                for i, api_url in enumerate(api_urls, 1):
-                    logger.info(f"   {i}. {api_url}")
+            logger.info(f"📡 API URL: {api_url or 'Не указан'}")
+            logger.info(f"🌐 HTML URL (fallback): {html_url or 'Не указан'}")
 
-            logger.info(f"🌐 Дополнительные HTML URLs: {len(html_urls)}")
-            if html_urls:
-                for i, html_url in enumerate(html_urls, 1):
-                    logger.info(f"   {i}. {html_url}")
-
-            # Создаем парсер с улучшенной обработкой ошибок и множественными URL
-            logger.debug(f"🔧 Создание UniversalFallbackParser с {len(api_urls)} API и {len(html_urls)} HTML URLs")
-            parser = UniversalFallbackParser(url, api_urls=api_urls, html_urls=html_urls)
+            # Создаем парсер с одиночными URL
+            logger.debug(f"🔧 Создание UniversalFallbackParser")
+            parser = UniversalFallbackParser(url, api_url=api_url, html_url=html_url)
 
             logger.info(f"📡 Запуск парсинга...")
             promotions = parser.get_promotions()
@@ -170,8 +213,8 @@ class ParserService:
                             description=promo.get('description', ''),
                             total_prize_pool=promo.get('total_prize_pool', ''),
                             award_token=promo.get('award_token', ''),
-                            start_time=promo.get('start_time') or None,
-                            end_time=promo.get('end_time') or None,
+                            start_time=self._convert_to_datetime(promo.get('start_time')),
+                            end_time=self._convert_to_datetime(promo.get('end_time')),
                             link=promo.get('link', ''),
                             icon=promo.get('icon', '')
                         )

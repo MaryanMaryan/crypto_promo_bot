@@ -31,6 +31,7 @@ class ProxyServer:
     priority: int
     last_used: float
     last_success: float
+    last_blocked: float = 0  # Время последней блокировки (403/429)
 
 class ProxyManager:
     def __init__(self, db_path: str = "data/database.db"):
@@ -60,9 +61,17 @@ class ProxyManager:
                         fail_count INTEGER DEFAULT 0,
                         priority INTEGER DEFAULT 5,
                         last_used REAL DEFAULT 0,
-                        last_success REAL DEFAULT 0
+                        last_success REAL DEFAULT 0,
+                        last_blocked REAL DEFAULT 0
                     )
                 ''')
+
+                # Добавляем колонку last_blocked если её нет (для существующих БД)
+                try:
+                    cursor.execute("SELECT last_blocked FROM ProxyServer LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute("ALTER TABLE ProxyServer ADD COLUMN last_blocked REAL DEFAULT 0")
+                    self.logger.info("Добавлена колонка last_blocked в таблицу ProxyServer")
                 
                 # Создаем индексы для оптимизации
                 cursor.execute('''
@@ -180,29 +189,40 @@ class ProxyManager:
                 
         return 0, False
 
-    def get_optimal_proxy(self, exchange: str = None) -> Optional[ProxyServer]:
-        """Выбор оптимального прокси на основе статистики"""
+    def get_optimal_proxy(self, exchange: str = None, cooldown_seconds: int = 0) -> Optional[ProxyServer]:
+        """Выбор оптимального прокси на основе статистики
+
+        Args:
+            exchange: Название биржи (не используется в текущей версии)
+            cooldown_seconds: Время в секундах, в течение которого прокси исключается после блокировки (по умолчанию 0 = нет cooldown для ротирующихся прокси)
+        """
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                
+
+                current_time = time.time()
+                cooldown_threshold = current_time - cooldown_seconds
+
                 # Формула выбора: success_rate * 0.6 + speed_score * 0.3 + priority_score * 0.1
+                # Понижен порог до 0.0 чтобы новые прокси тоже проходили
+                # ДЛЯ РОТИРУЮЩИХСЯ ПРОКСИ: cooldown_seconds = 0, поэтому все прокси всегда доступны
                 query = """
                     SELECT *,
                         (success_count * 1.0 / (success_count + fail_count + 1)) * 0.6 +
                         (1 - (speed_ms / 10000)) * 0.3 +
                         (priority * 0.1) as score
-                    FROM ProxyServer 
-                    WHERE status = 'active' 
-                    AND (success_count * 1.0 / (success_count + fail_count + 1)) >= 0.3
+                    FROM ProxyServer
+                    WHERE status = 'active'
+                    AND (success_count * 1.0 / (success_count + fail_count + 1)) >= 0.0
+                    AND (last_blocked = 0 OR last_blocked < ?)
                     ORDER BY score DESC, last_used ASC
                     LIMIT 1
                 """
-                
-                cursor.execute(query)
+
+                cursor.execute(query, (cooldown_threshold,))
                 result = cursor.fetchone()
-                
+
                 if result:
                     # Обновляем время последнего использования
                     cursor.execute(
@@ -210,7 +230,9 @@ class ProxyManager:
                         (time.time(), result['id'])
                     )
                     conn.commit()
-                    
+
+                    self.logger.info(f"🟢 Выбран прокси ID {result['id']} (ротирующийся)")
+
                     return ProxyServer(
                         id=result['id'],
                         address=result['address'],
@@ -221,39 +243,69 @@ class ProxyManager:
                         fail_count=result['fail_count'],
                         priority=result['priority'],
                         last_used=result['last_used'],
-                        last_success=result['last_success']
+                        last_success=result['last_success'],
+                        last_blocked=result['last_blocked'] if 'last_blocked' in result.keys() else 0
                     )
-                
-                # Если нет активных прокси, пытаемся взять любой
-                cursor.execute("SELECT * FROM ProxyServer ORDER BY last_success DESC LIMIT 1")
+
+                # Fallback: Если нет доступных прокси (что не должно происходить при cooldown=0)
+                self.logger.warning(f"⚠️ Нет доступных прокси, выбираем наименее недавно использованный")
+                cursor.execute("""
+                    SELECT * FROM ProxyServer
+                    WHERE status = 'active'
+                    ORDER BY last_used ASC, last_success DESC
+                    LIMIT 1
+                """)
                 result = cursor.fetchone()
-                return ProxyServer(**dict(result)) if result else None
+
+                if result:
+                    cursor.execute(
+                        "UPDATE ProxyServer SET last_used = ? WHERE id = ?",
+                        (time.time(), result['id'])
+                    )
+                    conn.commit()
+
+                    return ProxyServer(**dict(result))
+
+                return None
                 
         except Exception as e:
             self.logger.error(f"Ошибка получения оптимального прокси: {e}")
             return None
 
-    def update_proxy_stats(self, proxy_id: int, success: bool, response_time: float = 0):
+    def update_proxy_stats(self, proxy_id: int, success: bool, response_time: float = 0, response_code: int = None):
         """Обновление статистики прокси после запроса"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                
+
                 if success:
                     # ПРАВИЛЬНЫЙ расчет среднего значения скорости
                     cursor.execute('''
-                        UPDATE ProxyServer 
+                        UPDATE ProxyServer
                         SET success_count = success_count + 1,
                             speed_ms = (speed_ms * success_count + ?) / (success_count + 1),
                             last_success = ?
                         WHERE id = ?
                     ''', (response_time, time.time(), proxy_id))
                 else:
-                    cursor.execute('''
-                        UPDATE ProxyServer 
-                        SET fail_count = fail_count + 1
-                        WHERE id = ?
-                    ''', (proxy_id,))
+                    # Проверяем, является ли это блокировкой (403/429)
+                    is_blocked = response_code in [403, 429] if response_code else False
+
+                    if is_blocked:
+                        # Записываем время блокировки
+                        cursor.execute('''
+                            UPDATE ProxyServer
+                            SET fail_count = fail_count + 1,
+                                last_blocked = ?
+                            WHERE id = ?
+                        ''', (time.time(), proxy_id))
+                        self.logger.warning(f"🔴 Прокси ID {proxy_id} заблокирован (код {response_code})")
+                    else:
+                        cursor.execute('''
+                            UPDATE ProxyServer
+                            SET fail_count = fail_count + 1
+                            WHERE id = ?
+                        ''', (proxy_id,))
                 
                 # Проверяем, не нужно ли деактивировать прокси
                 cursor.execute('''

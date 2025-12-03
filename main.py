@@ -88,7 +88,8 @@ class CryptoPromoBot:
                         'name': link.name,
                         'url': link.url,
                         'check_interval': link.check_interval,
-                        'last_checked': link.last_checked
+                        'last_checked': link.last_checked,
+                        'exchange': link.exchange or 'Unknown'
                     })
 
             total_checked = 0
@@ -165,12 +166,12 @@ class CryptoPromoBot:
                         'id': link.id,
                         'name': link.name,
                         'url': link.url,
-                        'exchange': link.exchange
+                        'exchange': link.exchange or 'Unknown'
                     })
 
             logger.info(f"📊 Найдено {len(links_data)} активных ссылок для проверки:")
             for i, link_data in enumerate(links_data, 1):
-                logger.info(f"   {i}. {link_data['name']} ({link_data['exchange']}) - {link_data['url']}")
+                logger.info(f"   {i}. {link_data['name']} - {link_data['url']}")
 
             total_new_promos = 0
             checked_links = 0
@@ -261,7 +262,8 @@ class CryptoPromoBot:
                 link_data = {
                     'id': link.id,
                     'name': link.name,
-                    'url': link.url
+                    'url': link.url,
+                    'exchange': link.exchange or 'Unknown'
                 }
 
             logger.info(f"🔧 Принудительная проверка ссылки {link_data['name']} (ID: {link_id})")

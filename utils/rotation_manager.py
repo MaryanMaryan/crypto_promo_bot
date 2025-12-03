@@ -283,8 +283,8 @@ class RotationManager:
                 response_time_ms=response_time_ms
             )
             
-            # Обновляем статистику прокси
-            self.proxy_manager.update_proxy_stats(proxy_id, success, response_time_ms)
+            # Обновляем статистику прокси (передаем response_code для отслеживания блокировок)
+            self.proxy_manager.update_proxy_stats(proxy_id, success, response_time_ms, response_code)
             
             # Обновляем статистику User-Agent
             self.ua_manager.update_success_rate(user_agent_id, success)

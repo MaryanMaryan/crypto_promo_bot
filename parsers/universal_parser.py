@@ -89,6 +89,35 @@ class UniversalParser(BaseParser):
             data = response.json()
             logger.info(f"✅ JSON успешно распарсен")
 
+            # Используем публичный метод для парсинга JSON
+            return self.parse_json_data(data)
+
+        except requests.exceptions.Timeout:
+            logger.error(f"⏰ ТАЙМАУТ при запросе к API: {self.url}")
+            logger.error(f"   Проверьте доступность API или увеличьте таймаут")
+            return []
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"🔌 ОШИБКА СОЕДИНЕНИЯ с API: {self.url}")
+            logger.error(f"   Детали: {e}")
+            return []
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"🌐 HTTP ОШИБКА при запросе к API: {e.response.status_code}")
+            logger.error(f"   URL: {self.url}")
+            logger.error(f"   Ответ сервера: {e.response.text[:200]}...")
+            return []
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ ОШИБКА ПАРСИНГА JSON от API: {self.url}")
+            logger.error(f"   Детали: {e}")
+            logger.error(f"   Возможно, API вернул HTML вместо JSON")
+            return []
+        except Exception as e:
+            logger.error(f"❌ НЕОЖИДАННАЯ ОШИБКА при парсинге API: {self.url}")
+            logger.error(f"   Детали: {e}", exc_info=True)
+            return []
+
+    def parse_json_data(self, data: Any) -> List[Dict[str, Any]]:
+        """Публичный метод для парсинга готового JSON данных (для использования в browser_parser)"""
+        try:
             # Автоматически находим промоакции в JSON
             logger.info(f"🔍 Поиск объектов-промоакций в JSON структуре...")
             all_items = self._find_all_objects(data)
@@ -113,27 +142,8 @@ class UniversalParser(BaseParser):
 
             return promotions
 
-        except requests.exceptions.Timeout:
-            logger.error(f"⏰ ТАЙМАУТ при запросе к API: {self.url}")
-            logger.error(f"   Проверьте доступность API или увеличьте таймаут")
-            return []
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"🔌 ОШИБКА СОЕДИНЕНИЯ с API: {self.url}")
-            logger.error(f"   Детали: {e}")
-            return []
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"🌐 HTTP ОШИБКА при запросе к API: {e.response.status_code}")
-            logger.error(f"   URL: {self.url}")
-            logger.error(f"   Ответ сервера: {e.response.text[:200]}...")
-            return []
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ ОШИБКА ПАРСИНГА JSON от API: {self.url}")
-            logger.error(f"   Детали: {e}")
-            logger.error(f"   Возможно, API вернул HTML вместо JSON")
-            return []
         except Exception as e:
-            logger.error(f"❌ НЕОЖИДАННАЯ ОШИБКА при парсинге API: {self.url}")
-            logger.error(f"   Детали: {e}", exc_info=True)
+            logger.error(f"❌ Ошибка парсинга JSON данных: {e}", exc_info=True)
             return []
 
     def _find_all_objects(self, data: Any, depth: int = 0) -> List[Dict]:

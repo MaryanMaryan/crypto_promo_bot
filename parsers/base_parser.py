@@ -66,6 +66,46 @@ class BaseParser:
         # Подготавливаем параметры запроса
         headers = kwargs.get('headers', {})
 
+        # Определяем тип запроса (API или HTML)
+        is_api_request = any(indicator in url.lower() for indicator in ['/api/', '/x-api/', '/v1/', '/v2/', '/v3/', '/v4/', '/v5/'])
+
+        if is_api_request:
+            # Заголовки для API запросов
+            api_headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+            }
+            headers.update(api_headers)
+        else:
+            # Заголовки для HTML/браузерных запросов
+            browser_headers = {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+            }
+
+            # Специальные заголовки для Bybit
+            if 'bybit' in exchange.lower():
+                browser_headers.update({
+                    'Referer': 'https://www.bybit.com/',
+                    'Origin': 'https://www.bybit.com',
+                    'Sec-Ch-Ua': '"Google Chrome";v="120", "Chromium";v="120", "Not_A Brand";v="99"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"Windows"',
+                })
+
+            headers.update(browser_headers)
+
         if use_fallback:
             # Fallback User-Agent - современный Chrome на Windows
             headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'

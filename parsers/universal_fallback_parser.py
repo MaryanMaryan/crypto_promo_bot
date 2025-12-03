@@ -82,9 +82,12 @@ class UniversalFallbackParser(BaseParser):
                 logger.info("-" * 60)
                 logger.info(f"🔄 Стратегия {i}/{len(strategy_priority)}: {strategy.upper()}")
 
-                if strategy == "api" and self._is_api_url():
+                if strategy == "api" and (self._is_api_url() or self.api_url):
                     logger.info(f"🔧 Начало API парсинга для {self.exchange}")
-                    logger.info(f"   URL распознан как API endpoint: {self.url}")
+                    if self.api_url:
+                        logger.info(f"   API URL задан: {self.api_url}")
+                    if self._is_api_url():
+                        logger.info(f"   Главный URL распознан как API endpoint: {self.url}")
 
                     api_results = self._parse_via_api()
 
@@ -130,8 +133,8 @@ class UniversalFallbackParser(BaseParser):
                         logger.warning(f"⚠️ Browser парсинг не вернул результатов")
 
                 else:
-                    if strategy == "api" and not self._is_api_url():
-                        logger.info(f"⏭️ Пропускаем API парсинг: URL не является API endpoint")
+                    if strategy == "api" and not self._is_api_url() and not self.api_url:
+                        logger.info(f"⏭️ Пропускаем API парсинг: нет API URL")
 
             except Exception as e:
                 logger.error(f"❌ ОШИБКА в стратегии {strategy} для {self.exchange}: {e}", exc_info=True)
@@ -153,10 +156,15 @@ class UniversalFallbackParser(BaseParser):
             return []
     
     def _get_strategy_priority(self) -> List[str]:
-        """Определяет приоритет стратегий для каждой биржи"""
+        """Определяет приоритет стратегий для каждой биржи
+
+        ВАЖНО: MEXC и Bybit используют Akamai Bot Manager, поэтому browser парсер - приоритет #1
+        """
         strategy_map = {
-            "bybit": ["html", "api", "browser"],
-            "mexc": ["api", "html", "browser"],
+            # Сайты с Akamai защитой - приоритет browser парсеру
+            "bybit": ["browser", "html", "api"],  # Akamai защита, browser первый
+            "mexc": ["browser", "api", "html"],   # Akamai защита, browser первый
+            # Остальные сайты - стандартные стратегии
             "binance": ["html", "browser"],
             "gate": ["html", "browser"],
             "okx": ["html", "browser"],
@@ -351,23 +359,35 @@ class UniversalFallbackParser(BaseParser):
                 'data_source': 'html',
                 'source_url': source_url
             }
-            
+
             title_element = container.select_one(selectors['title'])
             if title_element:
                 promo['title'] = title_element.get_text(strip=True)
-            
+
             desc_element = container.select_one(selectors.get('description', ''))
             if desc_element:
                 promo['description'] = desc_element.get_text(strip=True)
-            
-            link_element = container.select_one(selectors.get('link', ''))
-            if link_element and link_element.get('href'):
-                link = link_element.get('href')
-                if link.startswith('/'):
-                    base_domain = '/'.join(source_url.split('/')[:3])
-                    promo['link'] = base_domain + link
-                else:
-                    promo['link'] = link
+
+            # Обработка ссылки
+            link_selector = selectors.get('link', '')
+            if link_selector == 'self':
+                # Контейнер сам является ссылкой (например, <a> тег)
+                if container.name == 'a' and container.get('href'):
+                    link = container.get('href')
+                    if link.startswith('/'):
+                        base_domain = '/'.join(source_url.split('/')[:3])
+                        promo['link'] = base_domain + link
+                    else:
+                        promo['link'] = link
+            else:
+                link_element = container.select_one(link_selector)
+                if link_element and link_element.get('href'):
+                    link = link_element.get('href')
+                    if link.startswith('/'):
+                        base_domain = '/'.join(source_url.split('/')[:3])
+                        promo['link'] = base_domain + link
+                    else:
+                        promo['link'] = link
             
             time_element = container.select_one(selectors.get('time', ''))
             if time_element:
