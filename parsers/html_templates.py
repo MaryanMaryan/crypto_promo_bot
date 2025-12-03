@@ -16,10 +16,21 @@ HTML_PROMO_STRUCTURE = {
         "image": "img[src]"
     },
     "mexc": {
-        "container": "a[class*='CardLink_card-activity'], a[class*='card_card-activity']",
+        "container": "a[class*='CardLink_card']",
         "title": "h3[class*='card_leftText'], div[class*='card_itemTitle'], h3, h4",
         "description": "div[class*='card_item'], div[class*='desc']",
         "link": "self",  # Special: container itself is a link
+        "progress": "div[class*='progress']",
+        "time": "div[class*='time'], div[class*='date']",
+        "token": "div[class*='token'], span[class*='symbol']",
+        "prize": "div[class*='prize'], div[class*='reward']",
+        "image": "img[src]"
+    },
+    "mexc_airdrop": {
+        "container": "div[class*='list-activity-item_activityItem']",
+        "title": "h3[class*='card_leftText'], div[class*='card_itemTitle'], div[class*='itemTitle'], h3, h4",
+        "description": "div[class*='card_item'], div[class*='itemDesc'], div[class*='desc']",
+        "link": "a[href]",
         "progress": "div[class*='progress']",
         "time": "div[class*='time'], div[class*='date']",
         "token": "div[class*='token'], span[class*='symbol']",

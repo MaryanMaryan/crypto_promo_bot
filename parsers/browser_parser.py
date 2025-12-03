@@ -3,6 +3,7 @@
 BROWSER PARSER С PLAYWRIGHT
 Парсинг динамических сайтов с JavaScript через реальный браузер
 Интегрирован с системой ротации прокси и User-Agent
++ playwright-stealth для обхода детекции автоматизации
 """
 
 import logging
@@ -10,6 +11,7 @@ import time
 from typing import List, Dict, Any, Optional
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page, Error as PlaywrightError
+from playwright_stealth import Stealth
 
 from .base_parser import BaseParser
 from .html_templates import get_html_selectors
@@ -66,8 +68,13 @@ class BrowserParser(BaseParser):
                 # Для HTML парсим страницу
                 html_content = self._fetch_with_browser(proxy, user_agent)
 
+                # FALLBACK: Если прокси не работает, пробуем без прокси
+                if not html_content and proxy:
+                    logger.warning(f"⚠️ Прокси не работает, пробуем БЕЗ прокси (direct connection)")
+                    html_content = self._fetch_with_browser(None, user_agent, use_proxy=False)
+
                 if not html_content:
-                    logger.error(f"❌ Не удалось получить HTML контент")
+                    logger.error(f"❌ Не удалось получить HTML контент даже без прокси")
                     return []
 
                 logger.info(f"✅ HTML контент получен, размер: {len(html_content)} символов")
@@ -185,11 +192,35 @@ class BrowserParser(BaseParser):
 
             # Открываем страницу
             page = context.new_page()
+
+            # Применяем playwright-stealth для обхода детекции
+            logger.debug(f"Применяем playwright-stealth для маскировки автоматизации")
+            stealth = Stealth()
+            stealth.apply_stealth_sync(page)
+
             logger.info(f"📡 Загрузка API: {self.url}")
 
             start_time = time.time()
-            response = page.goto(self.url, wait_until='networkidle', timeout=30000)
+            # Используем domcontentloaded вместо networkidle для Akamai защиты
+            # networkidle может никогда не наступить из-за постоянных фоновых запросов Akamai
+            response = page.goto(self.url, wait_until='domcontentloaded', timeout=30000)
             response_time_ms = (time.time() - start_time) * 1000
+
+            # Дополнительное время для JavaScript и Akamai проверок
+            logger.debug(f"⏳ Ожидание выполнения JavaScript и Akamai проверок...")
+            page.wait_for_timeout(5000)  # 5 секунд на Akamai и JS
+
+            # Проверяем наличие GeeTest капчи
+            geetest_present = page.evaluate("""
+                () => {
+                    return document.querySelector('.geetest_captcha') !== null ||
+                           document.querySelector('[class*="geetest"]') !== null;
+                }
+            """)
+
+            if geetest_present:
+                logger.warning(f"⚠️ Обнаружена GeeTest капча, ожидаем дополнительно 10 секунд...")
+                page.wait_for_timeout(10000)
 
             if response and response.ok:
                 logger.info(f"✅ API запрос успешен: {response.status} ({response_time_ms:.0f}мс)")
@@ -251,8 +282,14 @@ class BrowserParser(BaseParser):
             except:
                 pass
 
-    def _fetch_with_browser(self, proxy, user_agent) -> Optional[str]:
-        """Загружает страницу через Playwright с прокси и User-Agent"""
+    def _fetch_with_browser(self, proxy, user_agent, use_proxy=True) -> Optional[str]:
+        """Загружает страницу через Playwright с прокси и User-Agent
+
+        Args:
+            proxy: Прокси объект
+            user_agent: User-Agent объект
+            use_proxy: Использовать ли прокси (по умолчанию True)
+        """
         playwright = None
         try:
             playwright = sync_playwright().start()
@@ -269,7 +306,7 @@ class BrowserParser(BaseParser):
             # Настройки прокси (для ротирующихся прокси cooldown не нужен)
             proxy_config = None
 
-            if proxy:
+            if proxy and use_proxy:
                 # Парсим прокси для Playwright (поддержка username:password@host:port)
                 proxy_address = proxy.address
                 username = None
@@ -362,12 +399,19 @@ class BrowserParser(BaseParser):
 
             # Открываем страницу
             page = context.new_page()
+
+            # Применяем playwright-stealth для обхода детекции
+            logger.debug(f"Применяем playwright-stealth для маскировки автоматизации")
+            stealth = Stealth()
+            stealth.apply_stealth_sync(page)
+
             logger.info(f"📡 Загрузка страницы: {self.url}")
 
             start_time = time.time()
 
-            # Переходим на страницу с таймаутом
-            response = page.goto(self.url, wait_until='networkidle', timeout=30000)
+            # Используем domcontentloaded вместо networkidle для Akamai защиты
+            # networkidle может никогда не наступить из-за постоянных фоновых запросов Akamai
+            response = page.goto(self.url, wait_until='domcontentloaded', timeout=30000)
 
             response_time_ms = (time.time() - start_time) * 1000
 
@@ -377,23 +421,48 @@ class BrowserParser(BaseParser):
                 status = response.status if response else 'N/A'
                 logger.warning(f"⚠️ Страница загружена с кодом: {status} ({response_time_ms:.0f}мс)")
 
-            # Ждём полной загрузки JavaScript
-            logger.debug(f"⏳ Ожидание загрузки JavaScript контента...")
-            page.wait_for_timeout(3000)  # 3 секунды на выполнение JS
+            # Ждём полной загрузки JavaScript и Akamai проверок
+            logger.debug(f"⏳ Ожидание загрузки JavaScript контента и Akamai проверок...")
+            page.wait_for_timeout(8000)  # 8 секунд на выполнение JS и Akamai Bot Manager
+
+            # Проверяем наличие GeeTest капчи
+            geetest_present = page.evaluate("""
+                () => {
+                    return document.querySelector('.geetest_captcha') !== null ||
+                           document.querySelector('[class*="geetest"]') !== null ||
+                           window.location.href.includes('captcha');
+                }
+            """)
+
+            if geetest_present:
+                logger.warning(f"⚠️ Обнаружена GeeTest капча, ожидаем дополнительно 10 секунд...")
+                page.wait_for_timeout(10000)  # Дополнительное время для GeeTest
 
             # Скроллим страницу для загрузки lazy-load контента
+            logger.debug(f"📜 Скроллинг страницы для загрузки lazy-load контента...")
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(2000)
 
             # Получаем HTML контент
             html_content = page.content()
+
+            # DEBUG: Сохраняем HTML для анализа при проблемах с парсингом
+            if len(html_content) < 5000:
+                logger.warning(f"⚠️ HTML контент слишком короткий ({len(html_content)} символов)")
+                logger.debug(f"HTML Preview: {html_content[:500]}")
+
+            # DEBUG: Проверяем наличие признаков блокировки/капчи
+            blocking_indicators = ['captcha', 'Access Denied', 'Cloudflare', 'are you a robot', 'blocked']
+            for indicator in blocking_indicators:
+                if indicator.lower() in html_content.lower():
+                    logger.warning(f"⚠️ Обнаружен индикатор блокировки: '{indicator}'")
 
             # Закрываем браузер
             context.close()
             browser.close()
             playwright.stop()
 
-            logger.info(f"✅ HTML контент успешно получен через браузер")
+            logger.info(f"✅ HTML контент успешно получен через браузер ({len(html_content)} символов)")
 
             # Логируем результат в статистику если есть прокси
             if proxy and user_agent:
@@ -434,8 +503,27 @@ class BrowserParser(BaseParser):
                 logger.warning(f"⚠️ Нет селекторов для биржи {self.exchange}")
                 return []
 
+            # DEBUG: Логируем информацию о селекторах
+            logger.debug(f"🔍 Используем селектор контейнера: {selectors['container']}")
+
             containers = soup.select(selectors['container'])
             logger.info(f"🔍 Найдено {len(containers)} контейнеров для {self.exchange}")
+
+            # DEBUG: Если контейнеры не найдены, пытаемся понять почему
+            if len(containers) == 0:
+                logger.warning(f"⚠️ Контейнеры не найдены с селектором: {selectors['container']}")
+                # Проверяем альтернативные селекторы
+                alt_selectors = [
+                    "div[class*='card']", "div[class*='Card']",
+                    "div[class*='item']", "div[class*='Item']",
+                    "div[class*='project']", "div[class*='Project']",
+                    "a[class*='card']", "a[class*='Card']"
+                ]
+                for alt_sel in alt_selectors:
+                    alt_containers = soup.select(alt_sel)
+                    if len(alt_containers) > 0:
+                        logger.info(f"💡 Альтернативный селектор '{alt_sel}' нашел {len(alt_containers)} элементов")
+                        break
 
             promotions = []
 
@@ -470,6 +558,7 @@ class BrowserParser(BaseParser):
             title_element = container.select_one(selectors['title'])
             if title_element:
                 promo['title'] = title_element.get_text(strip=True)
+                logger.debug(f"DEBUG: Title extracted: {promo['title']}")
 
             # Извлекаем description
             desc_element = container.select_one(selectors.get('description', ''))
@@ -477,37 +566,64 @@ class BrowserParser(BaseParser):
                 promo['description'] = desc_element.get_text(strip=True)
 
             # Извлекаем link
-            link_element = container.select_one(selectors.get('link', ''))
-            if link_element and link_element.get('href'):
-                link = link_element.get('href')
-                if link.startswith('/'):
-                    base_domain = '/'.join(self.url.split('/')[:3])
-                    promo['link'] = base_domain + link
-                else:
-                    promo['link'] = link
+            link_selector = selectors.get('link', '')
+            logger.debug(f"DEBUG: Link selector: '{link_selector}'")
+            if link_selector == 'self':
+                # Контейнер сам является ссылкой (например, <a> тег)
+                logger.debug(f"DEBUG: Using 'self' link extraction")
+                if container.name == 'a' and container.get('href'):
+                    link = container.get('href')
+                    logger.debug(f"DEBUG: Raw href: {link}")
+                    if link.startswith('/'):
+                        base_domain = '/'.join(self.url.split('/')[:3])
+                        promo['link'] = base_domain + link
+                    else:
+                        promo['link'] = link
+                    logger.debug(f"DEBUG: Link extracted: {promo['link']}")
+            else:
+                link_element = container.select_one(link_selector)
+                if link_element and link_element.get('href'):
+                    link = link_element.get('href')
+                    if link.startswith('/'):
+                        base_domain = '/'.join(self.url.split('/')[:3])
+                        promo['link'] = base_domain + link
+                    else:
+                        promo['link'] = link
+                    logger.debug(f"DEBUG: Link extracted: {promo['link']}")
 
-            # Извлекаем остальные поля
-            time_element = container.select_one(selectors.get('time', ''))
-            if time_element:
-                promo['start_time'] = time_element.get_text(strip=True)
+            # Извлекаем остальные поля (только если селектор не пустой)
+            time_selector = selectors.get('time', '')
+            if time_selector:
+                time_element = container.select_one(time_selector)
+                if time_element:
+                    promo['start_time'] = time_element.get_text(strip=True)
 
-            prize_element = container.select_one(selectors.get('prize', ''))
-            if prize_element:
-                promo['total_prize_pool'] = prize_element.get_text(strip=True)
+            prize_selector = selectors.get('prize', '')
+            if prize_selector:
+                prize_element = container.select_one(prize_selector)
+                if prize_element:
+                    promo['total_prize_pool'] = prize_element.get_text(strip=True)
 
-            token_element = container.select_one(selectors.get('token', ''))
-            if token_element:
-                promo['award_token'] = token_element.get_text(strip=True)
+            token_selector = selectors.get('token', '')
+            if token_selector:
+                token_element = container.select_one(token_selector)
+                if token_element:
+                    promo['award_token'] = token_element.get_text(strip=True)
 
-            participants_element = container.select_one(selectors.get('participants', ''))
-            if participants_element:
-                promo['participants_count'] = participants_element.get_text(strip=True)
+            participants_selector = selectors.get('participants', '')
+            if participants_selector:
+                participants_element = container.select_one(participants_selector)
+                if participants_element:
+                    promo['participants_count'] = participants_element.get_text(strip=True)
 
-            image_element = container.select_one(selectors.get('image', ''))
-            if image_element and image_element.get('src'):
-                promo['icon'] = image_element.get('src')
+            image_selector = selectors.get('image', '')
+            if image_selector:
+                image_element = container.select_one(image_selector)
+                if image_element and image_element.get('src'):
+                    promo['icon'] = image_element.get('src')
 
             # Генерируем promo_id
+            logger.debug(f"DEBUG: Checking return condition - has title: {bool(promo.get('title'))}, has link: {bool(promo.get('link'))}")
             if promo.get('title') or promo.get('link'):
                 import hashlib
                 title = promo.get('title', '')
@@ -515,12 +631,15 @@ class BrowserParser(BaseParser):
                 stable_key = f"{self.exchange}_{title}_{link}"
                 content_hash = hashlib.md5(stable_key.encode('utf-8')).hexdigest()[:12]
                 promo['promo_id'] = f"{self.exchange}_browser_{content_hash}"
+                logger.debug(f"DEBUG: Promo_id generated: {promo['promo_id']}")
+                logger.debug(f"DEBUG: Returning promo: {promo}")
                 return promo
 
+            logger.debug(f"DEBUG: Return condition failed - no title or link")
             return None
 
         except Exception as e:
-            logger.debug(f"⚠️ Ошибка извлечения промо из контейнера: {e}")
+            logger.error(f"⚠️ Ошибка извлечения промо из контейнера: {e}", exc_info=True)
             return None
 
     def _is_valid_promo(self, promo: Dict[str, Any]) -> bool:
