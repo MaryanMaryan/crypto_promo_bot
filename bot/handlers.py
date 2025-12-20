@@ -30,16 +30,23 @@ user_selections = {}
 # СУЩЕСТВУЮЩИЕ СОСТОЯНИЯ FSM
 class AddLinkStates(StatesGroup):
     waiting_for_name = State()  # Шаг 1: Название биржи
-    waiting_for_api_url = State()  # Шаг 2: API ссылка (обязательно)
-    waiting_for_html_url = State()  # Шаг 3: HTML ссылка (опционально)
-    waiting_for_example_url = State()  # Шаг 4: Пример ссылки на промоакцию (опционально)
-    waiting_for_interval = State()  # Шаг 5: Интервал проверки
+    waiting_for_parsing_type = State()  # Шаг 2: Выбор типа парсинга
+    waiting_for_api_url = State()  # Шаг 3: API ссылка (опционально, зависит от типа)
+    waiting_for_html_url = State()  # Шаг 4: HTML ссылка (опционально, зависит от типа)
+    waiting_for_example_url = State()  # Шаг 5: Пример ссылки на промоакцию (опционально)
+    waiting_for_interval = State()  # Шаг 6: Интервал проверки
 
 class IntervalStates(StatesGroup):
     waiting_for_interval = State()
 
 class RenameLinkStates(StatesGroup):
     waiting_for_new_name = State()
+
+class ConfigureParsingStates(StatesGroup):
+    waiting_for_link_selection = State()  # Выбор ссылки для настройки
+    waiting_for_parsing_type_edit = State()  # Изменение типа парсинга
+    waiting_for_api_url_edit = State()  # Изменение API URL
+    waiting_for_html_url_edit = State()  # Изменение HTML URL
 
 # НОВЫЕ FSM СОСТОЯНИЯ
 class ProxyManagementStates(StatesGroup):
@@ -74,6 +81,7 @@ def get_management_keyboard():
     builder.add(InlineKeyboardButton(text="🗑️ Удалить ссылку", callback_data="manage_delete"))
     builder.add(InlineKeyboardButton(text="⏰ Изменить интервал", callback_data="manage_interval"))
     builder.add(InlineKeyboardButton(text="✏️ Переименовать ссылку", callback_data="manage_rename"))
+    builder.add(InlineKeyboardButton(text="🎯 Настроить парсинг", callback_data="manage_configure_parsing"))
     builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
     builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
     builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
@@ -83,10 +91,26 @@ def get_management_keyboard():
 
 def get_links_keyboard(links, action_type="delete"):
     builder = InlineKeyboardBuilder()
+
+    # Словарь иконок для типов парсинга
+    parsing_icons = {
+        'combined': '🔄',
+        'api': '📡',
+        'html': '🌐',
+        'browser': '🌐'
+    }
+
     for link in links:
         status_icon = "✅" if link.is_active else "❌"
+
+        # Добавляем иконку типа парсинга, если поле существует
+        parsing_icon = ""
+        if hasattr(link, 'parsing_type'):
+            parsing_type = link.parsing_type or 'combined'
+            parsing_icon = parsing_icons.get(parsing_type, '🔄') + " "
+
         builder.add(InlineKeyboardButton(
-            text=f"{status_icon} {link.name} ({link.check_interval}с)",
+            text=f"{status_icon} {parsing_icon}{link.name} ({link.check_interval}с)",
             callback_data=f"{action_type}_link_{link.id}"
         ))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
@@ -126,6 +150,29 @@ def get_toggle_parsing_keyboard(links, action_type="pause"):
             text=f"{status_icon} {link.name}",
             callback_data=f"{action_type}_link_{link.id}"
         ))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_configure_parsing_submenu(link_id):
+    """Подменю для настройки парсинга конкретной ссылки"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🎯 Изменить тип парсинга", callback_data=f"edit_parsing_type_{link_id}"))
+    builder.add(InlineKeyboardButton(text="📡 Изменить API URL", callback_data=f"edit_api_url_{link_id}"))
+    builder.add(InlineKeyboardButton(text="🌐 Изменить HTML URL", callback_data=f"edit_html_url_{link_id}"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_configure_parsing"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_parsing_type_keyboard(link_id):
+    """Клавиатура для выбора типа парсинга"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🔄 Комбинированный (API + HTML + Browser)", callback_data=f"set_parsing_type_{link_id}_combined"))
+    builder.add(InlineKeyboardButton(text="📡 Только API", callback_data=f"set_parsing_type_{link_id}_api"))
+    builder.add(InlineKeyboardButton(text="🌐 Только HTML", callback_data=f"set_parsing_type_{link_id}_html"))
+    builder.add(InlineKeyboardButton(text="🌐 Только Browser", callback_data=f"set_parsing_type_{link_id}_browser"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"show_parsing_config_{link_id}"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
     builder.adjust(1)
     return builder.as_markup()
@@ -221,8 +268,20 @@ async def menu_list_links(message: Message):
             for link in links:
                 status = "✅ Активна" if link.is_active else "❌ Остановлена"
                 interval_minutes = link.check_interval // 60
+
+                # Определяем отображение типа парсинга
+                parsing_type = link.parsing_type or 'combined'
+                parsing_type_icons = {
+                    'combined': '🔄 Комбинированный',
+                    'api': '📡 API',
+                    'html': '🌐 HTML',
+                    'browser': '🌐 Browser'
+                }
+                parsing_display = parsing_type_icons.get(parsing_type, '🔄 Комбинированный')
+
                 response += f"<b>{link.name}</b>\n"
                 response += f"Статус: {status}\n"
+                response += f"Парсинг: {parsing_display}\n"
                 response += f"Интервал: {interval_minutes} мин\n"
                 response += f"URL: <code>{link.url}</code>\n\n"
             
@@ -262,15 +321,90 @@ async def process_name_input(message: Message, state: FSMContext):
     # Сохраняем название
     await state.update_data(custom_name=custom_name)
 
+    # Создаем кнопки для выбора типа парсинга
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🔄 Комбинированный (API + HTML + Browser)", callback_data="parsing_type_combined"))
+    builder.add(InlineKeyboardButton(text="📡 Только API", callback_data="parsing_type_api"))
+    builder.add(InlineKeyboardButton(text="🌐 Только HTML", callback_data="parsing_type_html"))
+    builder.add(InlineKeyboardButton(text="🌐 Только Browser", callback_data="parsing_type_browser"))
+    builder.adjust(1)
+
     await message.answer(
         f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
-        f"📡 <b>Шаг 2/4:</b> Введите API ссылку\n\n"
-        f"Пример:\n"
-        f"<code>https://api.bybit.com/v5/promotion/list</code>\n\n"
-        f"API ссылка используется для автоматического парсинга.",
+        f"🎯 <b>Шаг 2/6:</b> Выберите тип парсинга\n\n"
+        f"<b>Типы парсинга:</b>\n"
+        f"• <b>Комбинированный</b> - пробует все методы (Browser → API → HTML)\n"
+        f"• <b>Только API</b> - быстрый, но может быть заблокирован\n"
+        f"• <b>Только HTML</b> - стабильный для статических страниц\n"
+        f"• <b>Только Browser</b> - обходит капчи и динамический контент\n\n"
+        f"Рекомендуется <b>Комбинированный</b> для лучшей надежности.",
+        reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
-    await state.set_state(AddLinkStates.waiting_for_api_url)
+    await state.set_state(AddLinkStates.waiting_for_parsing_type)
+
+@router.callback_query(AddLinkStates.waiting_for_parsing_type, F.data.startswith("parsing_type_"))
+async def process_parsing_type_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора типа парсинга"""
+    parsing_type = callback.data.replace("parsing_type_", "")
+
+    # Сохраняем тип парсинга
+    await state.update_data(parsing_type=parsing_type)
+
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+
+    # Определяем, какие URL нужно запросить в зависимости от типа парсинга
+    if parsing_type == 'api':
+        # Для API парсинга нужен только API URL
+        await callback.message.edit_text(
+            f"✅ Выбран тип: <b>Только API</b>\n\n"
+            f"📡 <b>Шаг 3/6:</b> Введите API ссылку\n\n"
+            f"Пример:\n"
+            f"<code>https://api.bybit.com/v5/promotion/list</code>\n\n"
+            f"API ссылка используется для автоматического парсинга.",
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_api_url)
+
+    elif parsing_type == 'html':
+        # Для HTML парсинга нужен только HTML URL
+        await callback.message.edit_text(
+            f"✅ Выбран тип: <b>Только HTML</b>\n\n"
+            f"🌐 <b>Шаг 3/6:</b> Введите HTML ссылку\n\n"
+            f"Пример:\n"
+            f"<code>https://www.bybit.com/en/trade/spot/token-splash</code>\n\n"
+            f"HTML ссылка используется для парсинга статических страниц.",
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_html_url)
+
+    elif parsing_type == 'browser':
+        # Для Browser парсинга нужен HTML URL (браузер открывает страницу)
+        await callback.message.edit_text(
+            f"✅ Выбран тип: <b>Только Browser</b>\n\n"
+            f"🌐 <b>Шаг 3/6:</b> Введите ссылку для браузерного парсинга\n\n"
+            f"Пример:\n"
+            f"<code>https://www.mexc.com/token-airdrop</code>\n\n"
+            f"Браузер откроет эту страницу и выполнит JavaScript для получения данных.",
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_html_url)
+
+    else:  # combined
+        # Для комбинированного парсинга запрашиваем API URL сначала
+        await callback.message.edit_text(
+            f"✅ Выбран тип: <b>Комбинированный</b>\n\n"
+            f"📡 <b>Шаг 3/6:</b> Введите API ссылку\n\n"
+            f"Пример:\n"
+            f"<code>https://api.bybit.com/v5/promotion/list</code>\n\n"
+            f"API ссылка используется для автоматического парсинга.\n"
+            f"Далее вы сможете добавить HTML/Browser URL как fallback.",
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_api_url)
+
+    await callback.answer()
 
 @router.message(AddLinkStates.waiting_for_api_url)
 async def process_api_url_input(message: Message, state: FSMContext):
@@ -468,11 +602,12 @@ async def process_example_url_input(message: Message, state: FSMContext):
                 # Сохраняем шаблон
                 url_builder = get_url_builder()
 
-                # Определяем exchange из домена
+                # Определяем exchange из домена (используем ту же логику что и в universal_parser)
                 from urllib.parse import urlparse
                 parsed = urlparse(example_url)
                 domain = parsed.netloc.replace('www.', '')
-                exchange = domain.split('.')[0]  # mexc, bybit, binance и т.д.
+                # Берем предпоследнюю часть домена (для web3.okx.com берем okx, а не web3)
+                exchange = domain.split('.')[-2] if len(domain.split('.')) >= 2 else domain.split('.')[0]
 
                 # Определяем тип промоакции из path
                 path_parts = [p for p in parsed.path.split('/') if p]
@@ -538,13 +673,15 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         api_url = data.get('api_url')
         html_url = data.get('html_url')  # Может быть None
         custom_name = data.get('custom_name')
+        parsing_type = data.get('parsing_type', 'combined')  # По умолчанию combined
 
         def add_link_operation(session):
             new_link = ApiLink(
                 name=custom_name,
-                url=api_url,  # Для совместимости
+                url=api_url or html_url,  # Для совместимости (берем первый доступный)
                 api_url=api_url,  # НОВОЕ
                 html_url=html_url,  # НОВОЕ (может быть None)
+                parsing_type=parsing_type,  # НОВОЕ: тип парсинга
                 check_interval=interval_seconds,
                 added_by=callback.from_user.id
             )
@@ -556,16 +693,28 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
 
         interval_minutes = interval_seconds // 60
 
+        # Определяем иконку и название типа парсинга
+        parsing_type_names = {
+            'combined': '🔄 Комбинированный',
+            'api': '📡 Только API',
+            'html': '🌐 Только HTML',
+            'browser': '🌐 Только Browser'
+        }
+        parsing_type_display = parsing_type_names.get(parsing_type, parsing_type)
+
         # Формируем детальное сообщение
         message_parts = [
             "✅ <b>Ссылка успешно добавлена!</b>\n\n",
             f"<b>Имя:</b> {custom_name}\n",
-            f"<b>Интервал проверки:</b> {interval_minutes} минут\n\n",
-            f"<b>📡 API URL:</b>\n<code>{api_url}</code>\n"
+            f"<b>Тип парсинга:</b> {parsing_type_display}\n",
+            f"<b>Интервал проверки:</b> {interval_minutes} минут\n\n"
         ]
 
+        if api_url:
+            message_parts.append(f"<b>📡 API URL:</b>\n<code>{api_url}</code>\n")
+
         if html_url:
-            message_parts.append(f"\n<b>🌐 HTML URL (fallback):</b>\n<code>{html_url}</code>\n")
+            message_parts.append(f"\n<b>🌐 HTML URL:</b>\n<code>{html_url}</code>\n")
 
         await callback.message.edit_text(
             "".join(message_parts),
@@ -622,7 +771,8 @@ async def manage_delete(callback: CallbackQuery):
                     'id': link.id,
                     'name': link.name,
                     'is_active': link.is_active,
-                    'check_interval': link.check_interval
+                    'check_interval': link.check_interval,
+                    'parsing_type': link.parsing_type or 'combined'
                 })())
 
             keyboard = get_links_keyboard(links_data, "delete")
@@ -721,7 +871,8 @@ async def manage_interval(callback: CallbackQuery):
                     'id': link.id,
                     'name': link.name,
                     'is_active': link.is_active,
-                    'check_interval': link.check_interval
+                    'check_interval': link.check_interval,
+                    'parsing_type': link.parsing_type or 'combined'
                 })())
 
             keyboard = get_links_keyboard(links_data, "interval")
@@ -751,7 +902,8 @@ async def manage_rename(callback: CallbackQuery):
                     'id': link.id,
                     'name': link.name,
                     'is_active': link.is_active,
-                    'check_interval': link.check_interval
+                    'check_interval': link.check_interval,
+                    'parsing_type': link.parsing_type or 'combined'
                 })())
 
             keyboard = get_links_keyboard(links_data, "rename")
@@ -1099,7 +1251,8 @@ async def manage_force_check(callback: CallbackQuery):
                     'id': link.id,
                     'name': link.name,
                     'is_active': link.is_active,
-                    'check_interval': link.check_interval
+                    'check_interval': link.check_interval,
+                    'parsing_type': link.parsing_type or 'combined'
                 })())
 
             keyboard = get_links_keyboard(links_data, "force_check")
@@ -1143,6 +1296,343 @@ async def process_force_check_link(callback: CallbackQuery):
         logger.error(f"❌ Ошибка при принудительной проверке ссылки: {e}")
         await callback.message.edit_text("❌ Ошибка при принудительной проверке ссылки")
         await callback.answer()
+
+# =============================================================================
+# НАСТРОЙКА ПАРСИНГА
+# =============================================================================
+
+@router.callback_query(F.data == "manage_configure_parsing")
+async def manage_configure_parsing(callback: CallbackQuery):
+    """Показывает список ссылок для настройки парсинга"""
+    try:
+        with get_db_session() as db:
+            links = db.query(ApiLink).all()
+
+            if not links:
+                await callback.message.edit_text("❌ У вас нет ссылок для настройки")
+                return
+
+            # Детач данных
+            links_data = []
+            for link in links:
+                links_data.append(type('Link', (), {
+                    'id': link.id,
+                    'name': link.name,
+                    'is_active': link.is_active,
+                    'check_interval': link.check_interval,
+                    'parsing_type': link.parsing_type or 'combined'
+                })())
+
+            keyboard = get_links_keyboard(links_data, "configure_parsing")
+            await callback.message.edit_text(
+                "🎯 <b>Настройка парсинга:</b>\n\n"
+                "Выберите ссылку для настройки:",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при настройке парсинга: {e}")
+        await callback.message.edit_text("❌ Ошибка при настройке парсинга")
+        await callback.answer()
+
+@router.callback_query(F.data.startswith("configure_parsing_link_"))
+async def show_parsing_configuration(callback: CallbackQuery):
+    """Показывает текущую конфигурацию парсинга и меню редактирования"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            # Детач данных
+            link_data = {
+                'id': link.id,
+                'name': link.name,
+                'parsing_type': link.parsing_type or 'combined',
+                'api_url': link.api_url,
+                'html_url': link.html_url
+            }
+
+        # Словарь для отображения типа парсинга с описанием
+        parsing_type_info = {
+            'combined': {
+                'name': '🔄 Комбинированный (API + HTML + Browser)',
+                'description': 'Пробует все методы по очереди для максимальной надёжности'
+            },
+            'api': {
+                'name': '📡 Только API',
+                'description': 'Быстрый метод через API запросы, может быть заблокирован'
+            },
+            'html': {
+                'name': '🌐 Только HTML',
+                'description': 'Парсинг HTML страниц, стабильный для статического контента'
+            },
+            'browser': {
+                'name': '🌐 Только Browser',
+                'description': 'Браузерная автоматизация, обходит капчи и защиты'
+            }
+        }
+
+        current_type = link_data['parsing_type']
+        type_info = parsing_type_info.get(current_type, parsing_type_info['combined'])
+
+        message_parts = [
+            f"🎯 <b>Настройка парсинга для:</b> {link_data['name']}\n\n",
+            f"<b>Текущий тип парсинга:</b>\n{type_info['name']}\n",
+            f"<i>{type_info['description']}</i>\n\n",
+        ]
+
+        if link_data['api_url']:
+            message_parts.append(f"<b>📡 API URL:</b>\n<code>{link_data['api_url']}</code>\n\n")
+        else:
+            message_parts.append(f"<b>📡 API URL:</b> <i>Не указан</i>\n\n")
+
+        if link_data['html_url']:
+            message_parts.append(f"<b>🌐 HTML URL:</b>\n<code>{link_data['html_url']}</code>\n\n")
+        else:
+            message_parts.append(f"<b>🌐 HTML URL:</b> <i>Не указан</i>\n\n")
+
+        message_parts.append("Выберите параметр для изменения:")
+
+        keyboard = get_configure_parsing_submenu(link_id)
+        await callback.message.edit_text(
+            "".join(message_parts),
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отображении конфигурации: {e}")
+        await callback.message.edit_text("❌ Ошибка при отображении конфигурации")
+        await callback.answer()
+
+@router.callback_query(F.data.startswith("show_parsing_config_"))
+async def show_parsing_config_callback(callback: CallbackQuery):
+    """Возврат к настройкам конкретной ссылки"""
+    link_id = int(callback.data.split("_")[-1])
+    # Повторно используем функцию показа конфигурации
+    callback.data = f"configure_parsing_link_{link_id}"
+    await show_parsing_configuration(callback)
+
+@router.callback_query(F.data.startswith("edit_parsing_type_"))
+async def edit_parsing_type(callback: CallbackQuery):
+    """Показывает меню выбора типа парсинга"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        keyboard = get_parsing_type_keyboard(link_id)
+        await callback.message.edit_text(
+            "🎯 <b>Выберите тип парсинга:</b>\n\n"
+            "• <b>Комбинированный</b> - пробует все методы по очереди\n"
+            "• <b>Только API</b> - использует только API запросы\n"
+            "• <b>Только HTML</b> - парсит HTML страницу\n"
+            "• <b>Только Browser</b> - использует браузерную автоматизацию",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании типа парсинга: {e}")
+        await callback.message.edit_text("❌ Ошибка при редактировании типа парсинга")
+        await callback.answer()
+
+@router.callback_query(F.data.startswith("set_parsing_type_"))
+async def set_parsing_type(callback: CallbackQuery):
+    """Сохраняет выбранный тип парсинга"""
+    try:
+        parts = callback.data.split("_")
+        link_id = int(parts[3])
+        parsing_type = parts[4]
+
+        def update_parsing_type(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+
+            link.parsing_type = parsing_type
+            return link.name
+
+        link_name = atomic_operation(update_parsing_type)
+
+        parsing_type_display = {
+            'combined': '🔄 Комбинированный',
+            'api': '📡 Только API',
+            'html': '🌐 Только HTML',
+            'browser': '🌐 Только Browser'
+        }.get(parsing_type, parsing_type)
+
+        await callback.message.edit_text(
+            f"✅ <b>Тип парсинга успешно изменён!</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Новый тип:</b> {parsing_type_display}",
+            parse_mode="HTML"
+        )
+
+        await callback.answer("✅ Тип парсинга обновлён")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении типа парсинга: {e}")
+        await callback.message.edit_text("❌ Ошибка при сохранении типа парсинга")
+        await callback.answer()
+
+@router.callback_query(F.data.startswith("edit_api_url_"))
+async def edit_api_url(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс изменения API URL"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            current_api_url = link.api_url or "Не указан"
+            link_name = link.name
+
+        await state.update_data(link_id=link_id, link_name=link_name)
+        await state.set_state(ConfigureParsingStates.waiting_for_api_url_edit)
+
+        await callback.message.edit_text(
+            f"📡 <b>Изменение API URL</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Текущий API URL:</b>\n<code>{current_api_url}</code>\n\n"
+            f"Отправьте новый API URL или отправьте \"-\" чтобы удалить:\n\n"
+            f"<i>Или используйте /cancel для отмены</i>",
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании API URL: {e}")
+        await callback.message.edit_text("❌ Ошибка при редактировании API URL")
+        await callback.answer()
+
+@router.message(ConfigureParsingStates.waiting_for_api_url_edit)
+async def process_api_url_edit(message: Message, state: FSMContext):
+    """Обрабатывает новый API URL"""
+    try:
+        data = await state.get_data()
+        link_id = data['link_id']
+        link_name = data['link_name']
+        new_api_url = message.text.strip()
+
+        # Если пользователь отправил "-", удаляем URL
+        if new_api_url == "-":
+            new_api_url = None
+
+        def update_api_url(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+
+            link.api_url = new_api_url
+            return link.name
+
+        atomic_operation(update_api_url)
+
+        display_url = new_api_url if new_api_url else "<i>Удалён</i>"
+
+        await message.answer(
+            f"✅ <b>API URL успешно обновлён!</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Новый API URL:</b>\n{display_url}",
+            parse_mode="HTML"
+        )
+
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении API URL: {e}")
+        await message.answer("❌ Ошибка при сохранении API URL")
+        await state.clear()
+
+@router.callback_query(F.data.startswith("edit_html_url_"))
+async def edit_html_url(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс изменения HTML URL"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            current_html_url = link.html_url or "Не указан"
+            link_name = link.name
+
+        await state.update_data(link_id=link_id, link_name=link_name)
+        await state.set_state(ConfigureParsingStates.waiting_for_html_url_edit)
+
+        await callback.message.edit_text(
+            f"🌐 <b>Изменение HTML URL</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Текущий HTML URL:</b>\n<code>{current_html_url}</code>\n\n"
+            f"Отправьте новый HTML URL или отправьте \"-\" чтобы удалить:\n\n"
+            f"<i>Или используйте /cancel для отмены</i>",
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании HTML URL: {e}")
+        await callback.message.edit_text("❌ Ошибка при редактировании HTML URL")
+        await callback.answer()
+
+@router.message(ConfigureParsingStates.waiting_for_html_url_edit)
+async def process_html_url_edit(message: Message, state: FSMContext):
+    """Обрабатывает новый HTML URL"""
+    try:
+        data = await state.get_data()
+        link_id = data['link_id']
+        link_name = data['link_name']
+        new_html_url = message.text.strip()
+
+        # Если пользователь отправил "-", удаляем URL
+        if new_html_url == "-":
+            new_html_url = None
+
+        def update_html_url(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+
+            link.html_url = new_html_url
+            return link.name
+
+        atomic_operation(update_html_url)
+
+        display_url = new_html_url if new_html_url else "<i>Удалён</i>"
+
+        await message.answer(
+            f"✅ <b>HTML URL успешно обновлён!</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Новый HTML URL:</b>\n{display_url}",
+            parse_mode="HTML"
+        )
+
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении HTML URL: {e}")
+        await message.answer("❌ Ошибка при сохранении HTML URL")
+        await state.clear()
 
 @router.message(F.text == "🔄 Проверить все")
 async def menu_check_all(message: Message):

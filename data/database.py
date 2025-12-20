@@ -126,7 +126,8 @@ class DatabaseMigration:
             self._migration_001_initial,
             self._migration_002_add_indexes,
             self._migration_003_add_multiple_urls,
-            self._migration_004_convert_to_single_urls
+            self._migration_004_convert_to_single_urls,
+            self._migration_005_add_parsing_type
         ])
     
     def _migration_001_initial(self, session):
@@ -218,7 +219,26 @@ class DatabaseMigration:
         except Exception as e:
             logging.error(f"❌ Ошибка в миграции 004: {e}")
             raise
-    
+
+    def _migration_005_add_parsing_type(self, session):
+        """Миграция 005: Добавление поля parsing_type"""
+        try:
+            # Проверка существующих столбцов
+            result = session.execute(text("PRAGMA table_info(api_links)"))
+            columns = [row[1] for row in result.fetchall()]
+
+            # Добавление поля parsing_type
+            if 'parsing_type' not in columns:
+                session.execute(text("ALTER TABLE api_links ADD COLUMN parsing_type TEXT DEFAULT 'combined'"))
+                logging.info("✅ Добавлен столбец parsing_type")
+                session.commit()
+            else:
+                logging.info("ℹ️ Столбец parsing_type уже существует")
+
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 005: {e}")
+            raise
+
     def run_migrations(self):
         """Запуск всех миграций"""
         logging.info("🔄 Проверка миграций базы данных...")

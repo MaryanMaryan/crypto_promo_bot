@@ -19,11 +19,12 @@ logger = logging.getLogger(__name__)
 class UniversalFallbackParser(BaseParser):
     """Универсальный парсер с автоматическим fallback между API и HTML"""
 
-    def __init__(self, url: str, api_url: str = None, html_url: str = None, api_urls: List[str] = None, html_urls: List[str] = None):
+    def __init__(self, url: str, api_url: str = None, html_url: str = None, api_urls: List[str] = None, html_urls: List[str] = None, parsing_type: str = 'combined'):
         super().__init__(url)
         self.strategy_used = None
         self.combined_data = []
         self.exchange = self._extract_exchange_from_url(url)
+        self.parsing_type = parsing_type  # НОВОЕ: тип парсинга (api, html, browser, combined)
 
         # НОВАЯ СИСТЕМА: одиночные URL
         self.api_url = api_url
@@ -158,8 +159,15 @@ class UniversalFallbackParser(BaseParser):
     def _get_strategy_priority(self) -> List[str]:
         """Определяет приоритет стратегий для каждой биржи
 
-        ВАЖНО: MEXC и Bybit используют Akamai Bot Manager, поэтому browser парсер - приоритет #1
+        ВАЖНО: Если пользователь выбрал конкретный тип парсинга, используется только он.
+        Иначе используется автоматический выбор на основе биржи.
         """
+        # Если пользователь выбрал конкретный тип парсинга - используем только его
+        if self.parsing_type and self.parsing_type != 'combined':
+            logger.info(f"🎯 Пользователь выбрал тип парсинга: {self.parsing_type}")
+            return [self.parsing_type]
+
+        # Иначе используем автоматический fallback на основе биржи
         strategy_map = {
             # Сайты с Akamai защитой - приоритет browser парсеру
             "bybit": ["browser", "html", "api"],  # Akamai защита, browser первый

@@ -44,9 +44,39 @@ class UniversalParser(BaseParser):
                 content_hash = hashlib.md5(stable_key.encode('utf-8')).hexdigest()[:12]
                 return f"{exchange_name}_{content_hash}"
 
-            # Крайний случай - хэш всего объекта
-            fallback_hash = hashlib.md5(str(obj).encode('utf-8')).hexdigest()[:12]
-            return f"{exchange_name}_fallback_{fallback_hash}"
+            # УЛУЧШЕННЫЙ fallback: хэш СТАБИЛЬНЫХ полей (не всего объекта)
+            # Собираем только стабильные поля для хэширования
+            stable_fields = {}
+
+            # Приоритетные поля для хэша
+            stable_field_keys = [
+                'name', 'title', 'token', 'currency', 'symbol',
+                'description', 'desc', 'amount', 'reward',
+                'url', 'link', 'startTime', 'endTime'
+            ]
+
+            for key in stable_field_keys:
+                value = self._get_value(obj, [key])
+                if value and str(value).strip():
+                    stable_fields[key] = str(value).strip()
+
+            # Если есть хоть какие-то стабильные поля - используем их
+            if stable_fields:
+                # Сортируем ключи для стабильности
+                sorted_items = sorted(stable_fields.items())
+                stable_string = "_".join([f"{k}:{v}" for k, v in sorted_items])
+                fallback_hash = hashlib.md5(stable_string.encode('utf-8')).hexdigest()[:12]
+
+                logger.debug(f"🔑 Создан улучшенный fallback ID из полей: {list(stable_fields.keys())}")
+                return f"{exchange_name}_fallback_{fallback_hash}"
+
+            # Если вообще нет стабильных полей - возвращаем None
+            # Такой объект не должен становиться промоакцией
+            logger.warning(
+                f"⚠️ Объект не содержит стабильных полей для создания ID. "
+                f"Доступные ключи: {list(obj.keys())[:10]}"
+            )
+            return None
 
         except Exception as e:
             logger.error(f"❌ Ошибка создания ID: {e}")
@@ -194,10 +224,18 @@ class UniversalParser(BaseParser):
             # Автоматически определяем название из домена URL
             exchange_name = self._extract_domain_name(self.url)
 
+            # ВАЖНО: Сначала создаем promo_id
+            promo_id = self.extract_promo_id(obj)
+
+            # Если не удалось создать стабильный ID - не создаем промоакцию
+            if not promo_id:
+                logger.debug("⏭️ Пропускаем объект: не удалось создать стабильный promo_id")
+                return None
+
             # Универсальный маппинг полей для всех бирж
             promo_data = {
                 'exchange': exchange_name,
-                'promo_id': self.extract_promo_id(obj),
+                'promo_id': promo_id,
                 # Title: ищем в максимально широком списке (Bybit, MEXC, Binance, Gate.io и др.)
                 'title': self._get_value(obj, [
                     'name', 'title', 'campaignName', 'activityName', 'projectName',
@@ -245,6 +283,13 @@ class UniversalParser(BaseParser):
                     'icon', 'iconUrl', 'imageUrl', 'logo', 'logoUrl',
                     'tokenIcon', 'coinIcon', 'img', 'image', 'thumbnail'
                 ]),
+                # Дополнительные поля для генерации URL
+                'navName': self._get_value(obj, [
+                    'navName', 'slug', 'projectSlug', 'projectCode', 'code'
+                ]),
+                'homeName': self._get_value(obj, [
+                    'homeName', 'shortName', 'projectShortName'
+                ]),
                 'raw_data': obj  # Сохраняем исходные данные
             }
 
@@ -275,6 +320,46 @@ class UniversalParser(BaseParser):
                     exchange = promo_data.get('exchange', 'Unknown')
                     promo_id = promo_data.get('promo_id', 'N/A')
                     promo_data['title'] = f"{exchange} Promo {promo_id}"
+
+            # ========================================================================
+            # НОРМАЛИЗАЦИЯ СЛОЖНЫХ ПОЛЕЙ ДЛЯ БД
+            # ========================================================================
+            # Преобразуем словари в простые типы для совместимости с SQLite
+
+            # Нормализация total_prize_pool
+            if promo_data.get('total_prize_pool') and isinstance(promo_data['total_prize_pool'], dict):
+                prize_pool = promo_data['total_prize_pool']
+                # Пытаемся извлечь значение из словаря
+                if 'amount' in prize_pool:
+                    amount = prize_pool['amount']
+                    token = prize_pool.get('token', '')
+                    # Форматируем как "4000000 MLC"
+                    promo_data['total_prize_pool'] = f"{amount} {token}".strip()
+                else:
+                    # Если нет amount, конвертируем весь словарь в JSON строку
+                    promo_data['total_prize_pool'] = json.dumps(prize_pool, ensure_ascii=False)
+
+            # Нормализация award_token
+            if promo_data.get('award_token') and isinstance(promo_data['award_token'], dict):
+                token_data = promo_data['award_token']
+                # Пытаемся извлечь токен из словаря
+                promo_data['award_token'] = (
+                    token_data.get('token') or
+                    token_data.get('symbol') or
+                    token_data.get('currency') or
+                    json.dumps(token_data, ensure_ascii=False)
+                )
+
+            # Нормализация participants_count
+            if promo_data.get('participants_count') and isinstance(promo_data['participants_count'], dict):
+                participants = promo_data['participants_count']
+                # Пытаемся извлечь число из словаря
+                promo_data['participants_count'] = (
+                    participants.get('count') or
+                    participants.get('total') or
+                    participants.get('participants') or
+                    str(participants)
+                )
 
             # ========================================================================
             # АВТОМАТИЧЕСКАЯ ГЕНЕРАЦИЯ ССЫЛОК

@@ -91,8 +91,7 @@ HTML_BASE_URLS = {
         "https://www.gate.io/launchpad"
     ],
     "okx": [
-        "https://www.okx.com/ru/jumpstart",
-        "https://www.okx.com/ru/earn"
+        # URLs удалены - пользователь должен добавить через бота при необходимости
     ],
     "bitget": [
         "https://www.bitget.com/ru/promotion",

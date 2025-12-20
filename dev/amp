@@ -1,0 +1,101 @@
+================================================================================
+ПАРСИНГ API: https://web3.okx.com/priapi/v1/dapp/boost/launchpool/list
+================================================================================
+
+Найдено 100 промоакций
+
+================================================================================
+
+ПРОМОАКЦИЯ #1:
+--------------------------------------------------------------------------------
+Promo ID: okx_fallback_3618e007906e
+Exchange: Okx
+Title: Okx Promo okx_fallback_3618e007906e
+Description: ...
+Award Token: None
+Total Prize Pool: None
+Link: НЕТ ССЫЛКИ
+Icon: 
+
+RAW DATA (первые 500 символов):
+{
+  "code": 0,
+  "data": {
+    "pageNum": 0,
+    "pageSize": 0,
+    "pools": [
+      {
+        "banner": "https://static.coinall.ltd/cdn/nft/07c2baec-5915-43f2-9b60-efe222f38ca4.png",
+        "highBanner": "https://static.coinall.ltd/cdn/nft/ed34a802-cf39-4012-8359-67bf61501692.png",
+        "homeName": "My Lovely Planet",
+        "id": 371,
+        "name": "My Lovely Planet X Launch",
+        "navName": "mylovelyplanet",
+        "participants": 23429,
+        "reward": {
+          "amount": 400
+...
+
+ПРОМОАКЦИЯ #2:
+--------------------------------------------------------------------------------
+Promo ID: okx_371
+Exchange: Okx
+Title: My Lovely Planet X Launch
+Description: ...
+Award Token: None
+Total Prize Pool: 4000000.0 MLC
+Link: https://web3.okx.com/ua/boost/x-launch/mylovelyplanet
+Icon: 
+
+RAW DATA (первые 500 символов):
+{
+  "banner": "https://static.coinall.ltd/cdn/nft/07c2baec-5915-43f2-9b60-efe222f38ca4.png",
+  "highBanner": "https://static.coinall.ltd/cdn/nft/ed34a802-cf39-4012-8359-67bf61501692.png",
+  "homeName": "My Lovely Planet",
+  "id": 371,
+  "name": "My Lovely Planet X Launch",
+  "navName": "mylovelyplanet",
+  "participants": 23429,
+  "reward": {
+    "amount": 4000000.0,
+    "chainId": 56,
+    "token": "MLC"
+  },
+  "status": 2,
+  "times": {
+    "claimEndTime": 1766059200000,
+    "claimStartTime": 176
+...
+
+ПРОМОАКЦИЯ #3:
+--------------------------------------------------------------------------------
+Promo ID: okx_fallback_4af6a4b9a5e6
+Exchange: Okx
+Title: MLC Okx Promotion
+Description: ...
+Award Token: MLC
+Total Prize Pool: 4000000.0
+Link: НЕТ ССЫЛКИ
+Icon: 
+
+RAW DATA (первые 500 символов):
+{
+  "amount": 4000000.0,
+  "chainId": 56,
+  "token": "MLC"
+}
+...
+
+================================================================================
+АНАЛИЗ:
+================================================================================
+
+Ссылки сгенерированы: 33/100
+
+Доступные поля в raw_data первой промоакции:
+  - code: (int) None
+  - data: (dict) {'pageNum': 0, 'pageSize': 0, 'pools': [{'banner':
+  - detailMsg: (str) None
+  - error_code: (str) 0
+  - error_message: (str) None
+  - msg: (str) None

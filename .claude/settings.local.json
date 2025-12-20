@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(findstr:*)",
+      "Bash(Select-String -Pattern \"ТЕСТ|BrowserParser|Playwright|УСПЕХ|ОШИБКА|прокси|cooldown|Найдено|промоакций|JSON|РЕЗУЛЬТАТЫ\")",
+      "Bash(Select-Object -First 50)",
+      "Bash(Select-String \"ТЕСТ|BrowserParser|Playwright|УСПЕХ|ОШИБКА|прокси|cooldown|Найдено|промоакций|JSON|РЕЗУЛЬТАТЫ\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

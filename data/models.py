@@ -18,6 +18,7 @@ class ApiLink(Base):
     # НОВЫЕ ОДИНОЧНЫЕ ПОЛЯ
     api_url = Column(String, nullable=True)  # Одиночный API URL
     html_url = Column(String, nullable=True)  # Одиночный HTML URL (опциональный)
+    parsing_type = Column(String, default='combined')  # Тип парсинга: api, html, browser, combined
     check_interval = Column(Integer, default=300)
     is_active = Column(Boolean, default=True)
     added_by = Column(Integer)

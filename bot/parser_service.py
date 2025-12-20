@@ -18,6 +18,8 @@ class ParserService:
             'successful_checks': 0,
             'failed_checks': 0,
             'new_promos_found': 0,
+            'fallback_rejected': 0,
+            'fallback_accepted': 0,
             'last_check_time': None
         }
 
@@ -82,19 +84,22 @@ class ParserService:
             # Получаем URL из базы данных (новая система)
             api_url = None
             html_url = None
+            parsing_type = 'combined'  # По умолчанию
 
             with get_db_session() as db:
                 link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
                 if link:
                     api_url = link.get_primary_api_url()
                     html_url = link.get_primary_html_url()
+                    parsing_type = link.parsing_type or 'combined'
 
             logger.info(f"📡 API URL: {api_url or 'Не указан'}")
             logger.info(f"🌐 HTML URL (fallback): {html_url or 'Не указан'}")
+            logger.info(f"🎯 Тип парсинга: {parsing_type}")
 
-            # Создаем парсер с одиночными URL
+            # Создаем парсер с одиночными URL и типом парсинга
             logger.debug(f"🔧 Создание UniversalFallbackParser")
-            parser = UniversalFallbackParser(url, api_url=api_url, html_url=html_url)
+            parser = UniversalFallbackParser(url, api_url=api_url, html_url=html_url, parsing_type=parsing_type)
 
             logger.info(f"📡 Запуск парсинга...")
             promotions = parser.get_promotions()
@@ -158,6 +163,15 @@ class ParserService:
         try:
             logger.debug(f"🔍 Начало фильтрации промоакций для ссылки {link_id}")
 
+            # Статистика фильтрации
+            stats = {
+                'total': len(promotions),
+                'existing': 0,
+                'new': 0,
+                'invalid': 0,
+                'fallback_rejected': 0
+            }
+
             with get_db_session() as db:
                 # Получаем ID существующих промоакций для этой ссылки
                 existing_promo_ids = {
@@ -177,15 +191,45 @@ class ParserService:
                     promo_id = promo.get('promo_id')
                     if not promo_id:
                         logger.warning(f"⚠️ Промоакция без promo_id: {promo.get('title', 'Без названия')}")
+                        stats['invalid'] += 1
                         continue
+
+                    # Дополнительная проверка для fallback промо
+                    if '_fallback_' in promo_id:
+                        # Быстрая проверка: есть ли хоть какие-то данные кроме ID и title
+                        has_data = any([
+                            promo.get('total_prize_pool'),
+                            promo.get('award_token'),
+                            promo.get('link'),
+                            promo.get('description')
+                        ])
+
+                        if not has_data:
+                            logger.warning(
+                                f"⚠️ ФИЛЬТР: Fallback промоакция '{promo.get('title', 'Без названия')}' "
+                                f"({promo_id}) не содержит значимых данных - пропускаем на этапе фильтрации"
+                            )
+                            stats['fallback_rejected'] += 1
+                            continue
 
                     if promo_id in existing_promo_ids:
                         logger.debug(f"   ⏭️ Пропускаем существующую промоакцию: {promo.get('title', 'Без названия')} ({promo_id})")
+                        stats['existing'] += 1
                     else:
                         logger.debug(f"   ✅ НОВАЯ промоакция: {promo.get('title', 'Без названия')} ({promo_id})")
                         new_promos.append(promo)
+                        stats['new'] += 1
 
-                logger.info(f"📊 Результат фильтрации: {len(promotions)} всего → {len(new_promos)} новых")
+                # Выводим детальную статистику
+                logger.info(f"📊 Результат фильтрации:")
+                logger.info(f"   Всего промоакций: {stats['total']}")
+                logger.info(f"   Уже существуют в БД: {stats['existing']}")
+                logger.info(f"   Новых промоакций: {stats['new']}")
+                if stats['invalid'] > 0:
+                    logger.info(f"   Без promo_id: {stats['invalid']}")
+                if stats['fallback_rejected'] > 0:
+                    logger.info(f"   Fallback отклонено (нет данных): {stats['fallback_rejected']}")
+
                 return new_promos
 
         except Exception as e:
@@ -202,8 +246,18 @@ class ParserService:
                     try:
                         # Валидация перед сохранением
                         if not self._validate_promo_for_saving(promo):
+                            # Обновляем статистику
+                            promo_id = promo.get('promo_id', '')
+                            if '_fallback_' in promo_id:
+                                self.stats['fallback_rejected'] += 1
+
                             logger.warning(f"⚠️ Пропускаем невалидную промоакцию: {promo.get('title')}")
                             continue
+
+                        # Обновляем статистику для принятых fallback
+                        promo_id = promo.get('promo_id', '')
+                        if '_fallback_' in promo_id:
+                            self.stats['fallback_accepted'] += 1
 
                         history_item = PromoHistory(
                             api_link_id=link_id,
@@ -241,19 +295,60 @@ class ParserService:
             if not promo.get('promo_id'):
                 logger.debug("❌ Пропуск промоакции: отсутствует promo_id")
                 return False
-            
+
+            promo_id = promo.get('promo_id')
+
+            # СТРОГАЯ ВАЛИДАЦИЯ для fallback промоакций
+            if '_fallback_' in promo_id:
+                logger.debug(f"🔍 Обнаружена fallback промоакция: {promo_id}")
+
+                # Подсчитываем значимые заполненные поля
+                significant_fields = [
+                    'total_prize_pool',
+                    'award_token',
+                    'link',
+                    'description',
+                    'participants_count',
+                    'start_time',
+                    'end_time'
+                ]
+
+                filled_fields = []
+                for field in significant_fields:
+                    value = promo.get(field)
+                    # Проверяем что поле не только существует, но и имеет значение
+                    if value and str(value).strip() and str(value).strip() != '':
+                        filled_fields.append(field)
+
+                # Требуем минимум 3 значимых поля для fallback промо
+                if len(filled_fields) < 3:
+                    logger.warning(
+                        f"❌ ОТКЛОНЕНО: Fallback промоакция '{promo.get('title', 'Без названия')}' "
+                        f"(ID: {promo_id}) содержит недостаточно данных"
+                    )
+                    logger.warning(f"   Заполненные поля ({len(filled_fields)}/3): {filled_fields}")
+                    logger.warning(f"   Требуется минимум 3 из: {significant_fields}")
+                    return False
+
+                logger.info(
+                    f"✅ ПРИНЯТО: Fallback промоакция '{promo.get('title', 'Без названия')}' "
+                    f"прошла валидацию ({len(filled_fields)} полей)"
+                )
+                logger.debug(f"   Заполненные поля: {filled_fields}")
+
+            # МЯГКАЯ ВАЛИДАЦИЯ для обычных промоакций (существующая логика)
             if not promo.get('title') and not promo.get('description'):
                 logger.debug("❌ Пропуск промоакции: отсутствует title и description")
                 return False
-            
+
             # Минимальная длина заголовка
             title = promo.get('title', '')
             if len(title.strip()) < 2:
                 logger.debug(f"❌ Пропуск промоакции: слишком короткий заголовок '{title}'")
                 return False
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"❌ Ошибка валидации промо: {e}")
             return False
@@ -263,12 +358,14 @@ class ParserService:
         success_rate = 0
         if self.stats['total_checks'] > 0:
             success_rate = (self.stats['successful_checks'] / self.stats['total_checks']) * 100
-        
+
         return {
             'total_checks': self.stats['total_checks'],
             'successful_checks': self.stats['successful_checks'],
             'failed_checks': self.stats['failed_checks'],
             'new_promos_found': self.stats['new_promos_found'],
+            'fallback_rejected': self.stats['fallback_rejected'],
+            'fallback_accepted': self.stats['fallback_accepted'],
             'success_rate': round(success_rate, 2),
             'last_check_time': self.stats['last_check_time']
         }
@@ -280,5 +377,7 @@ class ParserService:
             'successful_checks': 0,
             'failed_checks': 0,
             'new_promos_found': 0,
+            'fallback_rejected': 0,
+            'fallback_accepted': 0,
             'last_check_time': None
         }

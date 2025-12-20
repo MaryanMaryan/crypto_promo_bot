@@ -1,0 +1,100 @@
+================================================================================
+ПАРСИНГ API: https://web3.okx.com/priapi/v1/dapp/boost/launchpool/list
+================================================================================
+
+Найдено 99 промоакций
+
+================================================================================
+
+ПРОМОАКЦИЯ #1:
+--------------------------------------------------------------------------------
+Promo ID: okx_371
+Exchange: Okx
+Title: My Lovely Planet X Launch
+Description: ...
+Award Token: None
+Total Prize Pool: 4000000.0 MLC
+Link: НЕТ ССЫЛКИ
+Icon: 
+
+RAW DATA (первые 500 символов):
+{
+  "banner": "https://static.coinall.ltd/cdn/nft/07c2baec-5915-43f2-9b60-efe222f38ca4.png",
+  "highBanner": "https://static.coinall.ltd/cdn/nft/ed34a802-cf39-4012-8359-67bf61501692.png",
+  "homeName": "My Lovely Planet",
+  "id": 371,
+  "name": "My Lovely Planet X Launch",
+  "navName": "mylovelyplanet",
+  "participants": 22190,
+  "reward": {
+    "amount": 4000000.0,
+    "chainId": 56,
+    "token": "MLC"
+  },
+  "status": 2,
+  "times": {
+    "claimEndTime": 1766059200000,
+    "claimStartTime": 176
+...
+
+ПРОМОАКЦИЯ #2:
+--------------------------------------------------------------------------------
+Promo ID: okx_fallback_4af6a4b9a5e6
+Exchange: Okx
+Title: MLC Okx Promotion
+Description: ...
+Award Token: MLC
+Total Prize Pool: 4000000.0
+Link: НЕТ ССЫЛКИ
+Icon: 
+
+RAW DATA (первые 500 символов):
+{
+  "amount": 4000000.0,
+  "chainId": 56,
+  "token": "MLC"
+}
+...
+
+ПРОМОАКЦИЯ #3:
+--------------------------------------------------------------------------------
+Promo ID: okx_fallback_411345e147f6
+Exchange: Okx
+Title: Okx Promo okx_fallback_411345e147f6
+Description: ...
+Award Token: None
+Total Prize Pool: None
+Link: НЕТ ССЫЛКИ
+Icon: 
+
+RAW DATA (первые 500 символов):
+{
+  "claimEndTime": 1766059200000,
+  "claimStartTime": 1764849600000,
+  "endTime": 1766059200000,
+  "joinEndTime": 1764835200000,
+  "joinStartTime": 1764748800000
+}
+...
+
+================================================================================
+АНАЛИЗ:
+================================================================================
+
+Ссылки сгенерированы: 0/99
+
+Доступные поля в raw_data первой промоакции:
+  - banner: (str) https://static.coinall.ltd/cdn/nft/07c2baec-5915-4
+  - highBanner: (str) https://static.coinall.ltd/cdn/nft/ed34a802-cf39-4
+  - homeName: (str) My Lovely Planet
+  - id: (int) 371
+  - name: (str) My Lovely Planet X Launch
+  - navName: (str) mylovelyplanet
+  - participants: (int) 22190
+  - reward: (dict) {'amount': 4000000.0, 'chainId': 56, 'token': 'MLC
+  - status: (int) 2
+  - times: (dict) {'claimEndTime': 1766059200000, 'claimStartTime': 
+  - tokenDesc: (str) My Lovely Planet is the Candy Crush of Web3. Built
+  - tokenLogo: (str) https://static.coinall.ltd/cdn/nft/2a77bd01-dc9f-4
+  - user: (dict) {'claimed': False, 'estRewardAmount': 0, 'joined':
+  - wideBanner: (str) https://static.coinall.ltd/cdn/nft/f2d79183-e18c-4

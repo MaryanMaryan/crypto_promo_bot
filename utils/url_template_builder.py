@@ -64,8 +64,13 @@ class URLTemplateAnalyzer:
             template = self._create_template(url_parts, matching_promo)
 
             if template:
-                logger.info(f"✅ Шаблон успешно создан: {template['pattern']}")
-                return template
+                # Шаг 4: Валидация шаблона - проверяем что он генерирует правильный URL
+                if self._validate_template(template, matching_promo):
+                    logger.info(f"✅ Шаблон успешно создан и валидирован: {template['pattern']}")
+                    return template
+                else:
+                    logger.error(f"❌ Шаблон не прошел валидацию - сгенерированный URL не совпадает с примером")
+                    return None
 
             return None
 
@@ -317,6 +322,70 @@ class URLTemplateAnalyzer:
                 result.append(alt)
 
         return result
+
+    def _validate_template(self, template: Dict[str, Any], promo: Dict[str, Any]) -> bool:
+        """
+        Валидирует шаблон, проверяя что он генерирует правильный URL
+
+        Args:
+            template: Созданный шаблон
+            promo: Промоакция, для которой создан шаблон
+
+        Returns:
+            True если шаблон генерирует URL совпадающий с примером, False иначе
+        """
+        try:
+            # Создаем временный builder для проверки
+            test_builder = URLTemplateBuilder()
+
+            # Подставляем значения из промоакции в шаблон
+            pattern = template['pattern']
+            base_url = template['base_url']
+            fields = template['fields']
+
+            # Собираем значения для всех полей
+            field_values = {}
+            for field_name, alternative_names in fields.items():
+                value = test_builder._get_field_value(promo, alternative_names)
+                if value is None:
+                    logger.warning(f"⚠️ Поле {field_name} не найдено в данных промоакции")
+                    return False
+                field_values[field_name] = value
+
+            # Генерируем URL
+            generated_path = pattern
+            for field_name, value in field_values.items():
+                generated_path = generated_path.replace(f"{{{field_name}}}", str(value))
+
+            generated_url = base_url + generated_path
+
+            # Нормализуем URL для сравнения (убираем query params и fragment)
+            example_parsed = urlparse(self.example_url)
+            generated_parsed = urlparse(generated_url)
+
+            example_normalized = f"{example_parsed.scheme}://{example_parsed.netloc}{example_parsed.path}"
+            generated_normalized = f"{generated_parsed.scheme}://{generated_parsed.netloc}{generated_parsed.path}"
+
+            # Убираем trailing slash для сравнения
+            example_normalized = example_normalized.rstrip('/')
+            generated_normalized = generated_normalized.rstrip('/')
+
+            # Сравниваем
+            if example_normalized.lower() == generated_normalized.lower():
+                logger.info(f"✅ Валидация успешна:")
+                logger.info(f"   Пример:      {example_normalized}")
+                logger.info(f"   Сгенерирован: {generated_normalized}")
+                return True
+            else:
+                logger.error(f"❌ Валидация не прошла:")
+                logger.error(f"   Ожидалось:   {example_normalized}")
+                logger.error(f"   Получено:     {generated_normalized}")
+                logger.error(f"   Разница в пути может указывать на неправильное определение статических сегментов")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка валидации шаблона: {e}", exc_info=True)
+            return False
 
 
 class URLTemplateBuilder:

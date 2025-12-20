@@ -1,4 +1,71 @@
 {
   "_comment": "Автоматически генерируемые шаблоны URL для промоакций",
-  "_description": "Этот файл создается и обновляется автоматически при добавлении примеров ссылок через бота"
+  "_description": "Этот файл создается и обновляется автоматически при добавлении примеров ссылок через бота",
+  "okx": {
+    "boost": {
+      "pattern": "/ua/boost/x-launch/{navName}",
+      "pattern_type": "path",
+      "base_url": "https://web3.okx.com",
+      "fields": {
+        "navName": [
+          "navName",
+          "slug",
+          "projectSlug",
+          "projectCode"
+        ]
+      },
+      "static_segments": [
+        "ua",
+        "boost",
+        "x-launch"
+      ]
+    }
+  },
+  "bybit": {
+    "token-splash": {
+      "pattern": "/en/trade/spot/token-splash/detail?code={code}",
+      "pattern_type": "query",
+      "base_url": "https://www.bybit.com",
+      "fields": {
+        "code": [
+          "code",
+          "promoId",
+          "campaignId",
+          "id"
+        ]
+      },
+      "static_segments": [
+        "en",
+        "trade",
+        "spot",
+        "token-splash",
+        "detail"
+      ]
+    }
+  },
+  "mexc": {
+    "launchpad": {
+      "pattern": "/ru-RU/launchpad/{activityCoin}/{launchpadId}",
+      "pattern_type": "path",
+      "base_url": "https://www.mexc.com",
+      "fields": {
+        "activityCoin": [
+          "activityCoin",
+          "token",
+          "coin",
+          "symbol"
+        ],
+        "launchpadId": [
+          "launchpadId",
+          "id",
+          "campaignId",
+          "projectId"
+        ]
+      },
+      "static_segments": [
+        "ru-RU",
+        "launchpad"
+      ]
+    }
+  }
 }
