@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from data.database import get_db, get_db_session, PromoHistory, ApiLink
 from parsers.universal_fallback_parser import UniversalFallbackParser
+from parsers.staking_parser import StakingParser
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +371,69 @@ class ParserService:
             'last_check_time': self.stats['last_check_time']
         }
     
+    def parse_staking_link(self, link_id: int, api_url: str, exchange_name: str, page_url: str = None) -> List[Dict[str, Any]]:
+        """
+        Парсит стейкинг-ссылку и возвращает новые стейкинги
+
+        Args:
+            link_id: ID ссылки в БД
+            api_url: URL API для парсинга стейкингов
+            exchange_name: Название биржи (Bybit, Kucoin и т.д.)
+            page_url: URL страницы для пользователя (опционально)
+
+        Returns:
+            Список новых стейкингов
+        """
+        try:
+            logger.info(f"🔍 ParserService: Начало парсинга стейкинг-ссылки {link_id}")
+            logger.info(f"   Биржа: {exchange_name}")
+            logger.info(f"   API URL: {api_url}")
+
+            # Создаем парсер стейкингов
+            parser = StakingParser(api_url=api_url, exchange_name=exchange_name)
+
+            # Парсим стейкинги
+            logger.info(f"📡 Запуск парсинга стейкингов...")
+            stakings = parser.parse()
+
+            if not stakings:
+                logger.info(f"ℹ️ ParserService: Парсер не вернул стейкингов для ссылки {link_id}")
+                return []
+
+            logger.info(f"📦 ParserService: Парсер вернул {len(stakings)} стейкингов")
+
+            # Логируем найденные стейкинги
+            logger.info(f"📋 Список найденных стейкингов:")
+            for i, staking in enumerate(stakings[:10], 1):  # Первые 10
+                coin = staking.get('coin', 'N/A')
+                apr = staking.get('apr', 0)
+                staking_type = staking.get('type', 'N/A')
+                logger.info(f"   {i}. {coin} - {apr}% ({staking_type})")
+            if len(stakings) > 10:
+                logger.info(f"   ... и ещё {len(stakings) - 10} стейкингов")
+
+            # Проверяем на новые стейкинги
+            logger.info(f"🔍 Проверка новых стейкингов...")
+            new_stakings = check_and_save_new_stakings(stakings, link_id=link_id)
+
+            if new_stakings:
+                logger.info(f"🎉 ParserService: Найдено {len(new_stakings)} НОВЫХ стейкингов для ссылки {link_id}")
+                logger.info(f"📋 Список НОВЫХ стейкингов:")
+                for i, staking in enumerate(new_stakings, 1):
+                    coin = staking.get('coin', 'N/A')
+                    apr = staking.get('apr', 0)
+                    staking_type = staking.get('type', 'N/A')
+                    logger.info(f"   {i}. {coin} - {apr}% ({staking_type})")
+
+                return new_stakings
+            else:
+                logger.info(f"ℹ️ ParserService: Все стейкинги уже были в базе данных (нет новых)")
+                return []
+
+        except Exception as e:
+            logger.error(f"❌ ParserService: Критическая ошибка при парсинге стейкинг-ссылки {link_id}: {e}", exc_info=True)
+            return []
+
     def reset_stats(self):
         """Сбрасывает статистику"""
         self.stats = {
@@ -381,3 +445,82 @@ class ParserService:
             'fallback_accepted': 0,
             'last_check_time': None
         }
+
+
+# ========== ФУНКЦИИ ДЛЯ СТЕЙКИНГОВ ==========
+
+def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = None) -> List[Dict[str, Any]]:
+    """
+    Проверяет стейкинги на новизну и сохраняет новые в БД
+
+    Args:
+        stakings: Список распарсенных стейкингов
+        link_id: ID ссылки из которой получены стейкинги (опционально)
+
+    Returns:
+        Список НОВЫХ стейкингов (которых не было в БД)
+    """
+    from data.models import StakingHistory
+
+    new_stakings = []
+
+    with get_db_session() as session:
+        for staking in stakings:
+            exchange = staking.get('exchange')
+            product_id = staking.get('product_id')
+
+            if not exchange or not product_id:
+                logger.warning(f"⚠️ Пропуск стейкинга: отсутствует exchange или product_id")
+                continue
+
+            # Проверяем, есть ли уже в БД
+            existing = session.query(StakingHistory).filter(
+                StakingHistory.exchange == exchange,
+                StakingHistory.product_id == product_id
+            ).first()
+
+            if existing:
+                # Стейкинг уже есть, обновляем данные о заполненности и статус
+                existing.apr = staking.get('apr', existing.apr)
+                existing.status = staking.get('status', existing.status)
+                existing.fill_percentage = staking.get('fill_percentage')
+                existing.current_deposit = staking.get('current_deposit')
+                existing.max_capacity = staking.get('max_capacity')
+                existing.token_price_usd = staking.get('token_price_usd')
+                existing.last_updated = datetime.utcnow()
+
+                logger.debug(f"🔄 Обновлён стейкинг: {exchange} {staking.get('coin')} - {product_id}")
+            else:
+                # Новый стейкинг!
+                new_staking_record = StakingHistory(
+                    exchange=exchange,
+                    product_id=product_id,
+                    coin=staking.get('coin'),
+                    reward_coin=staking.get('reward_coin'),
+                    apr=staking.get('apr'),
+                    type=staking.get('type'),
+                    status=staking.get('status'),
+                    category=staking.get('category'),
+                    term_days=staking.get('term_days'),
+                    user_limit_tokens=staking.get('user_limit_tokens'),
+                    user_limit_usd=staking.get('user_limit_usd'),
+                    total_places=staking.get('total_places'),
+                    max_capacity=staking.get('max_capacity'),
+                    current_deposit=staking.get('current_deposit'),
+                    fill_percentage=staking.get('fill_percentage'),
+                    token_price_usd=staking.get('token_price_usd'),
+                    reward_token_price_usd=staking.get('reward_token_price_usd'),
+                    start_time=staking.get('start_time'),
+                    end_time=staking.get('end_time'),
+                    notification_sent=False
+                )
+
+                session.add(new_staking_record)
+                new_stakings.append(staking)
+
+                logger.info(f"🆕 Новый стейкинг: {exchange} {staking.get('coin')} {staking.get('apr')}% APR")
+
+        session.commit()
+
+    logger.info(f"✅ Проверено {len(stakings)} стейкингов, найдено {len(new_stakings)} новых")
+    return new_stakings

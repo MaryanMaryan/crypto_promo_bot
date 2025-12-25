@@ -205,17 +205,24 @@ class UniversalParser(BaseParser):
         if not isinstance(obj, dict):
             return False
 
+        # РАСШИРЕННЫЙ список ключевых слов для разных бирж
         promo_keywords = [
+            # Общие поля
             'name', 'title', 'description', 'reward', 'prize', 'token',
             'start', 'end', 'url', 'link', 'id', 'code', 'campaign',
             'promotion', 'activity', 'event', 'launchpad', 'staking',
-            'coin', 'symbol', 'amount', 'pool', 'time', 'date'
+            'coin', 'symbol', 'amount', 'pool', 'time', 'date',
+            # Специфичные поля Gate.io
+            'currency', 'participants', 'icon', 'status', 'phase',
+            'registered', 'rewards', 'exchange', 'lottery', 'rule',
+            # Дополнительные поля для других бирж
+            'airdrop', 'candydrop', 'trading', 'snapshot', 'allocation'
         ]
 
         # Считаем сколько промо-ключей есть в объекте
         promo_keys_count = sum(1 for key in obj.keys() if any(kw in key.lower() for kw in promo_keywords))
 
-        # Если есть хотя бы 2 промо-ключа, считаем это промоакцией (было 3)
+        # Если есть хотя бы 2 промо-ключа, считаем это промоакцией
         return promo_keys_count >= 2
 
     def _create_promo_from_object(self, obj: Dict) -> Dict[str, Any]:

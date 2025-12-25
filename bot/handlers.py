@@ -27,14 +27,56 @@ parser_service = ParserService()
 # Хранилище для временных данных
 user_selections = {}
 
+# Система контекстной навигации - хранит историю навигации пользователя
+navigation_stack = {}
+
+# Контексты навигации
+NAV_MAIN = "main"
+NAV_LINKS_LIST = "links_list"
+NAV_MANAGEMENT = "management"
+NAV_DELETE = "delete"
+NAV_INTERVAL = "interval"
+NAV_RENAME = "rename"
+NAV_PARSING = "parsing"
+NAV_PROXY = "proxy"
+NAV_USER_AGENT = "user_agent"
+
+def push_navigation(user_id: int, context: str, data: dict = None):
+    """Добавить контекст в стек навигации пользователя"""
+    if user_id not in navigation_stack:
+        navigation_stack[user_id] = []
+    navigation_stack[user_id].append({"context": context, "data": data or {}})
+
+def pop_navigation(user_id: int):
+    """Удалить последний контекст из стека"""
+    if user_id in navigation_stack and navigation_stack[user_id]:
+        return navigation_stack[user_id].pop()
+    return None
+
+def get_current_navigation(user_id: int):
+    """Получить текущий контекст навигации"""
+    if user_id in navigation_stack and navigation_stack[user_id]:
+        return navigation_stack[user_id][-1]
+    return None
+
+def clear_navigation(user_id: int):
+    """Очистить всю историю навигации пользователя"""
+    if user_id in navigation_stack:
+        navigation_stack[user_id] = []
+
 # СУЩЕСТВУЮЩИЕ СОСТОЯНИЯ FSM
 class AddLinkStates(StatesGroup):
+    waiting_for_category = State()  # НОВОЕ: Выбор категории
     waiting_for_name = State()  # Шаг 1: Название биржи
     waiting_for_parsing_type = State()  # Шаг 2: Выбор типа парсинга
     waiting_for_api_url = State()  # Шаг 3: API ссылка (опционально, зависит от типа)
     waiting_for_html_url = State()  # Шаг 4: HTML ссылка (опционально, зависит от типа)
+    waiting_for_page_url = State()  # НОВОЕ: Ссылка на страницу акций
     waiting_for_example_url = State()  # Шаг 5: Пример ссылки на промоакцию (опционально)
     waiting_for_interval = State()  # Шаг 6: Интервал проверки
+    # Для стейкинга:
+    waiting_for_min_apr = State()  # НОВОЕ: Минимальный APR
+    waiting_for_statuses = State()  # НОВОЕ: Выбор статусов
 
 class IntervalStates(StatesGroup):
     waiting_for_interval = State()
@@ -65,14 +107,9 @@ def get_main_menu():
     builder.add(KeyboardButton(text="📊 Список ссылок"))
     builder.add(KeyboardButton(text="➕ Добавить ссылку"))
     builder.add(KeyboardButton(text="⚙️ Управление ссылками"))
-    builder.add(KeyboardButton(text="🔧 Управление прокси"))
-    builder.add(KeyboardButton(text="👤 Управление User-Agent"))
-    builder.add(KeyboardButton(text="📈 Статистика системы"))
-    builder.add(KeyboardButton(text="⚙️ Настройки ротации"))
-    builder.add(KeyboardButton(text="🔄 Проверить все"))
-    builder.add(KeyboardButton(text="📋 История промоакций"))
-    builder.add(KeyboardButton(text="❓ Помощь"))
-    builder.adjust(2, 2, 2, 2, 2)
+    builder.add(KeyboardButton(text="🔄 Проверить всё"))
+    builder.add(KeyboardButton(text="🛡️ Обход блокировок"))
+    builder.adjust(2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 # СУЩЕСТВУЮЩИЕ КЛАВИАТУРЫ
@@ -82,6 +119,34 @@ def get_management_keyboard():
     builder.add(InlineKeyboardButton(text="⏰ Изменить интервал", callback_data="manage_interval"))
     builder.add(InlineKeyboardButton(text="✏️ Переименовать ссылку", callback_data="manage_rename"))
     builder.add(InlineKeyboardButton(text="🎯 Настроить парсинг", callback_data="manage_configure_parsing"))
+    builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
+    builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
+    builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="manage_cancel"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_category_management_menu():
+    """Подменю выбора категории для управления ссылками"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📋 Все ссылки", callback_data="category_all"))
+    builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="category_airdrop"))
+    builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="category_staking"))
+    builder.add(InlineKeyboardButton(text="🚀 Лаунчпул", callback_data="category_launchpool"))
+    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="category_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Назад", callback_data="back_to_main_menu"))
+    builder.adjust(1, 2, 2, 1)
+    return builder.as_markup()
+
+def get_staking_management_keyboard():
+    """Меню управления для ссылок категории 'staking' с дополнительной кнопкой"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🗑️ Удалить ссылку", callback_data="manage_delete"))
+    builder.add(InlineKeyboardButton(text="⏰ Изменить интервал", callback_data="manage_interval"))
+    builder.add(InlineKeyboardButton(text="✏️ Переименовать ссылку", callback_data="manage_rename"))
+    builder.add(InlineKeyboardButton(text="🎯 Настроить парсинг", callback_data="manage_configure_parsing"))
+    # НОВАЯ КНОПКА ДЛЯ СТЕЙКИНГА:
+    builder.add(InlineKeyboardButton(text="📊 Проверить заполненность пулов", callback_data="manage_check_pools"))
     builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
     builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
     builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
@@ -100,6 +165,15 @@ def get_links_keyboard(links, action_type="delete"):
         'browser': '🌐'
     }
 
+    # Словарь иконок для категорий
+    category_icons = {
+        'airdrop': '🪂',
+        'staking': '💰',
+        'launchpool': '🚀',
+        'announcement': '📢',
+        'general': '📁'
+    }
+
     for link in links:
         status_icon = "✅" if link.is_active else "❌"
 
@@ -109,8 +183,14 @@ def get_links_keyboard(links, action_type="delete"):
             parsing_type = link.parsing_type or 'combined'
             parsing_icon = parsing_icons.get(parsing_type, '🔄') + " "
 
+        # Добавляем иконку категории, если поле существует
+        category_icon = ""
+        if hasattr(link, 'category'):
+            category = link.category or 'general'
+            category_icon = category_icons.get(category, '📁') + " "
+
         builder.add(InlineKeyboardButton(
-            text=f"{status_icon} {parsing_icon}{link.name} ({link.check_interval}с)",
+            text=f"{status_icon} {category_icon}{parsing_icon}{link.name} ({link.check_interval}с)",
             callback_data=f"{action_type}_link_{link.id}"
         ))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
@@ -220,9 +300,32 @@ def get_rotation_settings_keyboard():
     builder.adjust(2)
     return builder.as_markup()
 
+def get_bypass_keyboard():
+    """Клавиатура для подменю Обход блокировок"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🔧 Управление прокси", callback_data="bypass_proxy"))
+    builder.add(InlineKeyboardButton(text="👤 Управление User-Agent", callback_data="bypass_ua"))
+    builder.add(InlineKeyboardButton(text="⚙️ Настройки ротации", callback_data="bypass_rotation"))
+    builder.add(InlineKeyboardButton(text="📈 Статистика системы", callback_data="bypass_stats"))
+    builder.add(InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_main_menu"))
+    builder.adjust(2)
+    return builder.as_markup()
+
+# КЛАВИАТУРЫ ДЛЯ КОНТЕКСТНОЙ НАВИГАЦИИ
+def get_cancel_keyboard_with_navigation():
+    """Клавиатура отмены с навигацией назад"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="nav_back"))
+    builder.add(InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_main_menu"))
+    builder.adjust(2)
+    return builder.as_markup()
+
 # ОСНОВНЫЕ КОМАНДЫ БОТА
 @router.message(Command("start"))
 async def cmd_start(message: Message):
+    # Очищаем историю навигации при возврате в главное меню
+    clear_navigation(message.from_user.id)
+
     menu = get_main_menu()
     await message.answer(
         "🤖 Добро пожаловать в Crypto Promo Bot!\n\n"
@@ -242,7 +345,7 @@ async def cmd_help(message: Message):
         "• 👤 Управление User-Agent - просмотр, добавление, генерация User-Agent\n"
         "• 📈 Статистика системы - общая статистика, статистика по биржам, лучшие комбинации\n"
         "• ⚙️ Настройки ротации - интервал ротации, автооптимизация, очистка данных\n"
-        "• 🔄 Проверить все - ручная проверка ТОЛЬКО АКТИВНЫХ ссылок\n"
+        "• 🔄 Проверить всё - ручная проверка ТОЛЬКО АКТИВНЫХ ссылок\n"
         "• 📋 История промоакций - история\n\n"
         "Пример API ссылки:\n"
         "https://api.bybit.com/v5/promotion/list"
@@ -269,6 +372,17 @@ async def menu_list_links(message: Message):
                 status = "✅ Активна" if link.is_active else "❌ Остановлена"
                 interval_minutes = link.check_interval // 60
 
+                # Определяем отображение категории
+                category = link.category or 'general'
+                category_icons = {
+                    'airdrop': '🪂 Аирдроп',
+                    'staking': '💰 Стейкинг',
+                    'launchpool': '🚀 Лаунчпул',
+                    'announcement': '📢 Анонс',
+                    'general': '📁 Общее'
+                }
+                category_display = category_icons.get(category, '📁 Общее')
+
                 # Определяем отображение типа парсинга
                 parsing_type = link.parsing_type or 'combined'
                 parsing_type_icons = {
@@ -280,6 +394,7 @@ async def menu_list_links(message: Message):
                 parsing_display = parsing_type_icons.get(parsing_type, '🔄 Комбинированный')
 
                 response += f"<b>{link.name}</b>\n"
+                response += f"Категория: {category_display}\n"
                 response += f"Статус: {status}\n"
                 response += f"Парсинг: {parsing_display}\n"
                 response += f"Интервал: {interval_minutes} мин\n"
@@ -293,17 +408,52 @@ async def menu_list_links(message: Message):
 
 @router.message(F.text == "➕ Добавить ссылку")
 async def menu_add_link(message: Message, state: FSMContext):
+    """Начало процесса добавления ссылки - выбор категории"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
+    builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
+    builder.add(InlineKeyboardButton(text="🚀 Лаунчпул", callback_data="add_category_launchpool"))
+    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(2, 2, 1)
+
     await message.answer(
         "🔗 <b>Добавление новой ссылки</b>\n\n"
-        "🏷️ <b>Шаг 1/4:</b> Введите название биржи\n\n"
-        "Примеры:\n"
-        "• <i>Bybit Promotions</i>\n"
-        "• <i>MEXC Launchpad</i>\n"
-        "• <i>OKX Earn</i>\n\n"
-        "Это название поможет вам легко находить ссылку в списке.",
+        "🗂️ <b>Шаг 1:</b> Выберите категорию ссылки:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_category)
+
+@router.callback_query(F.data.startswith("add_category_"), StateFilter(AddLinkStates.waiting_for_category))
+async def handle_category_choice(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора категории при добавлении ссылки"""
+    category = callback.data.replace("add_category_", "")
+
+    # Сохраняем категорию в state
+    await state.update_data(category=category)
+
+    category_names = {
+        'airdrop': 'Аирдроп',
+        'staking': 'Стейкинг',
+        'launchpool': 'Лаунчпул',
+        'announcement': 'Анонс'
+    }
+    category_display = category_names.get(category, category)
+
+    await callback.message.edit_text(
+        f"🔗 <b>Добавление новой ссылки</b>\n\n"
+        f"✅ <b>Категория:</b> {category_display}\n\n"
+        f"🏷️ <b>Шаг 2:</b> Введите название биржи\n\n"
+        f"Примеры:\n"
+        f"• <i>Bybit Promotions</i>\n"
+        f"• <i>MEXC Launchpad</i>\n"
+        f"• <i>OKX Earn</i>\n\n"
+        f"Это название поможет вам легко находить ссылку в списке.",
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_name)
+    await callback.answer()
 
 @router.message(AddLinkStates.waiting_for_name)
 async def process_name_input(message: Message, state: FSMContext):
@@ -327,11 +477,12 @@ async def process_name_input(message: Message, state: FSMContext):
     builder.add(InlineKeyboardButton(text="📡 Только API", callback_data="parsing_type_api"))
     builder.add(InlineKeyboardButton(text="🌐 Только HTML", callback_data="parsing_type_html"))
     builder.add(InlineKeyboardButton(text="🌐 Только Browser", callback_data="parsing_type_browser"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
     builder.adjust(1)
 
     await message.answer(
         f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
-        f"🎯 <b>Шаг 2/6:</b> Выберите тип парсинга\n\n"
+        f"🎯 <b>Шаг 2/5:</b> Выберите тип парсинга\n\n"
         f"<b>Типы парсинга:</b>\n"
         f"• <b>Комбинированный</b> - пробует все методы (Browser → API → HTML)\n"
         f"• <b>Только API</b> - быстрый, но может быть заблокирован\n"
@@ -354,15 +505,20 @@ async def process_parsing_type_selection(callback: CallbackQuery, state: FSMCont
     data = await state.get_data()
     custom_name = data.get('custom_name')
 
+    # Создаем клавиатуру с кнопкой отмены
+    cancel_builder = InlineKeyboardBuilder()
+    cancel_builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+
     # Определяем, какие URL нужно запросить в зависимости от типа парсинга
     if parsing_type == 'api':
         # Для API парсинга нужен только API URL
         await callback.message.edit_text(
             f"✅ Выбран тип: <b>Только API</b>\n\n"
-            f"📡 <b>Шаг 3/6:</b> Введите API ссылку\n\n"
+            f"📡 <b>Шаг 3/5:</b> Введите API ссылку\n\n"
             f"Пример:\n"
             f"<code>https://api.bybit.com/v5/promotion/list</code>\n\n"
             f"API ссылка используется для автоматического парсинга.",
+            reply_markup=cancel_builder.as_markup(),
             parse_mode="HTML"
         )
         await state.set_state(AddLinkStates.waiting_for_api_url)
@@ -371,10 +527,11 @@ async def process_parsing_type_selection(callback: CallbackQuery, state: FSMCont
         # Для HTML парсинга нужен только HTML URL
         await callback.message.edit_text(
             f"✅ Выбран тип: <b>Только HTML</b>\n\n"
-            f"🌐 <b>Шаг 3/6:</b> Введите HTML ссылку\n\n"
+            f"🌐 <b>Шаг 3/5:</b> Введите HTML ссылку\n\n"
             f"Пример:\n"
             f"<code>https://www.bybit.com/en/trade/spot/token-splash</code>\n\n"
             f"HTML ссылка используется для парсинга статических страниц.",
+            reply_markup=cancel_builder.as_markup(),
             parse_mode="HTML"
         )
         await state.set_state(AddLinkStates.waiting_for_html_url)
@@ -383,10 +540,11 @@ async def process_parsing_type_selection(callback: CallbackQuery, state: FSMCont
         # Для Browser парсинга нужен HTML URL (браузер открывает страницу)
         await callback.message.edit_text(
             f"✅ Выбран тип: <b>Только Browser</b>\n\n"
-            f"🌐 <b>Шаг 3/6:</b> Введите ссылку для браузерного парсинга\n\n"
+            f"🌐 <b>Шаг 3/5:</b> Введите ссылку для браузерного парсинга\n\n"
             f"Пример:\n"
             f"<code>https://www.mexc.com/token-airdrop</code>\n\n"
             f"Браузер откроет эту страницу и выполнит JavaScript для получения данных.",
+            reply_markup=cancel_builder.as_markup(),
             parse_mode="HTML"
         )
         await state.set_state(AddLinkStates.waiting_for_html_url)
@@ -395,11 +553,12 @@ async def process_parsing_type_selection(callback: CallbackQuery, state: FSMCont
         # Для комбинированного парсинга запрашиваем API URL сначала
         await callback.message.edit_text(
             f"✅ Выбран тип: <b>Комбинированный</b>\n\n"
-            f"📡 <b>Шаг 3/6:</b> Введите API ссылку\n\n"
+            f"📡 <b>Шаг 3/5:</b> Введите API ссылку\n\n"
             f"Пример:\n"
             f"<code>https://api.bybit.com/v5/promotion/list</code>\n\n"
             f"API ссылка используется для автоматического парсинга.\n"
             f"Далее вы сможете добавить HTML/Browser URL как fallback.",
+            reply_markup=cancel_builder.as_markup(),
             parse_mode="HTML"
         )
         await state.set_state(AddLinkStates.waiting_for_api_url)
@@ -422,11 +581,12 @@ async def process_api_url_input(message: Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="➕ Добавить HTML ссылку", callback_data="add_html_url"))
     builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_url"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
     builder.adjust(1)
 
     await message.answer(
         f"✅ API ссылка сохранена!\n\n"
-        f"🌐 <b>Шаг 3/4:</b> Добавить HTML ссылку?\n\n"
+        f"🌐 <b>Шаг 4/5:</b> Добавить HTML ссылку?\n\n"
         f"HTML ссылка используется как резервный метод парсинга, если API не сработает.\n\n"
         f"Выберите действие:",
         reply_markup=builder.as_markup(),
@@ -438,11 +598,17 @@ async def process_api_url_input(message: Message, state: FSMContext):
 @router.callback_query(F.data == "add_html_url")
 async def add_html_url(callback: CallbackQuery, state: FSMContext):
     """Обработчик кнопки 'Добавить HTML ссылку'"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_url"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1)
+
     await callback.message.edit_text(
         "🌐 <b>Введите HTML ссылку:</b>\n\n"
         "Пример:\n"
         "<code>https://www.bybit.com/en/trade/spot/token-splash</code>\n\n"
         "HTML используется как резервный метод парсинга.",
+        reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_html_url)
@@ -453,24 +619,45 @@ async def skip_html_url(callback: CallbackQuery, state: FSMContext):
     """Обработчик кнопки 'Пропустить' HTML"""
     data = await state.get_data()
     custom_name = data.get('custom_name')
+    category = data.get('category', 'general')
 
     # Создаем кнопки для выбора: добавить пример или пропустить
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="➕ Добавить пример ссылки", callback_data="add_example_url"))
     builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить добавление", callback_data="cancel_add_link"))
     builder.adjust(1)
 
+    # Разный текст для стейкинга и остальных категорий
+    if category == 'staking':
+        message_text = (
+            f"⏭️ HTML ссылка пропущена\n\n"
+            f"🔗 <b>Шаг 4/5: Добавить ссылку на страницу стейкинга?</b>\n\n"
+            f"<b>Имя:</b> {custom_name}\n\n"
+            f"Если вы предоставите ссылку на страницу стейкинга, бот сможет автоматически мониторить новые стейкинг предложения.\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• KuCoin Earn: <code>https://www.kucoin.com/ru/earn</code>\n"
+            f"• Bybit Earn: <code>https://www.bybit.com/en/earn/home</code>\n\n"
+            f"Это опционально, но очень полезно!"
+        )
+    else:
+        message_text = (
+            f"⏭️ HTML ссылка пропущена\n\n"
+            f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
+            f"<b>Имя:</b> {custom_name}\n\n"
+            f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
+            f"Это опционально, но очень полезно!"
+        )
+
     await callback.message.edit_text(
-        f"⏭️ HTML ссылка пропущена\n\n"
-        f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
-        f"<b>Имя:</b> {custom_name}\n\n"
-        f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
-        f"<b>Пример:</b>\n"
-        f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
-        f"Это опционально, но очень полезно!",
+        message_text,
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
+    # ИСПРАВЛЕНИЕ: устанавливаем состояние, чтобы принимать текстовый ввод
+    await state.set_state(AddLinkStates.waiting_for_example_url)
     await callback.answer()
 
 @router.message(AddLinkStates.waiting_for_html_url)
@@ -487,6 +674,7 @@ async def process_html_url_input(message: Message, state: FSMContext):
 
     data = await state.get_data()
     custom_name = data.get('custom_name')
+    category = data.get('category', 'general')
 
     # Создаем кнопки для выбора: добавить пример или пропустить
     builder = InlineKeyboardBuilder()
@@ -494,14 +682,31 @@ async def process_html_url_input(message: Message, state: FSMContext):
     builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
     builder.adjust(1)
 
+    # Разный текст для стейкинга и остальных категорий
+    if category == 'staking':
+        message_text = (
+            f"✅ HTML ссылка сохранена!\n\n"
+            f"🔗 <b>Шаг 4/5: Добавить ссылку на страницу стейкинга?</b>\n\n"
+            f"<b>Имя:</b> {custom_name}\n\n"
+            f"Если вы предоставите ссылку на страницу стейкинга, бот сможет автоматически мониторить новые стейкинг предложения.\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• KuCoin Earn: <code>https://www.kucoin.com/ru/earn</code>\n"
+            f"• Bybit Earn: <code>https://www.bybit.com/en/earn/home</code>\n\n"
+            f"Это опционально, но очень полезно!"
+        )
+    else:
+        message_text = (
+            f"✅ HTML ссылка сохранена!\n\n"
+            f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
+            f"<b>Имя:</b> {custom_name}\n\n"
+            f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
+            f"Это опционально, но очень полезно!"
+        )
+
     await message.answer(
-        f"✅ HTML ссылка сохранена!\n\n"
-        f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
-        f"<b>Имя:</b> {custom_name}\n\n"
-        f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
-        f"<b>Пример:</b>\n"
-        f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
-        f"Это опционально, но очень полезно!",
+        message_text,
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -513,14 +718,39 @@ async def process_html_url_input(message: Message, state: FSMContext):
 @router.callback_query(F.data == "add_example_url")
 async def add_example_url(callback: CallbackQuery, state: FSMContext):
     """Обработчик кнопки 'Добавить пример ссылки'"""
+    data = await state.get_data()
+    category = data.get('category', 'general')
+
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1)
+
+    # Разный текст для стейкинга и остальных категорий
+    if category == 'staking':
+        message_text = (
+            "🔗 <b>Введите ссылку на страницу стейкинга:</b>\n\n"
+            "Примеры:\n"
+            "• KuCoin Earn:\n"
+            "<code>https://www.kucoin.com/ru/earn</code>\n\n"
+            "• Bybit Earn:\n"
+            "<code>https://www.bybit.com/en/earn/home</code>\n\n"
+            "Бот будет мониторить эту страницу на новые стейкинг предложения."
+        )
+    else:
+        message_text = (
+            "🔗 <b>Введите пример ссылки на промоакцию:</b>\n\n"
+            "Примеры:\n"
+            "• MEXC Launchpad:\n"
+            "<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
+            "• Bybit Token Splash:\n"
+            "<code>https://www.bybit.com/en/trade/spot/token-splash/detail?code=20251201080514</code>\n\n"
+            "Бот автоматически проанализирует ссылку и создаст шаблон для генерации ссылок."
+        )
+
     await callback.message.edit_text(
-        "🔗 <b>Введите пример ссылки на промоакцию:</b>\n\n"
-        "Примеры:\n"
-        "• MEXC Launchpad:\n"
-        "<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
-        "• Bybit Token Splash:\n"
-        "<code>https://www.bybit.com/en/trade/spot/token-splash/detail?code=20251201080514</code>\n\n"
-        "Бот автоматически проанализирует ссылку и создаст шаблон для генерации ссылок.",
+        message_text,
+        reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_example_url)
@@ -542,6 +772,7 @@ async def skip_example_url(callback: CallbackQuery, state: FSMContext):
 
     for text, seconds in presets:
         builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
     builder.adjust(2)
 
     await callback.message.edit_text(
@@ -553,6 +784,15 @@ async def skip_example_url(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_interval)
+    await callback.answer()
+
+@router.callback_query(F.data == "cancel_add_link")
+async def cancel_add_link(callback: CallbackQuery, state: FSMContext):
+    """Отмена добавления ссылки"""
+    await state.clear()
+    await callback.message.edit_text(
+        "❌ Добавление ссылки отменено"
+    )
     await callback.answer()
 
 @router.message(AddLinkStates.waiting_for_example_url)
@@ -675,6 +915,12 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         custom_name = data.get('custom_name')
         parsing_type = data.get('parsing_type', 'combined')  # По умолчанию combined
 
+        # НОВЫЕ ПОЛЯ ФАЗЫ 2:
+        category = data.get('category', 'general')
+        page_url = data.get('page_url')
+        min_apr = data.get('min_apr')
+        statuses_filter = data.get('statuses_filter')
+
         def add_link_operation(session):
             new_link = ApiLink(
                 name=custom_name,
@@ -683,7 +929,12 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
                 html_url=html_url,  # НОВОЕ (может быть None)
                 parsing_type=parsing_type,  # НОВОЕ: тип парсинга
                 check_interval=interval_seconds,
-                added_by=callback.from_user.id
+                added_by=callback.from_user.id,
+                # НОВЫЕ ПОЛЯ ФАЗЫ 2:
+                category=category,
+                page_url=page_url,
+                min_apr=min_apr,
+                statuses_filter=statuses_filter
             )
             session.add(new_link)
             session.flush()
@@ -702,10 +953,20 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         }
         parsing_type_display = parsing_type_names.get(parsing_type, parsing_type)
 
+        category_names = {
+            'airdrop': 'Аирдроп',
+            'staking': 'Стейкинг',
+            'launchpool': 'Лаунчпул',
+            'announcement': 'Анонс',
+            'general': 'Общее'
+        }
+        category_display = category_names.get(category, category)
+
         # Формируем детальное сообщение
         message_parts = [
             "✅ <b>Ссылка успешно добавлена!</b>\n\n",
             f"<b>Имя:</b> {custom_name}\n",
+            f"<b>Категория:</b> {category_display}\n",
             f"<b>Тип парсинга:</b> {parsing_type_display}\n",
             f"<b>Интервал проверки:</b> {interval_minutes} минут\n\n"
         ]
@@ -715,6 +976,12 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
 
         if html_url:
             message_parts.append(f"\n<b>🌐 HTML URL:</b>\n<code>{html_url}</code>\n")
+
+        if page_url:
+            message_parts.append(f"\n<b>🔗 Страница акций:</b>\n<code>{page_url}</code>\n")
+
+        if min_apr:
+            message_parts.append(f"\n<b>📊 Минимальный APR:</b> {min_apr}%\n")
 
         await callback.message.edit_text(
             "".join(message_parts),
@@ -732,31 +999,271 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
 
 @router.message(F.text == "⚙️ Управление ссылками")
 async def menu_manage_links(message: Message):
+    """Показать подменю выбора категории для управления ссылками"""
     try:
-        with get_db_session() as db:
-            links = db.query(ApiLink).all()
-            
-            if not links:
-                await message.answer("❌ У вас нет ссылок для управления")
-                return
-            
-            user_selections[message.from_user.id] = links
-            keyboard = get_management_keyboard()
-            
-            await message.answer(
-                "⚙️ <b>Управление ссылками:</b>\n\n"
-                "Выберите действие для управления вашими ссылками:",
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
-            
+        clear_navigation(message.from_user.id)
+        push_navigation(message.from_user.id, NAV_MANAGEMENT)
+
+        await message.answer(
+            "🗂️ <b>Выберите раздел для управления:</b>",
+            reply_markup=get_category_management_menu(),
+            parse_mode="HTML"
+        )
+
     except Exception as e:
         logger.error(f"❌ Ошибка при управлении ссылками: {e}")
         await message.answer("❌ Ошибка при управлении ссылками")
 
+@router.callback_query(F.data.startswith("category_"))
+async def handle_category_selection(callback: CallbackQuery):
+    """Обработка выбора категории - показ ссылок этой категории"""
+    try:
+        category = callback.data.replace("category_", "")  # 'staking', 'airdrop', 'all' и т.д.
+
+        # Словарь названий категорий
+        category_names = {
+            'airdrop': 'Аирдроп',
+            'staking': 'Стейкинг',
+            'launchpool': 'Лаунчпул',
+            'announcement': 'Анонс',
+            'all': 'Все ссылки'
+        }
+        category_display = category_names.get(category, category)
+
+        # Получаем ссылки из БД
+        with get_db_session() as db:
+            if category == 'all':
+                # Для "Все ссылки" получаем все записи
+                links = db.query(ApiLink).all()
+            else:
+                # Для конкретной категории фильтруем
+                links = db.query(ApiLink).filter(ApiLink.category == category).all()
+
+            if not links:
+                await callback.message.edit_text(
+                    f"📭 <b>В разделе '{category_display}' пока нет ссылок</b>",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="❌ Назад", callback_data="back_to_categories")]
+                    ]),
+                    parse_mode="HTML"
+                )
+                await callback.answer()
+                return
+
+            # Детач данных для передачи в клавиатуру
+            links_data = []
+            for link in links:
+                links_data.append(type('Link', (), {
+                    'id': link.id,
+                    'name': link.name,
+                    'is_active': link.is_active,
+                    'check_interval': link.check_interval,
+                    'parsing_type': link.parsing_type or 'combined',
+                    'category': link.category or 'general'
+                })())
+
+            # Показываем список ссылок для управления
+            keyboard = get_links_keyboard(links_data, action_type="manage")
+
+            # Разный текст для "Все ссылки" и конкретной категории
+            if category == 'all':
+                header_text = f"📋 <b>{category_display}:</b>\n\n"
+            else:
+                header_text = f"🗂️ <b>Ссылки в категории '{category_display}':</b>\n\n"
+
+            await callback.message.edit_text(
+                f"{header_text}Выберите ссылку для управления:",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+
+            await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при выборе категории: {e}", exc_info=True)
+        await callback.message.edit_text("❌ Ошибка при загрузке ссылок")
+        await callback.answer()
+
+@router.callback_query(F.data == "back_to_categories")
+async def back_to_categories(callback: CallbackQuery):
+    """Возврат к выбору категории"""
+    try:
+        await callback.message.edit_text(
+            "🗂️ <b>Выберите раздел для управления:</b>",
+            reply_markup=get_category_management_menu(),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка при возврате к категориям: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data.startswith("manage_link_"))
+async def show_link_management(callback: CallbackQuery):
+    """Показать меню управления выбранной ссылкой (с учетом категории)"""
+    try:
+        link_id = int(callback.data.split("_")[2])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                await callback.answer()
+                return
+
+            # Сохраняем link_id для использования в других обработчиках
+            user_selections[callback.from_user.id] = link_id
+
+            # Выбираем правильную клавиатуру в зависимости от категории
+            if link.category == 'staking':
+                keyboard = get_staking_management_keyboard()
+            else:
+                keyboard = get_management_keyboard()
+
+            # Информация о ссылке
+            status_text = "✅ Активна" if link.is_active else "❌ Остановлена"
+            parsing_type_text = {
+                'api': 'API',
+                'html': 'HTML',
+                'browser': 'Browser',
+                'combined': 'Комбинированный'
+            }.get(link.parsing_type, 'Комбинированный')
+
+            await callback.message.edit_text(
+                f"⚙️ <b>Управление ссылкой:</b> {link.name}\n\n"
+                f"<b>Статус:</b> {status_text}\n"
+                f"<b>Категория:</b> {link.category or 'general'}\n"
+                f"<b>Интервал:</b> {link.check_interval}с ({link.check_interval // 60} мин)\n"
+                f"<b>Тип парсинга:</b> {parsing_type_text}\n\n"
+                f"Выберите действие:",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при показе меню управления ссылкой: {e}", exc_info=True)
+        await callback.message.edit_text("❌ Ошибка при загрузке меню")
+        await callback.answer()
+
+@router.callback_query(F.data == "manage_check_pools")
+async def check_staking_pools(callback: CallbackQuery):
+    """Проверка заполненности пулов для выбранной ссылки стейкинга"""
+    try:
+        # Получаем ID ссылки из user_selections
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ошибка: ссылка не выбрана", show_alert=True)
+            return
+
+        await callback.message.edit_text("⏳ <b>Проверяю заполненность пулов...</b>", parse_mode="HTML")
+
+        try:
+            # Получаем ссылку из БД и сохраняем нужные данные
+            with get_db_session() as db:
+                link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+                if not link:
+                    await callback.message.edit_text("❌ Ссылка не найдена")
+                    await callback.answer()
+                    return
+
+                if link.category != 'staking':
+                    await callback.message.edit_text("❌ Эта функция доступна только для ссылок категории 'Стейкинг'")
+                    await callback.answer()
+                    return
+
+                # ВАЖНО: Сохраняем все нужные данные из link пока сессия открыта
+                link_api_url = link.api_url or link.url
+                link_name = link.name
+                link_page_url = link.page_url
+
+            # Парсим стейкинги с текущей биржи
+            from parsers.staking_parser import StakingParser
+            from bot.notification_service import NotificationService
+
+            parser = StakingParser(
+                api_url=link_api_url,
+                exchange_name=link_name
+            )
+
+            stakings = parser.parse()
+
+            if not stakings:
+                message_text = (
+                    f"📊 <b>ОТЧЁТ: ЗАПОЛНЕННОСТЬ ПУЛОВ</b>\n\n"
+                    f"🏦 <b>Биржа:</b> {link_name}\n\n"
+                    f"ℹ️ Нет данных о стейкингах или заполненности пулов."
+                )
+            else:
+                # Фильтруем только стейкинги с данными о заполненности И APR >= 100%
+                pools_with_fill = [
+                    s for s in stakings
+                    if s.get('fill_percentage') is not None and s.get('apr', 0) >= 100
+                ]
+
+                if not pools_with_fill:
+                    # Проверяем, есть ли вообще пулы с заполненностью (без учета APR)
+                    pools_all = [s for s in stakings if s.get('fill_percentage') is not None]
+                    if pools_all:
+                        message_text = (
+                            f"📊 <b>ОТЧЁТ: ЗАПОЛНЕННОСТЬ ПУЛОВ</b>\n\n"
+                            f"🏦 <b>Биржа:</b> {link_name}\n\n"
+                            f"ℹ️ Найдено {len(pools_all)} пулов с данными о заполненности, "
+                            f"но ни один не имеет APR ≥ 100%."
+                        )
+                    else:
+                        message_text = (
+                            f"📊 <b>ОТЧЁТ: ЗАПОЛНЕННОСТЬ ПУЛОВ</b>\n\n"
+                            f"🏦 <b>Биржа:</b> {link_name}\n\n"
+                            f"ℹ️ Найдено {len(stakings)} стейкингов, но нет данных о заполненности."
+                        )
+                else:
+                    # Ограничиваем количество пулов до 10 для избежания слишком длинного сообщения
+                    MAX_POOLS_TO_SHOW = 10
+                    pools_to_show = pools_with_fill[:MAX_POOLS_TO_SHOW]
+
+                    # Используем форматтер для создания отчета
+                    notification_service = NotificationService(bot=None)
+                    message_text = notification_service.format_pools_report(
+                        pools_to_show,
+                        exchange_name=link_name,
+                        page_url=link_page_url
+                    )
+                    # Добавляем информацию о фильтрации
+                    total_with_fill = len([s for s in stakings if s.get('fill_percentage') is not None])
+                    info_parts = []
+
+                    if len(pools_with_fill) > MAX_POOLS_TO_SHOW:
+                        info_parts.append(f"Показаны топ {MAX_POOLS_TO_SHOW} из {len(pools_with_fill)} пулов с APR ≥ 100%")
+                    elif total_with_fill > len(pools_with_fill):
+                        info_parts.append(f"Показаны только пулы с APR ≥ 100% ({len(pools_with_fill)} из {total_with_fill})")
+
+                    if info_parts:
+                        message_text += f"\n\n<i>ℹ️ {' | '.join(info_parts)}</i>"
+
+            # Отправляем результат
+            await callback.message.edit_text(message_text, parse_mode="HTML", disable_web_page_preview=True)
+            await callback.answer()
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при проверке заполненности пулов: {e}", exc_info=True)
+            await callback.message.edit_text(f"❌ Ошибка при проверке: {str(e)}")
+            await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка в обработчике check_staking_pools: {e}", exc_info=True)
+        await callback.answer("❌ Произошла ошибка", show_alert=True)
+
 @router.callback_query(F.data == "manage_delete")
 async def manage_delete(callback: CallbackQuery):
     try:
+        # Сохраняем контекст навигации
+        push_navigation(callback.from_user.id, NAV_DELETE)
+
         with get_db_session() as db:
             links = db.query(ApiLink).all()
 
@@ -830,16 +1337,42 @@ async def process_confirmation(callback: CallbackQuery):
 
         link_name = atomic_operation(delete_link_operation)
 
-        await callback.message.edit_text(
-            f"✅ <b>Ссылка успешно удалена!</b>\n\n"
-            f"<b>Название:</b> {link_name}\n\n"
-            f"Ссылка больше не будет проверяться.",
-            parse_mode="HTML"
-        )
-        
         if callback.from_user.id in user_selections:
             del user_selections[callback.from_user.id]
-        
+
+        # Проверяем, остались ли ещё ссылки
+        with get_db_session() as db:
+            remaining_links = db.query(ApiLink).all()
+
+            if remaining_links:
+                # Если остались ссылки - показываем обновленный список
+                links_data = []
+                for link in remaining_links:
+                    links_data.append(type('Link', (), {
+                        'id': link.id,
+                        'name': link.name,
+                        'is_active': link.is_active,
+                        'check_interval': link.check_interval,
+                        'parsing_type': link.parsing_type or 'combined'
+                    })())
+
+                keyboard = get_links_keyboard(links_data, "delete")
+                await callback.message.edit_text(
+                    f"✅ <b>Ссылка '{link_name}' успешно удалена!</b>\n\n"
+                    f"🗑️ Выберите следующую ссылку для удаления:",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            else:
+                # Если ссылок больше нет
+                navigation_keyboard = get_cancel_keyboard_with_navigation()
+                await callback.message.edit_text(
+                    f"✅ <b>Ссылка '{link_name}' успешно удалена!</b>\n\n"
+                    f"📭 У вас больше нет ссылок.",
+                    parse_mode="HTML",
+                    reply_markup=navigation_keyboard
+                )
+
         await callback.answer("✅ Ссылка удалена")
         
     except Exception as e:
@@ -849,14 +1382,87 @@ async def process_confirmation(callback: CallbackQuery):
 
 @router.callback_query(F.data.in_(["cancel_action", "manage_cancel"]))
 async def process_cancel(callback: CallbackQuery):
-    await callback.message.edit_text("❌ Действие отменено")
+    """Улучшенный обработчик отмены с навигацией"""
+    await callback.message.edit_text(
+        "❌ Действие отменено\n\nЧто вы хотите сделать?",
+        reply_markup=get_cancel_keyboard_with_navigation()
+    )
     if callback.from_user.id in user_selections:
         del user_selections[callback.from_user.id]
+    await callback.answer()
+
+# ОБРАБОТЧИКИ НАВИГАЦИИ
+@router.callback_query(F.data == "nav_back")
+async def nav_back_handler(callback: CallbackQuery):
+    """Возврат к предыдущему шагу в стеке навигации"""
+    user_id = callback.from_user.id
+
+    # Удаляем текущий контекст
+    pop_navigation(user_id)
+
+    # Получаем предыдущий контекст
+    prev_context = get_current_navigation(user_id)
+
+    if prev_context:
+        context = prev_context["context"]
+
+        # Перенаправляем на соответствующий обработчик в зависимости от контекста
+        if context == NAV_MANAGEMENT:
+            await callback.message.edit_text(
+                "⚙️ <b>Управление ссылками</b>\n\n"
+                "Выберите действие:",
+                reply_markup=get_management_keyboard(),
+                parse_mode="HTML"
+            )
+        elif context == NAV_DELETE:
+            # Возвращаемся к выбору ссылки для удаления
+            callback.data = "manage_delete"
+            await manage_delete(callback)
+            return
+        elif context == NAV_INTERVAL:
+            callback.data = "manage_interval"
+            await manage_interval(callback)
+            return
+        else:
+            # Если контекст неизвестен, возвращаемся в главное меню
+            await callback.message.edit_text("🏠 Возврат в главное меню", reply_markup=get_cancel_keyboard_with_navigation())
+    else:
+        # Если стек пустой, предлагаем вернуться в главное меню
+        await callback.message.edit_text("🏠 Возврат в главное меню", reply_markup=get_cancel_keyboard_with_navigation())
+
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_management")
+async def back_to_management_handler(callback: CallbackQuery):
+    """Возврат к меню управления ссылками"""
+    clear_navigation(callback.from_user.id)
+    push_navigation(callback.from_user.id, NAV_MANAGEMENT)
+
+    await callback.message.edit_text(
+        "⚙️ <b>Управление ссылками</b>\n\n"
+        "Выберите действие:",
+        reply_markup=get_management_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_main_menu")
+async def back_to_main_menu_handler(callback: CallbackQuery):
+    """Возврат в главное меню"""
+    clear_navigation(callback.from_user.id)
+
+    await callback.message.edit_text(
+        "🏠 Главное меню\n\n"
+        "Используйте кнопки меню ниже для выбора действия"
+    )
     await callback.answer()
 
 @router.callback_query(F.data == "manage_interval")
 async def manage_interval(callback: CallbackQuery):
     try:
+        # Сохраняем контекст навигации
+        push_navigation(callback.from_user.id, NAV_INTERVAL)
+
         with get_db_session() as db:
             links = db.query(ApiLink).all()
 
@@ -970,15 +1576,40 @@ async def process_new_name_input(message: Message, state: FSMContext):
 
         exchange = atomic_operation(rename_link_operation)
 
-        await message.answer(
-            f"✅ <b>Ссылка успешно переименована!</b>\n\n"
-            f"<b>Старое имя:</b> {current_name}\n"
-            f"<b>Новое имя:</b> {new_name}\n"
-            f"<b>Биржа:</b> {exchange}",
-            parse_mode="HTML"
-        )
-
         await state.clear()
+
+        # Показываем обновленный список ссылок для продолжения переименования
+        with get_db_session() as db:
+            links = db.query(ApiLink).all()
+
+            if links:
+                links_data = []
+                for link in links:
+                    links_data.append(type('Link', (), {
+                        'id': link.id,
+                        'name': link.name,
+                        'is_active': link.is_active,
+                        'check_interval': link.check_interval,
+                        'parsing_type': link.parsing_type or 'combined'
+                    })())
+
+                keyboard = get_links_keyboard(links_data, "rename")
+                await message.answer(
+                    f"✅ <b>Ссылка переименована!</b>\n"
+                    f"'{current_name}' → '{new_name}'\n\n"
+                    f"✏️ Выберите следующую ссылку для переименования:",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            else:
+                navigation_keyboard = get_cancel_keyboard_with_navigation()
+                await message.answer(
+                    f"✅ <b>Ссылка переименована!</b>\n\n"
+                    f"<b>Старое имя:</b> {current_name}\n"
+                    f"<b>Новое имя:</b> {new_name}",
+                    parse_mode="HTML",
+                    reply_markup=navigation_keyboard
+                )
 
     except Exception as e:
         logger.error(f"❌ Ошибка при переименовании ссылки: {e}")
@@ -1030,16 +1661,42 @@ async def process_interval_preset(callback: CallbackQuery):
             return link.name
         
         link_name = atomic_operation(update_interval_operation)
-        
+
         interval_minutes = interval_seconds // 60
-        await callback.message.edit_text(
-            f"✅ <b>Интервал обновлен!</b>\n\n"
-            f"<b>Ссылка:</b> {link_name}\n"
-            f"<b>Новый интервал:</b> {interval_seconds} сек ({interval_minutes} мин)\n\n"
-            f"Теперь проверка будет выполняться каждые {interval_minutes} минут.",
-            parse_mode="HTML"
-        )
-        
+
+        # Показываем обновленный список ссылок для продолжения изменения интервалов
+        with get_db_session() as db:
+            links = db.query(ApiLink).all()
+
+            if links:
+                links_data = []
+                for link in links:
+                    links_data.append(type('Link', (), {
+                        'id': link.id,
+                        'name': link.name,
+                        'is_active': link.is_active,
+                        'check_interval': link.check_interval,
+                        'parsing_type': link.parsing_type or 'combined'
+                    })())
+
+                keyboard = get_links_keyboard(links_data, "interval")
+                await callback.message.edit_text(
+                    f"✅ <b>Интервал обновлен для '{link_name}'!</b>\n"
+                    f"<b>Новый интервал:</b> {interval_seconds} сек ({interval_minutes} мин)\n\n"
+                    f"⏰ Выберите следующую ссылку для изменения интервала:",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            else:
+                navigation_keyboard = get_cancel_keyboard_with_navigation()
+                await callback.message.edit_text(
+                    f"✅ <b>Интервал обновлен!</b>\n\n"
+                    f"<b>Ссылка:</b> {link_name}\n"
+                    f"<b>Новый интервал:</b> {interval_seconds} сек ({interval_minutes} мин)",
+                    parse_mode="HTML",
+                    reply_markup=navigation_keyboard
+                )
+
         await callback.answer("✅ Интервал обновлен")
         
     except Exception as e:
@@ -1191,13 +1848,36 @@ async def process_pause_link(callback: CallbackQuery):
 
         link_name = atomic_operation(pause_link_operation)
 
-        await callback.message.edit_text(
-            f"⏸️ <b>Парсинг остановлен!</b>\n\n"
-            f"<b>Ссылка:</b> {link_name}\n\n"
-            f"Эта ссылка больше не будет проверяться автоматически.\n"
-            f"Используйте <b>\"▶️ Возобновить парсинг\"</b> для активации.",
-            parse_mode="HTML"
-        )
+        # Показываем обновленный список активных ссылок для продолжения остановки
+        with get_db_session() as db:
+            active_links = db.query(ApiLink).filter(ApiLink.is_active == True).all()
+
+            if active_links:
+                links_data = []
+                for link in active_links:
+                    links_data.append(type('Link', (), {
+                        'id': link.id,
+                        'name': link.name,
+                        'is_active': link.is_active,
+                        'check_interval': link.check_interval,
+                        'parsing_type': link.parsing_type or 'combined'
+                    })())
+
+                keyboard = get_toggle_parsing_keyboard(links_data, "pause")
+                await callback.message.edit_text(
+                    f"⏸️ <b>Парсинг остановлен для '{link_name}'!</b>\n\n"
+                    f"Выберите следующую ссылку для остановки:",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            else:
+                navigation_keyboard = get_cancel_keyboard_with_navigation()
+                await callback.message.edit_text(
+                    f"⏸️ <b>Парсинг остановлен для '{link_name}'!</b>\n\n"
+                    f"Все ссылки остановлены.",
+                    parse_mode="HTML",
+                    reply_markup=navigation_keyboard
+                )
 
         await callback.answer("⏸️ Парсинг остановлен")
 
@@ -1220,12 +1900,36 @@ async def process_resume_link(callback: CallbackQuery):
 
         link_name = atomic_operation(resume_link_operation)
 
-        await callback.message.edit_text(
-            f"▶️ <b>Парсинг возобновлен!</b>\n\n"
-            f"<b>Ссылка:</b> {link_name}\n\n"
-            f"Эта ссылка снова будет проверяться автоматически.",
-            parse_mode="HTML"
-        )
+        # Показываем обновленный список неактивных ссылок для продолжения возобновления
+        with get_db_session() as db:
+            inactive_links = db.query(ApiLink).filter(ApiLink.is_active == False).all()
+
+            if inactive_links:
+                links_data = []
+                for link in inactive_links:
+                    links_data.append(type('Link', (), {
+                        'id': link.id,
+                        'name': link.name,
+                        'is_active': link.is_active,
+                        'check_interval': link.check_interval,
+                        'parsing_type': link.parsing_type or 'combined'
+                    })())
+
+                keyboard = get_toggle_parsing_keyboard(links_data, "resume")
+                await callback.message.edit_text(
+                    f"▶️ <b>Парсинг возобновлен для '{link_name}'!</b>\n\n"
+                    f"Выберите следующую ссылку для возобновления:",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+            else:
+                navigation_keyboard = get_cancel_keyboard_with_navigation()
+                await callback.message.edit_text(
+                    f"▶️ <b>Парсинг возобновлен для '{link_name}'!</b>\n\n"
+                    f"Все ссылки активны.",
+                    parse_mode="HTML",
+                    reply_markup=navigation_keyboard
+                )
 
         await callback.answer("▶️ Парсинг возобновлен")
 
@@ -1634,15 +2338,74 @@ async def process_html_url_edit(message: Message, state: FSMContext):
         await message.answer("❌ Ошибка при сохранении HTML URL")
         await state.clear()
 
-@router.message(F.text == "🔄 Проверить все")
+@router.message(F.text == "🔄 Проверить всё")
 async def menu_check_all(message: Message):
     await message.answer("🔄 Начинаю проверку АКТИВНЫХ ссылок...")
-    
+
     bot_instance = bot_manager.get_instance()
     if bot_instance:
         await bot_instance.manual_check_all_links(message.chat.id)
     else:
         await message.answer("❌ Бот не инициализирован")
+
+@router.message(F.text == "🛡️ Обход блокировок")
+async def menu_bypass(message: Message):
+    """Показать подменю обхода блокировок"""
+    keyboard = get_bypass_keyboard()
+    await message.answer(
+        "🛡️ <b>Обход блокировок</b>\n\n"
+        "Выберите нужную функцию:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "bypass_proxy")
+async def bypass_proxy_handler(callback: CallbackQuery):
+    """Открыть управление прокси из подменю обхода блокировок"""
+    keyboard = get_proxy_management_keyboard()
+    await callback.message.edit_text(
+        "🔧 <b>Управление прокси-серверами</b>\n\n"
+        "Выберите действие для управления прокси:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "bypass_ua")
+async def bypass_ua_handler(callback: CallbackQuery):
+    """Открыть управление User-Agent из подменю обхода блокировок"""
+    keyboard = get_user_agent_management_keyboard()
+    await callback.message.edit_text(
+        "👤 <b>Управление User-Agent</b>\n\n"
+        "Выберите действие для управления User-Agent:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "bypass_rotation")
+async def bypass_rotation_handler(callback: CallbackQuery):
+    """Открыть настройки ротации из подменю обхода блокировок"""
+    keyboard = get_rotation_settings_keyboard()
+    await callback.message.edit_text(
+        "⚙️ <b>Настройки ротации</b>\n\n"
+        "Управление параметрами ротации прокси и User-Agent:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "bypass_stats")
+async def bypass_stats_handler(callback: CallbackQuery):
+    """Открыть статистику системы из подменю обхода блокировок"""
+    keyboard = get_statistics_keyboard()
+    await callback.message.edit_text(
+        "📈 <b>Статистика системы</b>\n\n"
+        "Выберите раздел статистики:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
 @router.message(F.text == "📋 История промоакций")
 async def menu_history(message: Message):

@@ -127,7 +127,8 @@ class DatabaseMigration:
             self._migration_002_add_indexes,
             self._migration_003_add_multiple_urls,
             self._migration_004_convert_to_single_urls,
-            self._migration_005_add_parsing_type
+            self._migration_005_add_parsing_type,
+            self._migration_006_add_staking_fields
         ])
     
     def _migration_001_initial(self, session):
@@ -180,36 +181,51 @@ class DatabaseMigration:
 
             session.commit()
 
-            # Шаг 3: Конвертация данных
-            links = session.query(ApiLink).all()
+            # Шаг 3: Конвертация данных используя raw SQL
+            # Получаем данные напрямую через SQL
+            result = session.execute(text("SELECT id, url, api_urls, html_urls, api_url, html_url, exchange FROM api_links"))
+            rows = result.fetchall()
             converted_count = 0
 
-            for link in links:
-                if link.api_url:  # Уже конвертировано
+            for row in rows:
+                link_id = row[0]
+                url = row[1]
+                api_urls_json = row[2]
+                html_urls_json = row[3]
+                current_api_url = row[4]
+                current_html_url = row[5]
+
+                # Пропускаем если уже конвертировано
+                if current_api_url:
                     continue
 
-                # Конвертируем API URLs (берем первый из массива)
+                # Конвертируем API URLs
+                new_api_url = None
                 try:
-                    api_urls_list = json.loads(link.api_urls) if link.api_urls else []
+                    api_urls_list = json.loads(api_urls_json) if api_urls_json else []
                     if api_urls_list:
-                        link.api_url = api_urls_list[0]
-                    elif link.url:
-                        link.api_url = link.url  # Fallback
+                        new_api_url = api_urls_list[0]
+                    elif url:
+                        new_api_url = url
                 except:
-                    if link.url:
-                        link.api_url = link.url
+                    if url:
+                        new_api_url = url
 
-                # Конвертируем HTML URLs (берем первый из массива)
+                # Конвертируем HTML URLs
+                new_html_url = None
                 try:
-                    html_urls_list = json.loads(link.html_urls) if link.html_urls else []
+                    html_urls_list = json.loads(html_urls_json) if html_urls_json else []
                     if html_urls_list:
-                        link.html_url = html_urls_list[0]
+                        new_html_url = html_urls_list[0]
                 except:
-                    pass  # HTML опциональный
+                    pass
 
-                # Очищаем exchange (больше не используется)
-                link.exchange = None
-                converted_count += 1
+                # Обновляем через SQL
+                if new_api_url:
+                    session.execute(text(
+                        "UPDATE api_links SET api_url = :api_url, html_url = :html_url, exchange = NULL WHERE id = :id"
+                    ), {"api_url": new_api_url, "html_url": new_html_url, "id": link_id})
+                    converted_count += 1
 
             session.commit()
             logging.info(f"✅ Миграция 004: Конвертировано {converted_count} ссылок")
@@ -237,6 +253,40 @@ class DatabaseMigration:
 
         except Exception as e:
             logging.error(f"❌ Ошибка в миграции 005: {e}")
+            raise
+
+    def _migration_006_add_staking_fields(self, session):
+        """Миграция 006: Добавление полей для стейкинга"""
+        try:
+            # Проверка существующих столбцов
+            result = session.execute(text("PRAGMA table_info(api_links)"))
+            columns = [row[1] for row in result.fetchall()]
+
+            # Добавление новых полей для стейкинга
+            fields_to_add = {
+                'category': "TEXT DEFAULT 'general'",
+                'page_url': "TEXT",
+                'min_apr': "REAL",
+                'track_fill': "INTEGER DEFAULT 0",
+                'statuses_filter': "TEXT",
+                'types_filter': "TEXT"
+            }
+
+            added_count = 0
+            for field_name, field_type in fields_to_add.items():
+                if field_name not in columns:
+                    session.execute(text(f"ALTER TABLE api_links ADD COLUMN {field_name} {field_type}"))
+                    logging.info(f"✅ Добавлен столбец {field_name}")
+                    added_count += 1
+
+            if added_count > 0:
+                session.commit()
+                logging.info(f"✅ Миграция 006: Добавлено {added_count} полей для стейкинга")
+            else:
+                logging.info("ℹ️ Все поля стейкинга уже существуют")
+
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 006: {e}")
             raise
 
     def run_migrations(self):

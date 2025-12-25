@@ -14,13 +14,14 @@ import os
 import signal
 import sys
 
+# Импортируем конфигурацию из config.py
+import config
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-BOT_TOKEN = "8256535319:AAE5YfagYcC1RF7M77UaJf7wyReiAniRli8"
 
 class CryptoPromoBot:
     def __init__(self):
@@ -29,20 +30,31 @@ class CryptoPromoBot:
         self.scheduler = None
         self.parser_service = None
         self.notification_service = None
-        self.YOUR_CHAT_ID = 7193869664
+        self.YOUR_CHAT_ID = config.ADMIN_CHAT_ID
         self._shutdown_event = asyncio.Event()
 
     async def init_services(self):
         """Инициализация всех сервисов"""
         from data.database import init_database, DatabaseMigration
-        
+        from utils.playwright_checker import ensure_playwright_ready
+
+        # Проверка Playwright ПЕРЕД инициализацией (критично для browser_parser)
+        logger.info("🔍 Проверка готовности Playwright...")
+        if not ensure_playwright_ready():
+            logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Playwright не готов к работе")
+            logger.error("🔧 Парсинг через браузер (browser_parser) будет недоступен")
+            logger.error("💡 Решение: Запустите 'playwright install chromium'")
+            # НЕ прерываем запуск - остальные парсеры могут работать
+        else:
+            logger.info("✅ Playwright готов к работе")
+
         init_database()
         
         # Запуск миграций
         migration_runner = DatabaseMigration()
         migration_runner.run_migrations()
-        
-        self.bot = Bot(token=BOT_TOKEN)
+
+        self.bot = Bot(token=config.BOT_TOKEN)
         storage = MemoryStorage()
         self.dp = Dispatcher(storage=storage)
         self.parser_service = ParserService()
@@ -67,8 +79,21 @@ class CryptoPromoBot:
         logger.info(f"🛑 Получен сигнал завершения {signum}")
         asyncio.create_task(self.shutdown())
 
+    def _get_promo_count_for_link(self, link_id: int) -> int:
+        """Получить количество промоакций для конкретной ссылки"""
+        try:
+            from data.database import get_db_session
+            from data.models import PromoHistory
+
+            with get_db_session() as db:
+                count = db.query(PromoHistory).filter(PromoHistory.api_link_id == link_id).count()
+                return count
+        except Exception as e:
+            logger.error(f"❌ Ошибка подсчета промоакций: {e}")
+            return 0
+
     async def smart_auto_check(self):
-        """Умная автоматическая проверка - ТОЛЬКО АКТИВНЫЕ ссылки"""
+        """Умная автоматическая проверка - ТОЛЬКО АКТИВНЫЕ ссылки (Вариант 1: Компактный)"""
         try:
             logger.info("🤖 Запуск автоматической проверки АКТИВНЫХ ссылок...")
 
@@ -89,7 +114,10 @@ class CryptoPromoBot:
                         'url': link.url,
                         'check_interval': link.check_interval,
                         'last_checked': link.last_checked,
-                        'exchange': link.exchange or 'Unknown'
+                        'exchange': link.exchange or 'Unknown',
+                        'category': link.category or 'general',
+                        'api_url': link.api_url,
+                        'page_url': link.page_url
                     })
 
             total_checked = 0
@@ -107,21 +135,72 @@ class CryptoPromoBot:
                 needs_check = time_since_last_check.total_seconds() >= link_data['check_interval']
 
                 if needs_check:
-                    logger.info(f"🔍 Автоматически проверяем {link_data['name']} (интервал: {link_data['check_interval']}сек)")
+                    # Проверяем категорию ссылки
+                    category = link_data.get('category', 'general')
 
-                    # Синхронный вызов в отдельном потоке
-                    loop = asyncio.get_event_loop()
-                    new_promos = await loop.run_in_executor(
-                        None, self.parser_service.check_for_new_promos, link_data['id'], link_data['url']
-                    )
+                    if category == 'staking':
+                        # СТЕЙКИНГ: используем parse_staking_link()
+                        logger.info(f"💰 Проверка стейкинга: {link_data['name']}")
 
-                    # Отправляем уведомления о новых промоакциях
-                    if new_promos:
-                        await self.notification_service.send_bulk_notifications(
-                            self.YOUR_CHAT_ID, new_promos
+                        # Синхронный вызов в отдельном потоке
+                        loop = asyncio.get_event_loop()
+                        new_stakings = await loop.run_in_executor(
+                            None,
+                            self.parser_service.parse_staking_link,
+                            link_data['id'],
+                            link_data.get('api_url') or link_data['url'],
+                            link_data['exchange'],
+                            link_data.get('page_url')
                         )
-                        logger.info(f"📨 Отправлено {len(new_promos)} уведомлений")
-                        total_new_promos += len(new_promos)
+
+                        new_count = len(new_stakings) if new_stakings else 0
+
+                        if new_count > 0:
+                            logger.info(f"🎉 Найдено {new_count} новых стейкингов")
+
+                            # Отправляем уведомления о новых стейкингах
+                            for staking in new_stakings:
+                                message = self.notification_service.format_new_staking(
+                                    staking,
+                                    page_url=link_data.get('page_url')
+                                )
+                                await self.notification_service.send_message(
+                                    self.YOUR_CHAT_ID,
+                                    message
+                                )
+                            total_new_promos += new_count
+                        else:
+                            logger.info(f"✅ Все стейкинги уже известны")
+
+                    else:
+                        # ОБЫЧНЫЕ ПРОМОАКЦИИ: используем check_for_new_promos()
+                        # Получаем количество ДО проверки
+                        count_before = self._get_promo_count_for_link(link_data['id'])
+
+                        # Синхронный вызов в отдельном потоке
+                        loop = asyncio.get_event_loop()
+                        new_promos = await loop.run_in_executor(
+                            None, self.parser_service.check_for_new_promos, link_data['id'], link_data['url']
+                        )
+
+                        # Получаем количество ПОСЛЕ проверки
+                        count_after = self._get_promo_count_for_link(link_data['id'])
+                        new_count = len(new_promos) if new_promos else 0
+
+                        # КОМПАКТНЫЙ ВЫВОД (Вариант 1)
+                        if new_count > 0:
+                            logger.info(f"🔍 Проверка: {link_data['name']}")
+                            logger.info(f"🎉 Проверено успешно | Было: {count_before} → Стало: {count_after} | Новых: {new_count}")
+                        else:
+                            logger.info(f"🔍 Проверка: {link_data['name']}")
+                            logger.info(f"✅ Проверено успешно | Было: {count_before} → Стало: {count_after} | Новых: 0")
+
+                        # Отправляем уведомления о новых промоакциях
+                        if new_promos:
+                            await self.notification_service.send_bulk_notifications(
+                                self.YOUR_CHAT_ID, new_promos
+                            )
+                            total_new_promos += new_count
 
                     # Обновляем время последней проверки в НОВОЙ сессии
                     with get_db_session() as db:
@@ -136,8 +215,10 @@ class CryptoPromoBot:
                     remaining_time = link_data['check_interval'] - time_since_last_check.total_seconds()
                     logger.debug(f"⏰ Пропускаем {link_data['name']} - след. проверка через {remaining_time:.0f}сек")
 
+            # ИТОГОВАЯ СВОДКА
             if total_checked > 0:
-                logger.info(f"✅ Автоматически проверено {total_checked} активных ссылок, найдено {total_new_promos} новых промоакций!")
+                logger.info("━" * 60)
+                logger.info(f"📊 ИТОГО: Проверено {total_checked} биржи | Найдено {total_new_promos} новых промоакций")
             else:
                 logger.info("ℹ️ Нет активных ссылок для проверки в этот раз")
 
@@ -145,10 +226,16 @@ class CryptoPromoBot:
             logger.error(f"❌ Ошибка автоматической проверки: {e}")
 
     async def manual_check_all_links(self, chat_id: int):
-        """Ручная проверка - ТОЛЬКО АКТИВНЫЕ ссылки"""
+        """Ручная проверка - ТОЛЬКО АКТИВНЫЕ ссылки (Вариант 2: Детальная таблица)"""
         try:
-            logger.info(f"🔄 Ручная проверка АКТИВНЫХ ссылок от пользователя {chat_id}")
-            logger.info("=" * 80)
+            import time
+            start_time = time.time()
+
+            # Заголовок
+            logger.info("╔" + "═" * 62 + "╗")
+            logger.info("║" + "         🔍 РЕЗУЛЬТАТЫ РУЧНОЙ ПРОВЕРКИ".ljust(62) + "║")
+            logger.info("╚" + "═" * 62 + "╝")
+            logger.info("")
 
             # Собираем данные ссылок в контексте сессии
             links_data = []
@@ -166,81 +253,160 @@ class CryptoPromoBot:
                         'id': link.id,
                         'name': link.name,
                         'url': link.url,
-                        'exchange': link.exchange or 'Unknown'
+                        'exchange': link.exchange or 'Unknown',
+                        'category': link.category or 'general',
+                        'api_url': link.api_url,
+                        'page_url': link.page_url
                     })
 
-            logger.info(f"📊 Найдено {len(links_data)} активных ссылок для проверки:")
-            for i, link_data in enumerate(links_data, 1):
-                logger.info(f"   {i}. {link_data['name']} - {link_data['url']}")
-
+            # Результаты проверки для таблицы
+            check_results = []
             total_new_promos = 0
-            checked_links = 0
-            errors = []
+            total_promos_in_db = 0
 
             # Обрабатываем ссылки
             for link_data in links_data:
                 if self._shutdown_event.is_set():
                     logger.warning("⏹️ Проверка прервана пользователем")
-                    await self.bot.send_message(chat_id, "⏹️ Проверка прервана")
+                    await self.bot.send_message(chat_id, "⏹️ Проверка прervана")
                     return
 
                 try:
-                    logger.info("-" * 80)
-                    logger.info(f"🔍 НАЧАЛО ПРОВЕРКИ: {link_data['name']} (ID: {link_data['id']})")
-                    logger.info(f"   URL: {link_data['url']}")
-                    logger.info(f"   Биржа: {link_data['exchange']}")
+                    category = link_data.get('category', 'general')
 
-                    # Синхронный вызов в отдельном потоке
-                    loop = asyncio.get_event_loop()
-                    new_promos = await loop.run_in_executor(
-                        None, self.parser_service.check_for_new_promos, link_data['id'], link_data['url']
-                    )
+                    if category == 'staking':
+                        # СТЕЙКИНГ
+                        loop = asyncio.get_event_loop()
+                        new_stakings = await loop.run_in_executor(
+                            None,
+                            self.parser_service.parse_staking_link,
+                            link_data['id'],
+                            link_data.get('api_url') or link_data['url'],
+                            link_data['exchange'],
+                            link_data.get('page_url')
+                        )
 
-                    if new_promos:
-                        logger.info(f"🎉 НАЙДЕНО {len(new_promos)} новых промоакций в {link_data['name']}:")
-                        for i, promo in enumerate(new_promos, 1):
-                            logger.info(f"   {i}. {promo.get('title', 'Без названия')} (ID: {promo.get('promo_id', 'N/A')})")
+                        new_count = len(new_stakings) if new_stakings else 0
+
+                        # Определяем статус
+                        if new_count > 0:
+                            status = "💰 Новые стейкинги!"
+                        else:
+                            status = "✅ Без изменений"
+
+                        # Сохраняем результат
+                        check_results.append({
+                            'name': link_data['name'],
+                            'before': '-',
+                            'after': '-',
+                            'new': new_count,
+                            'status': status
+                        })
+
+                        # Отправляем уведомления о стейкингах
+                        if new_stakings:
+                            for staking in new_stakings:
+                                message = self.notification_service.format_new_staking(
+                                    staking,
+                                    page_url=link_data.get('page_url')
+                                )
+                                await self.notification_service.send_message(chat_id, message)
+                            total_new_promos += new_count
+
+                    else:
+                        # ОБЫЧНЫЕ ПРОМОАКЦИИ
+                        # Получаем количество ДО проверки
+                        count_before = self._get_promo_count_for_link(link_data['id'])
+
+                        # Синхронный вызов в отдельном потоке
+                        loop = asyncio.get_event_loop()
+                        new_promos = await loop.run_in_executor(
+                            None, self.parser_service.check_for_new_promos, link_data['id'], link_data['url']
+                        )
+
+                        # Получаем количество ПОСЛЕ проверки
+                        count_after = self._get_promo_count_for_link(link_data['id'])
+                        new_count = len(new_promos) if new_promos else 0
+
+                        # Определяем статус
+                        if new_count > 0:
+                            status = "🎉 Новые акции!"
+                        else:
+                            status = "✅ Без изменений"
+
+                        # Сохраняем результат
+                        check_results.append({
+                            'name': link_data['name'],
+                            'before': count_before,
+                            'after': count_after,
+                            'new': new_count,
+                            'status': status
+                        })
 
                         # Отправляем уведомления
-                        await self.notification_service.send_bulk_notifications(chat_id, new_promos)
-                        total_new_promos += len(new_promos)
-                    else:
-                        logger.info(f"ℹ️ В {link_data['name']} новых промоакций не найдено")
+                        if new_promos:
+                            await self.notification_service.send_bulk_notifications(chat_id, new_promos)
+                            total_new_promos += new_count
 
-                    # Обновляем время проверки в новой сессии
+                    # Обновляем время проверки
                     with get_db_session() as db:
                         link = db.query(ApiLink).filter(ApiLink.id == link_data['id']).first()
                         if link:
                             link.last_checked = datetime.utcnow()
                             db.commit()
-                            logger.debug(f"✅ Обновлено время последней проверки для {link_data['name']}")
 
-                    checked_links += 1
-                    logger.info(f"✅ ЗАВЕРШЕНА ПРОВЕРКА: {link_data['name']}")
+                    total_promos_in_db += count_after
 
                 except Exception as e:
-                    error_msg = f"{link_data['name']}: {str(e)}"
-                    logger.error(f"❌ ОШИБКА ПРОВЕРКИ {link_data['name']}: {e}", exc_info=True)
-                    errors.append(error_msg)
+                    # В случае ошибки добавляем в таблицу как ERROR
+                    check_results.append({
+                        'name': link_data['name'],
+                        'before': 'ERROR',
+                        'after': 'ERROR',
+                        'new': '-',
+                        'status': f"❌ {str(e)[:20]}..."
+                    })
+                    logger.error(f"❌ Ошибка проверки {link_data['name']}: {e}", exc_info=True)
                     continue
 
-            logger.info("=" * 80)
-            logger.info(f"📊 ИТОГИ РУЧНОЙ ПРОВЕРКИ:")
-            logger.info(f"   ✅ Проверено ссылок: {checked_links}/{len(links_data)}")
-            logger.info(f"   🆕 Найдено новых промоакций: {total_new_promos}")
-            logger.info(f"   ❌ Ошибок: {len(errors)}")
-            if errors:
-                logger.info(f"   Ошибки: {errors}")
+            # ВЫВОД ТАБЛИЦЫ (Вариант 2)
+            logger.info("┌" + "─" * 12 + "┬" + "─" * 9 + "┬" + "─" * 9 + "┬" + "─" * 9 + "┬" + "─" * 18 + "┐")
+            logger.info("│ " + "Биржа".ljust(10) + " │ " + "Было".ljust(7) + " │ " + "Стало".ljust(7) + " │ " + "Новых".ljust(7) + " │ " + "Статус".ljust(16) + " │")
+            logger.info("├" + "─" * 12 + "┼" + "─" * 9 + "┼" + "─" * 9 + "┼" + "─" * 9 + "┼" + "─" * 18 + "┤")
 
-            # Итоговое сообщение
-            message = f"✅ Проверено: {checked_links} ссылок\n🆕 Найдено: {total_new_promos} промоакций"
-            if errors:
-                message += f"\n\n❌ Ошибки ({len(errors)}):\n" + "\n".join(errors[:3])
-                if len(errors) > 3:
-                    message += f"\n... и еще {len(errors) - 3} ошибок"
+            for result in check_results:
+                name = result['name'][:10].ljust(10)
+                before = str(result['before']).ljust(7)
+                after = str(result['after']).ljust(7)
+                new = str(result['new']).ljust(7)
+                status = result['status'][:16].ljust(16)
+                logger.info(f"│ {name} │ {before} │ {after} │ {new} │ {status} │")
+
+            logger.info("└" + "─" * 12 + "┴" + "─" * 9 + "┴" + "─" * 9 + "┴" + "─" * 9 + "┴" + "─" * 18 + "┘")
+            logger.info("")
+
+            # ИТОГОВАЯ СТАТИСТИКА
+            elapsed_time = time.time() - start_time
+            success_count = len([r for r in check_results if r['before'] != 'ERROR'])
+            error_count = len([r for r in check_results if r['before'] == 'ERROR'])
+
+            logger.info(f"📊 Всего промоакций в базе: {total_promos_in_db}")
+            logger.info(f"🆕 Добавлено новых: {total_new_promos}")
+            logger.info(f"⏱️  Время проверки: {elapsed_time:.1f} сек")
+            logger.info("")
+
+            # Сообщение пользователю
+            success_rate = (success_count / len(check_results) * 100) if check_results else 0
+            message = (
+                f"✅ Проверка завершена\n"
+                f"📊 Всего бирж: {len(check_results)} | Успешно: {success_count} | Ошибок: {error_count}\n"
+                f"🆕 Новых промоакций: {total_new_promos}\n"
+                f"💾 База данных: {total_promos_in_db} промоакций\n"
+                f"⏱️ Затрачено: {elapsed_time:.1f} сек"
+            )
 
             await self.bot.send_message(chat_id, message)
-            logger.info("=" * 80)
+            logger.info("=" * 64)
 
         except Exception as e:
             logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА ручной проверки: {e}", exc_info=True)

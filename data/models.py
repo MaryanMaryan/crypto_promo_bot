@@ -1,5 +1,5 @@
 # data/models.py
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from data.database import Base
@@ -24,6 +24,16 @@ class ApiLink(Base):
     added_by = Column(Integer)
     last_checked = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # НОВЫЕ ПОЛЯ ДЛЯ СТЕЙКИНГА:
+    category = Column(String, default='general')  # 'staking', 'launchpool', 'airdrop', 'announcement'
+    page_url = Column(String, nullable=True)  # Ссылка на страницу акций
+
+    # Фильтры для стейкинга (только для category='staking'):
+    min_apr = Column(Float, nullable=True)  # Минимальный APR для показа
+    track_fill = Column(Boolean, default=False)  # Отслеживать заполненность
+    statuses_filter = Column(String, nullable=True)  # JSON список статусов: ["ONGOING", "INTERESTING"]
+    types_filter = Column(String, nullable=True)  # JSON список типов: ["Flexible", "Fixed"]
 
     def get_api_urls(self):
         """Получить список API URL"""
@@ -160,7 +170,7 @@ class AggregatedStats(Base):
 
 class RotationSettings(Base):
     __tablename__ = 'rotation_settings'
-    
+
     id = Column(Integer, primary_key=True)
     rotation_interval = Column(Integer, default=1800)
     auto_optimize = Column(Boolean, default=True)
@@ -170,3 +180,49 @@ class RotationSettings(Base):
     last_cleanup = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class StakingHistory(Base):
+    __tablename__ = 'staking_history'
+
+    id = Column(Integer, primary_key=True)
+
+    # Основная информация
+    exchange = Column(String, nullable=False)  # 'Kucoin', 'Bybit'
+    product_id = Column(String, nullable=False)  # ID от биржи
+    coin = Column(String, nullable=False)  # 'BTC', 'ETH', 'DOGE'
+    reward_coin = Column(String, nullable=True)  # Для Bybit (награда в другой монете)
+
+    # Условия стейкинга
+    apr = Column(Float, nullable=False)  # 200.0, 100.0
+    type = Column(String, nullable=True)  # 'Flexible', 'Fixed 30d', 'MULTI_TIME'
+    status = Column(String, nullable=True)  # 'Active', 'Sold Out', 'ONGOING', 'INTERESTING'
+    category = Column(String, nullable=True)  # 'ACTIVITY', 'DEMAND' (Kucoin)
+    term_days = Column(Integer, nullable=True)  # 14, 30, 90
+
+    # Лимиты и пулы
+    user_limit_tokens = Column(Float, nullable=True)  # 5000 IR, 7.24 DOGE
+    user_limit_usd = Column(Float, nullable=True)  # $664, $2.50
+    total_places = Column(Integer, nullable=True)  # 298 мест
+
+    # Данные о заполненности (если доступны)
+    max_capacity = Column(Float, nullable=True)  # Максимальная вместимость
+    current_deposit = Column(Float, nullable=True)  # Текущий депозит
+    fill_percentage = Column(Float, nullable=True)  # Процент заполнения
+
+    # Цены токенов
+    token_price_usd = Column(Float, nullable=True)  # Цена основной монеты
+    reward_token_price_usd = Column(Float, nullable=True)  # Цена наградной монеты
+
+    # Временные метки
+    start_time = Column(String, nullable=True)  # ISO format
+    end_time = Column(String, nullable=True)  # ISO format
+    first_seen = Column(DateTime, default=datetime.utcnow)  # Когда впервые нашли
+    last_updated = Column(DateTime, default=datetime.utcnow)  # Последнее обновление
+
+    # Флаги
+    notification_sent = Column(Boolean, default=False)  # Отправили ли уведомление о новом
+
+    # Уникальность по бирже и product_id
+    __table_args__ = (
+        UniqueConstraint('exchange', 'product_id', name='_exchange_product_uc'),
+    )

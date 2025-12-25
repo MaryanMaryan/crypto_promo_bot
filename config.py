@@ -1,16 +1,72 @@
-# В config.py ЗАМЕНИТЕ весь код на:
+"""
+Конфигурация приложения
+Загружается из .env файла через python-dotenv
+"""
 import os
+import sys
+from pathlib import Path
+from dotenv import load_dotenv
 
-# ПРИНУДИТЕЛЬНО НОВЫЙ ТОКЕН
-BOT_TOKEN = "8256535319:AAE5YfagYcC1RF7M77UaJf7wyReiAniRli8"
-ADMIN_CHAT_ID = 7193869664
+# Настройка кодировки для Windows
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'ignore')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'ignore')
 
-print(f"🚀 ЗАПУСК С НОВЫМ БОТОМ: {BOT_TOKEN[:15]}...")
+# Определяем корневую директорию проекта
+BASE_DIR = Path(__file__).resolve().parent
 
-# Остальные настройки
-DATABASE_URL = "sqlite:///data/database.db"
-DEFAULT_CHECK_INTERVAL = 300
-MAX_CHECK_INTERVAL = 86400
-MIN_CHECK_INTERVAL = 60
-LOG_LEVEL = "INFO"
-LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# Загружаем переменные окружения из .env
+env_path = BASE_DIR / '.env'
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+    print(f"✅ Конфигурация загружена из: {env_path}")
+else:
+    print(f"⚠️ ВНИМАНИЕ: .env файл не найден по пути {env_path}")
+    print(f"⚠️ Создайте .env файл на основе .env.example")
+
+# =============================================================================
+# TELEGRAM BOT CONFIGURATION
+# =============================================================================
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
+
+# Валидация критичных переменных
+if not BOT_TOKEN:
+    raise ValueError(
+        "❌ BOT_TOKEN не установлен!\n"
+        "Создайте .env файл и добавьте: BOT_TOKEN=your_token_here"
+    )
+
+if not ADMIN_CHAT_ID:
+    raise ValueError(
+        "❌ ADMIN_CHAT_ID не установлен!\n"
+        "Создайте .env файл и добавьте: ADMIN_CHAT_ID=your_chat_id"
+    )
+
+# Конвертируем ADMIN_CHAT_ID в int
+try:
+    ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
+except ValueError:
+    raise ValueError(f"❌ ADMIN_CHAT_ID должен быть числом, получено: {ADMIN_CHAT_ID}")
+
+print(f"🚀 Бот инициализирован: {BOT_TOKEN[:15]}...")
+print(f"👤 Admin Chat ID: {ADMIN_CHAT_ID}")
+
+# =============================================================================
+# DATABASE CONFIGURATION
+# =============================================================================
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///data/database.db')
+
+# =============================================================================
+# PARSING CONFIGURATION
+# =============================================================================
+DEFAULT_CHECK_INTERVAL = int(os.getenv('DEFAULT_CHECK_INTERVAL', '300'))
+MAX_CHECK_INTERVAL = int(os.getenv('MAX_CHECK_INTERVAL', '86400'))
+MIN_CHECK_INTERVAL = int(os.getenv('MIN_CHECK_INTERVAL', '60'))
+
+# =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+LOG_FORMAT = os.getenv('LOG_FORMAT', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')

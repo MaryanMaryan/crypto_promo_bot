@@ -103,7 +103,20 @@ class BrowserParser(BaseParser):
         playwright = None
         try:
             import json
-            playwright = sync_playwright().start()
+
+            # Проверка доступности Playwright
+            try:
+                from playwright.sync_api import sync_playwright
+            except ImportError:
+                logger.error("❌ Playwright не установлен! Установите: pip install playwright==1.56.0")
+                return None
+
+            try:
+                playwright = sync_playwright().start()
+            except Exception as e:
+                logger.error(f"❌ Не удалось запустить Playwright: {e}")
+                logger.error("💡 Возможно, браузеры не установлены. Запустите: playwright install chromium")
+                return None
 
             # Настройки браузера
             browser_args = [
@@ -293,7 +306,19 @@ class BrowserParser(BaseParser):
         """
         playwright = None
         try:
-            playwright = sync_playwright().start()
+            # Проверка доступности Playwright
+            try:
+                from playwright.sync_api import sync_playwright
+            except ImportError:
+                logger.error("❌ Playwright не установлен! Установите: pip install playwright==1.56.0")
+                return None
+
+            try:
+                playwright = sync_playwright().start()
+            except Exception as e:
+                logger.error(f"❌ Не удалось запустить Playwright: {e}")
+                logger.error("💡 Возможно, браузеры не установлены. Запустите: playwright install chromium")
+                return None
 
             # Настройки браузера
             browser_args = [
