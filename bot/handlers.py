@@ -24,6 +24,30 @@ router = Router()
 logger = logging.getLogger(__name__)
 parser_service = ParserService()
 
+# =============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ CALLBACK
+# =============================================================================
+
+async def safe_answer_callback(callback: CallbackQuery, text: str = None, show_alert: bool = False):
+    """
+    Безопасный вызов callback.answer() с обработкой timeout.
+    Игнорирует ошибки TelegramBadRequest (query too old).
+    """
+    try:
+        from aiogram.exceptions import TelegramBadRequest
+        if text:
+            await callback.answer(text, show_alert=show_alert)
+        else:
+            await callback.answer()
+    except TelegramBadRequest as e:
+        # Игнорируем ошибки "query too old"
+        if "query is too old" in str(e) or "query ID is invalid" in str(e):
+            logger.debug(f"Callback timeout игнорируется: {e}")
+        else:
+            raise
+    except Exception as e:
+        logger.error(f"Ошибка при ответе на callback: {e}")
+
 # Хранилище для временных данных
 user_selections = {}
 
@@ -2210,6 +2234,12 @@ async def manage_force_check(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("force_check_link_"))
 async def process_force_check_link(callback: CallbackQuery):
+    # Отвечаем на callback сразу, чтобы избежать timeout
+    try:
+        await callback.answer()
+    except:
+        pass  # Игнорируем ошибки callback.answer()
+
     try:
         link_id = int(callback.data.split("_")[3])
 
@@ -2233,12 +2263,9 @@ async def process_force_check_link(callback: CallbackQuery):
         else:
             await callback.message.edit_text("❌ Бот не инициализирован")
 
-        await callback.answer("✅ Проверка завершена")
-
     except Exception as e:
         logger.error(f"❌ Ошибка при принудительной проверке ссылки: {e}")
         await callback.message.edit_text("❌ Ошибка при принудительной проверке ссылки")
-        await callback.answer()
 
 # =============================================================================
 # НАСТРОЙКА ПАРСИНГА

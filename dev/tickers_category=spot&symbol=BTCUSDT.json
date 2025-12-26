@@ -1,0 +1,26 @@
+{
+  "retCode": 0,
+  "retMsg": "OK",
+  "result": {
+    "category": "spot",
+    "list": [
+      {
+        "symbol": "BTCUSDT",
+        "bid1Price": "88041.9",
+        "bid1Size": "1.049629",
+        "ask1Price": "88042",
+        "ask1Size": "0.159907",
+        "lastPrice": "88042",
+        "prevPrice24h": "87461.9",
+        "price24hPcnt": "0.0066",
+        "highPrice24h": "88598.6",
+        "lowPrice24h": "87230",
+        "turnover24h": "350948716.3079848",
+        "volume24h": "3998.40257",
+        "usdIndexPrice": "87988.060238"
+      }
+    ]
+  },
+  "retExtInfo": {},
+  "time": 1766683768185
+}

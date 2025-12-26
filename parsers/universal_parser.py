@@ -231,6 +231,14 @@ class UniversalParser(BaseParser):
             # Автоматически определяем название из домена URL
             exchange_name = self._extract_domain_name(self.url)
 
+            # ФИЛЬТР ДЛЯ MEXC: пропускаем подпромоакции из массива eftdVOS
+            # Основные промоакции MEXC всегда имеют activityCurrency или activityCurrencyFullName
+            if exchange_name == 'MEXC':
+                has_activity_currency = self._get_value(obj, ['activityCurrency', 'activityCurrencyFullName'])
+                if not has_activity_currency:
+                    logger.debug("⏭️ Пропускаем MEXC подпромоакцию (нет activityCurrency)")
+                    return None
+
             # ВАЖНО: Сначала создаем promo_id
             promo_id = self.extract_promo_id(obj)
 
@@ -246,6 +254,7 @@ class UniversalParser(BaseParser):
                 # Title: ищем в максимально широком списке (Bybit, MEXC, Binance, Gate.io и др.)
                 'title': self._get_value(obj, [
                     'name', 'title', 'campaignName', 'activityName', 'projectName',
+                    'activityCurrencyFullName',  # MEXC: полное название токена промоакции
                     'tokenFullName', 'activityCoinFullName', 'coinFullName',  # Полные названия токенов
                     'eventName', 'promotionName', 'launchpadName'
                 ]),
@@ -261,6 +270,7 @@ class UniversalParser(BaseParser):
                 ]),
                 # Award token: расширенный список для разных бирж
                 'award_token': self._get_value(obj, [
+                    'activityCurrency',  # MEXC: символ токена промоакции
                     'token', 'coin', 'symbol', 'currency',  # Общие
                     'activityCoin', 'awardToken', 'rewardToken',  # MEXC, Binance
                     'tradeCoin', 'targetCoin', 'assetSymbol',  # Gate.io, OKX
@@ -392,13 +402,19 @@ class UniversalParser(BaseParser):
             return None
 
     def _get_value(self, obj: Dict, keys: List[str]) -> Any:
-        """Получает значение по первому найденному ключу (регистронезависимо)"""
+        """Получает значение по первому найденному ключу (регистронезависимо)
+
+        Пропускает ключи с None или пустыми значениями, чтобы найти первое валидное значение.
+        """
         obj_lower = {k.lower(): v for k, v in obj.items()}
 
         for key in keys:
             key_lower = key.lower()
             if key_lower in obj_lower:
-                return obj_lower[key_lower]
+                value = obj_lower[key_lower]
+                # Пропускаем None и пустые строки, ищем первое валидное значение
+                if value is not None and str(value).strip():
+                    return value
         return None
 
     def _extract_domain_name(self, url: str) -> str:

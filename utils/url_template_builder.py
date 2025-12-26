@@ -133,23 +133,55 @@ class URLTemplateAnalyzer:
         """Вычисляет степень совпадения между промоакцией и URL"""
         score = 0
 
-        # Проверяем все значения в промоакции
-        for key, value in promo.items():
-            if value is None:
-                continue
+        # Поля которые НЕ должны участвовать в подсчете совпадений
+        ignored_fields = {
+            'link', 'url', 'href', 'jumpUrl', 'detailUrl', 'campaignUrl',
+            'activityUrl', 'projectUrl', 'joinUrl',
+            'icon', 'iconUrl', 'imageUrl', 'logo', 'logoUrl', 'banner',
+            'tokenIcon', 'coinIcon', 'img', 'image', 'thumbnail',
+            'pcBanner', 'highBanner', 'wideBanner',
+            'raw_data', 'exchange', 'promo_id',
+            'description', 'desc', 'details', 'info', 'introduction',
+            'content', 'remark', 'note', 'summary', 'tokenDesc'
+        }
 
-            value_str = str(value).lower()
+        # Функция для проверки совпадений с URL values
+        def check_matches(fields_dict, bonus=0):
+            match_score = 0
+            for key, value in fields_dict.items():
+                if value is None:
+                    continue
 
-            # Точное совпадение
-            for url_value in url_values:
-                url_value_lower = url_value.lower()
+                # Игнорируем определенные поля
+                if key in ignored_fields or key.lower() in {f.lower() for f in ignored_fields}:
+                    continue
 
-                if value_str == url_value_lower:
-                    score += 3  # Точное совпадение - высокий балл
-                elif value_str in url_value_lower or url_value_lower in value_str:
-                    score += 2  # Частичное совпадение
-                elif self._similarity(value_str, url_value_lower) > 0.8:
-                    score += 1  # Похожие строки
+                value_str = str(value).lower().strip()
+
+                # Игнорируем пустые строки, слишком длинные значения и URL
+                if not value_str or len(value_str) > 50 or 'http://' in value_str or 'https://' in value_str:
+                    continue
+
+                # Точное совпадение
+                for url_value in url_values:
+                    url_value_lower = url_value.lower()
+
+                    if value_str == url_value_lower:
+                        match_score += 3 + bonus  # Точное совпадение
+                    elif value_str in url_value_lower or url_value_lower in value_str:
+                        match_score += 2 + bonus  # Частичное совпадение
+                    elif self._similarity(value_str, url_value_lower) > 0.8:
+                        match_score += 1  # Похожие строки
+
+            return match_score
+
+        # Проверяем основные поля промоакции
+        score = check_matches(promo)
+
+        # НОВОЕ: Проверяем raw_data с повышенным приоритетом
+        if 'raw_data' in promo and isinstance(promo['raw_data'], dict):
+            # raw_data поля получают небольшой бонус (+1)
+            score += check_matches(promo['raw_data'], bonus=1)
 
         return score
 
@@ -256,23 +288,88 @@ class URLTemplateAnalyzer:
         """
         url_value_lower = url_value.lower()
 
+        # Поля которые НЕ должны использоваться как динамические части URL
+        ignored_fields = {
+            'link', 'url', 'href', 'jumpUrl', 'detailUrl', 'campaignUrl',
+            'activityUrl', 'projectUrl', 'joinUrl',
+            'icon', 'iconUrl', 'imageUrl', 'logo', 'logoUrl', 'banner',
+            'tokenIcon', 'coinIcon', 'img', 'image', 'thumbnail',
+            'pcBanner', 'highBanner', 'wideBanner',
+            'raw_data', 'exchange', 'promo_id',
+            'description', 'desc', 'details', 'info', 'introduction',
+            'content', 'remark', 'note', 'summary', 'tokenDesc'
+        }
+
         # Список полей с похожими значениями
         candidates = []
 
-        for key, value in promo.items():
+        # Функция для проверки совпадений
+        def check_field(key, value, source='main'):
             if value is None:
-                continue
+                return
 
-            value_str = str(value).lower()
+            # Игнорируем определенные поля
+            if key in ignored_fields or key.lower() in {f.lower() for f in ignored_fields}:
+                return
+
+            value_str = str(value).lower().strip()
+
+            # Игнорируем пустые строки, слишком длинные значения и URL
+            if not value_str or len(value_str) > 50 or 'http://' in value_str or 'https://' in value_str:
+                return
 
             # Точное совпадение или частичное вхождение
             if value_str == url_value_lower:
                 # Точное совпадение - высокий приоритет
-                candidates.append((key, 3))
+                priority = 4 if source == 'raw_data' else 3
+                candidates.append((key, priority))
             elif value_str in url_value_lower or url_value_lower in value_str:
-                candidates.append((key, 2))
+                priority = 3 if source == 'raw_data' else 2
+                candidates.append((key, priority))
             elif self._similarity(value_str, url_value_lower) > 0.8:
                 candidates.append((key, 1))
+
+        # Проверяем основные поля
+        for key, value in promo.items():
+            check_field(key, value, 'main')
+
+        # НОВОЕ: Проверяем raw_data для более точных совпадений
+        if 'raw_data' in promo and isinstance(promo['raw_data'], dict):
+            for key, value in promo['raw_data'].items():
+                # Избегаем дубликатов - проверяем только если ключ отсутствует в основных полях
+                if key not in promo:
+                    check_field(key, value, 'raw_data')
+
+        # НОВОЕ: Проверяем составные ключи (например, ETH-239)
+        if not candidates and '-' in url_value_lower:
+            # Пробуем разделить по дефису
+            parts = url_value_lower.split('-')
+            if len(parts) == 2:
+                # Проверяем, есть ли поля соответствующие частям
+                part1, part2 = parts
+
+                # Ищем поля для каждой части в raw_data
+                if 'raw_data' in promo and isinstance(promo['raw_data'], dict):
+                    raw = promo['raw_data']
+
+                    # Общие паттерны составных ключей
+                    composite_patterns = [
+                        ('currency', 'id'),        # ETH-239 -> currency=ETH, id=239
+                        ('coin', 'id'),            # BTC-100 -> coin=BTC, id=100
+                        ('symbol', 'phase'),       # USDT-5 -> symbol=USDT, phase=5
+                        ('token', 'campaignId'),   # TOKEN-123
+                    ]
+
+                    for field1, field2 in composite_patterns:
+                        if field1 in raw and field2 in raw:
+                            val1 = str(raw[field1]).lower().strip()
+                            val2 = str(raw[field2]).lower().strip()
+
+                            # Проверяем совпадение частей
+                            if val1 == part1 and val2 == part2:
+                                # Нашли составной ключ! Возвращаем первую часть как основное поле
+                                logger.debug(f"🔍 Найден составной ключ: {url_value_lower} = {field1}-{field2}")
+                                return (field1, [field1, field2, 'id', 'currency', 'coin', 'symbol'])
 
         if not candidates:
             return None
@@ -512,6 +609,21 @@ class URLTemplateBuilder:
             for key, value in promo.items():
                 if key.lower() == field_name_lower and value is not None:
                     return str(value)
+
+            # НОВОЕ: Поиск в raw_data
+            if 'raw_data' in promo and isinstance(promo['raw_data'], dict):
+                raw = promo['raw_data']
+
+                # Прямой поиск в raw_data
+                if field_name in raw:
+                    value = raw[field_name]
+                    if value is not None:
+                        return str(value)
+
+                # Поиск без учета регистра в raw_data
+                for key, value in raw.items():
+                    if key.lower() == field_name_lower and value is not None:
+                        return str(value)
 
         return None
 

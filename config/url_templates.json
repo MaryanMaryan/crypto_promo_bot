@@ -41,6 +41,23 @@
         "token-splash",
         "detail"
       ]
+    },
+    "trade": {
+      "pattern": "/en/trade/spot/token-splash/detail?code={code}",
+      "pattern_type": "query",
+      "base_url": "https://www.bybit.com",
+      "fields": {
+        "code": [
+          "navName",
+          "nav_name",
+          "name",
+          "title",
+          "projectName",
+          "tokenName",
+          "coinName"
+        ]
+      },
+      "static_segments": []
     }
   },
   "mexc": {
@@ -65,6 +82,51 @@
       "static_segments": [
         "ru-RU",
         "launchpad"
+      ]
+    },
+    "jggl": {
+      "pattern": "/token-airdrop/{activityCurrency}/{id}",
+      "pattern_type": "path",
+      "base_url": "https://www.mexc.com",
+      "fields": {
+        "activityCurrency": [
+          "activityCurrency",
+          "activity_currency"
+        ],
+        "id": [
+          "id",
+          "_id"
+        ]
+      },
+      "static_segments": [
+        "token-airdrop"
+      ]
+    }
+  },
+  "gate.io": {
+    "candy-drop": {
+      "pattern": "/ru/candy-drop/detail/{currency}-{id}",
+      "pattern_type": "composite",
+      "base_url": "https://www.gate.com",
+      "fields": {
+        "currency": [
+          "currency",
+          "coin",
+          "symbol",
+          "token",
+          "award_token"
+        ],
+        "id": [
+          "id",
+          "_id",
+          "activityId",
+          "campaignId"
+        ]
+      },
+      "static_segments": [
+        "ru",
+        "candy-drop",
+        "detail"
       ]
     }
   }
