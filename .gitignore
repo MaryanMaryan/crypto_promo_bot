@@ -86,3 +86,6 @@ config/api_keys.json
 test_*.py
 check_*.py
 clear_*.py
+
+# Claude settings
+.claude/settings.local.json
