@@ -441,6 +441,12 @@ async def handle_category_choice(callback: CallbackQuery, state: FSMContext):
     }
     category_display = category_names.get(category, category)
 
+    # Добавляем кнопку "Назад"
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_category"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(2)
+
     await callback.message.edit_text(
         f"🔗 <b>Добавление новой ссылки</b>\n\n"
         f"✅ <b>Категория:</b> {category_display}\n\n"
@@ -450,6 +456,7 @@ async def handle_category_choice(callback: CallbackQuery, state: FSMContext):
         f"• <i>MEXC Launchpad</i>\n"
         f"• <i>OKX Earn</i>\n\n"
         f"Это название поможет вам легко находить ссылку в списке.",
+        reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_name)
@@ -477,8 +484,9 @@ async def process_name_input(message: Message, state: FSMContext):
     builder.add(InlineKeyboardButton(text="📡 Только API", callback_data="parsing_type_api"))
     builder.add(InlineKeyboardButton(text="🌐 Только HTML", callback_data="parsing_type_html"))
     builder.add(InlineKeyboardButton(text="🌐 Только Browser", callback_data="parsing_type_browser"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name"))
     builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
-    builder.adjust(1)
+    builder.adjust(1, 1, 1, 1, 2)
 
     await message.answer(
         f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
@@ -505,9 +513,11 @@ async def process_parsing_type_selection(callback: CallbackQuery, state: FSMCont
     data = await state.get_data()
     custom_name = data.get('custom_name')
 
-    # Создаем клавиатуру с кнопкой отмены
+    # Создаем клавиатуру с кнопками "Назад" и "Отмена"
     cancel_builder = InlineKeyboardBuilder()
+    cancel_builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
     cancel_builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    cancel_builder.adjust(2)
 
     # Определяем, какие URL нужно запросить в зависимости от типа парсинга
     if parsing_type == 'api':
@@ -600,6 +610,7 @@ async def add_html_url(callback: CallbackQuery, state: FSMContext):
     """Обработчик кнопки 'Добавить HTML ссылку'"""
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_url"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_url"))
     builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
     builder.adjust(1)
 
@@ -772,8 +783,9 @@ async def skip_example_url(callback: CallbackQuery, state: FSMContext):
 
     for text, seconds in presets:
         builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_html_url"))
     builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
-    builder.adjust(2)
+    builder.adjust(2, 2, 2, 2, 1, 2)
 
     await callback.message.edit_text(
         f"⏭️ Пример ссылки пропущен\n\n"
@@ -784,6 +796,186 @@ async def skip_example_url(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_interval)
+    await callback.answer()
+
+# =============================================================================
+# ОБРАБОТЧИКИ "НАЗАД" ДЛЯ ДОБАВЛЕНИЯ ССЫЛКИ
+# =============================================================================
+
+@router.callback_query(F.data == "back_to_category")
+async def back_to_category(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору категории"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
+    builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
+    builder.add(InlineKeyboardButton(text="🚀 Лаунчпул", callback_data="add_category_launchpool"))
+    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(2, 2, 1)
+
+    await callback.message.edit_text(
+        "🔗 <b>Добавление новой ссылки</b>\n\n"
+        "🗂️ <b>Шаг 1:</b> Выберите категорию ссылки:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_category)
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_name")
+async def back_to_name(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу названия биржи"""
+    data = await state.get_data()
+    category = data.get('category', 'general')
+
+    category_names = {
+        'airdrop': 'Аирдроп',
+        'staking': 'Стейкинг',
+        'launchpool': 'Лаунчпул',
+        'announcement': 'Анонс'
+    }
+    category_display = category_names.get(category, category)
+
+    # Добавляем кнопку "Назад"
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_category"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(2)
+
+    await callback.message.edit_text(
+        f"🔗 <b>Добавление новой ссылки</b>\n\n"
+        f"✅ <b>Категория:</b> {category_display}\n\n"
+        f"🏷️ <b>Шаг 2:</b> Введите название биржи\n\n"
+        f"Примеры:\n"
+        f"• <i>Bybit Promotions</i>\n"
+        f"• <i>MEXC Launchpad</i>\n"
+        f"• <i>OKX Earn</i>\n\n"
+        f"Это название поможет вам легко находить ссылку в списке.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_name)
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_parsing_type")
+async def back_to_parsing_type(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору типа парсинга"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+
+    # Создаем кнопки для выбора типа парсинга
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🔄 Комбинированный (API + HTML + Browser)", callback_data="parsing_type_combined"))
+    builder.add(InlineKeyboardButton(text="📡 Только API", callback_data="parsing_type_api"))
+    builder.add(InlineKeyboardButton(text="🌐 Только HTML", callback_data="parsing_type_html"))
+    builder.add(InlineKeyboardButton(text="🌐 Только Browser", callback_data="parsing_type_browser"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1, 1, 1, 1, 2)
+
+    await callback.message.edit_text(
+        f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
+        f"🎯 <b>Шаг 2/5:</b> Выберите тип парсинга\n\n"
+        f"<b>Типы парсинга:</b>\n"
+        f"• <b>Комбинированный</b> - пробует все методы (Browser → API → HTML)\n"
+        f"• <b>Только API</b> - быстрый, но может быть заблокирован\n"
+        f"• <b>Только HTML</b> - стабильный для статических страниц\n"
+        f"• <b>Только Browser</b> - обходит капчи и динамический контент\n\n"
+        f"Рекомендуется <b>Комбинированный</b> для лучшей надежности.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_parsing_type)
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_api_url")
+async def back_to_api_url(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу API URL"""
+    data = await state.get_data()
+    parsing_type = data.get('parsing_type', 'combined')
+
+    # Создаем клавиатуру с кнопками "Назад" и "Отмена"
+    cancel_builder = InlineKeyboardBuilder()
+    cancel_builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
+    cancel_builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    cancel_builder.adjust(2)
+
+    if parsing_type == 'api':
+        await callback.message.edit_text(
+            f"✅ Выбран тип: <b>Только API</b>\n\n"
+            f"📡 <b>Шаг 3/5:</b> Введите API ссылку\n\n"
+            f"Пример:\n"
+            f"<code>https://api.bybit.com/v5/promotion/list</code>\n\n"
+            f"API ссылка используется для автоматического парсинга.",
+            reply_markup=cancel_builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_api_url)
+    else:  # combined
+        await callback.message.edit_text(
+            f"✅ Выбран тип: <b>Комбинированный</b>\n\n"
+            f"📡 <b>Шаг 3/5:</b> Введите API ссылку\n\n"
+            f"Пример:\n"
+            f"<code>https://api.bybit.com/v5/promotion/list</code>\n\n"
+            f"API ссылка используется для автоматического парсинга.\n"
+            f"Далее вы сможете добавить HTML/Browser URL как fallback.",
+            reply_markup=cancel_builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_api_url)
+
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_html_url")
+async def back_to_html_url(callback: CallbackQuery, state: FSMContext):
+    """Возврат к шагу добавления/пропуска HTML ссылки"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    category = data.get('category', 'general')
+    api_url = data.get('api_url')
+    parsing_type = data.get('parsing_type', 'combined')
+
+    # Создаем кнопки для выбора: добавить пример или пропустить
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="➕ Добавить пример ссылки", callback_data="add_example_url"))
+    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
+
+    # Кнопка "Назад" зависит от наличия API URL
+    if api_url:
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="add_html_url"))
+    else:
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
+
+    builder.add(InlineKeyboardButton(text="❌ Отменить добавление", callback_data="cancel_add_link"))
+    builder.adjust(1)
+
+    # Разный текст для стейкинга и остальных категорий
+    if category == 'staking':
+        message_text = (
+            f"🔗 <b>Шаг 4/5: Добавить ссылку на страницу стейкинга?</b>\n\n"
+            f"<b>Имя:</b> {custom_name}\n\n"
+            f"Если вы предоставите ссылку на страницу стейкинга, бот сможет автоматически мониторить новые стейкинг предложения.\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• KuCoin Earn: <code>https://www.kucoin.com/ru/earn</code>\n"
+            f"• Bybit Earn: <code>https://www.bybit.com/en/earn/home</code>\n\n"
+            f"Это опционально, но очень полезно!"
+        )
+    else:
+        message_text = (
+            f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
+            f"<b>Имя:</b> {custom_name}\n\n"
+            f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
+            f"Это опционально, но очень полезно!"
+        )
+
+    await callback.message.edit_text(
+        message_text,
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_example_url)
     await callback.answer()
 
 @router.callback_query(F.data == "cancel_add_link")
@@ -834,42 +1026,55 @@ async def process_example_url_input(message: Message, state: FSMContext):
                 parse_mode="HTML"
             )
         else:
-            # Анализируем URL и создаем шаблон
-            analyzer = URLTemplateAnalyzer(example_url, api_promotions)
-            template = analyzer.analyze()
+            # Определяем exchange и тип ДО анализа
+            from urllib.parse import urlparse
+            parsed = urlparse(example_url)
+            domain = parsed.netloc.replace('www.', '')
+            # Берем предпоследнюю часть домена (для web3.okx.com берем okx, а не web3)
+            exchange = domain.split('.')[-2] if len(domain.split('.')) >= 2 else domain.split('.')[0]
 
-            if template:
-                # Сохраняем шаблон
-                url_builder = get_url_builder()
+            # Определяем тип промоакции из path
+            path_parts = [p for p in parsed.path.split('/') if p]
+            template_type = path_parts[1] if len(path_parts) > 1 else 'default'
 
-                # Определяем exchange из домена (используем ту же логику что и в universal_parser)
-                from urllib.parse import urlparse
-                parsed = urlparse(example_url)
-                domain = parsed.netloc.replace('www.', '')
-                # Берем предпоследнюю часть домена (для web3.okx.com берем okx, а не web3)
-                exchange = domain.split('.')[-2] if len(domain.split('.')) >= 2 else domain.split('.')[0]
+            # Проверяем, существует ли уже шаблон
+            url_builder = get_url_builder()
+            existing_templates = url_builder.get_template_info(exchange)
 
-                # Определяем тип промоакции из path
-                path_parts = [p for p in parsed.path.split('/') if p]
-                template_type = path_parts[1] if len(path_parts) > 1 else 'default'
-
-                url_builder.add_template(exchange, template_type, template)
-
+            if template_type in existing_templates:
+                # Шаблон уже существует - используем его
                 await analysis_msg.edit_text(
-                    f"✅ <b>Шаблон успешно создан!</b>\n\n"
+                    f"ℹ️ <b>Шаблон уже существует</b>\n\n"
                     f"<b>Биржа:</b> {exchange.upper()}\n"
                     f"<b>Тип:</b> {template_type}\n"
-                    f"<b>Паттерн:</b> <code>{template['pattern']}</code>\n\n"
-                    f"Теперь бот будет автоматически генерировать ссылки для всех промоакций этого типа!",
+                    f"<b>Паттерн:</b> <code>{existing_templates[template_type]['pattern']}</code>\n\n"
+                    f"Бот будет использовать существующий шаблон для генерации ссылок.",
                     parse_mode="HTML"
                 )
             else:
-                await analysis_msg.edit_text(
-                    "⚠️ <b>Не удалось создать шаблон</b>\n\n"
-                    "Не найдено достаточно совпадений между URL и данными API.\n"
-                    "Ссылка будет добавлена без шаблона.",
-                    parse_mode="HTML"
-                )
+                # Анализируем URL и создаем шаблон
+                analyzer = URLTemplateAnalyzer(example_url, api_promotions)
+                template = analyzer.analyze()
+
+                if template:
+                    # Сохраняем шаблон
+                    url_builder.add_template(exchange, template_type, template)
+
+                    await analysis_msg.edit_text(
+                        f"✅ <b>Шаблон успешно создан!</b>\n\n"
+                        f"<b>Биржа:</b> {exchange.upper()}\n"
+                        f"<b>Тип:</b> {template_type}\n"
+                        f"<b>Паттерн:</b> <code>{template['pattern']}</code>\n\n"
+                        f"Теперь бот будет автоматически генерировать ссылки для всех промоакций этого типа!",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await analysis_msg.edit_text(
+                        "⚠️ <b>Не удалось создать шаблон</b>\n\n"
+                        "Не найдено достаточно совпадений между URL и данными API.\n"
+                        "Ссылка будет добавлена без шаблона.",
+                        parse_mode="HTML"
+                    )
 
     except Exception as e:
         logger.error(f"❌ Ошибка анализа примера URL: {e}", exc_info=True)
@@ -1159,6 +1364,9 @@ async def check_staking_pools(callback: CallbackQuery):
             await callback.answer("❌ Ошибка: ссылка не выбрана", show_alert=True)
             return
 
+        # ВАЖНО: Отвечаем на callback СРАЗУ, чтобы избежать timeout
+        await callback.answer()
+
         await callback.message.edit_text("⏳ <b>Проверяю заполненность пулов...</b>", parse_mode="HTML")
 
         try:
@@ -1168,12 +1376,10 @@ async def check_staking_pools(callback: CallbackQuery):
 
                 if not link:
                     await callback.message.edit_text("❌ Ссылка не найдена")
-                    await callback.answer()
                     return
 
                 if link.category != 'staking':
                     await callback.message.edit_text("❌ Эта функция доступна только для ссылок категории 'Стейкинг'")
-                    await callback.answer()
                     return
 
                 # ВАЖНО: Сохраняем все нужные данные из link пока сессия открыта
@@ -1200,21 +1406,35 @@ async def check_staking_pools(callback: CallbackQuery):
                 )
             else:
                 # Фильтруем только стейкинги с данными о заполненности И APR >= 100%
+                # ИСКЛЮЧАЕМ: полностью заполненные пулы и со статусом "Sold Out"
                 pools_with_fill = [
                     s for s in stakings
-                    if s.get('fill_percentage') is not None and s.get('apr', 0) >= 100
+                    if s.get('fill_percentage') is not None
+                    and s.get('apr', 0) >= 100
+                    and s.get('fill_percentage', 0) < 100  # Не полностью заполненные
+                    and s.get('status') != 'Sold Out'  # Не проданные
                 ]
 
                 if not pools_with_fill:
-                    # Проверяем, есть ли вообще пулы с заполненностью (без учета APR)
+                    # Проверяем, есть ли вообще пулы с заполненностью (без учета APR и фильтров)
                     pools_all = [s for s in stakings if s.get('fill_percentage') is not None]
                     if pools_all:
+                        # Проверяем причину отсутствия доступных пулов
+                        pools_sold_out = [s for s in pools_all if s.get('status') == 'Sold Out' or s.get('fill_percentage', 0) >= 100]
+                        pools_low_apr = [s for s in pools_all if s.get('apr', 0) < 100]
+
                         message_text = (
                             f"📊 <b>ОТЧЁТ: ЗАПОЛНЕННОСТЬ ПУЛОВ</b>\n\n"
                             f"🏦 <b>Биржа:</b> {link_name}\n\n"
-                            f"ℹ️ Найдено {len(pools_all)} пулов с данными о заполненности, "
-                            f"но ни один не имеет APR ≥ 100%."
+                            f"ℹ️ Найдено {len(pools_all)} пулов с данными о заполненности.\n\n"
                         )
+
+                        if pools_sold_out:
+                            message_text += f"🔴 Заполненных/распроданных: {len(pools_sold_out)}\n"
+                        if pools_low_apr:
+                            message_text += f"📉 С APR < 100%: {len(pools_low_apr)}\n"
+
+                        message_text += f"\n<i>Нет доступных пулов с APR ≥ 100%</i>"
                     else:
                         message_text = (
                             f"📊 <b>ОТЧЁТ: ЗАПОЛНЕННОСТЬ ПУЛОВ</b>\n\n"
@@ -1222,9 +1442,10 @@ async def check_staking_pools(callback: CallbackQuery):
                             f"ℹ️ Найдено {len(stakings)} стейкингов, но нет данных о заполненности."
                         )
                 else:
-                    # Ограничиваем количество пулов до 10 для избежания слишком длинного сообщения
-                    MAX_POOLS_TO_SHOW = 10
-                    pools_to_show = pools_with_fill[:MAX_POOLS_TO_SHOW]
+                    # Показываем ВСЕ незаполненные пулы
+                    # (Если сообщение превысит лимит Telegram 4096 символов,
+                    # оно будет автоматически обрезано в format_pools_report)
+                    pools_to_show = pools_with_fill
 
                     # Используем форматтер для создания отчета
                     notification_service = NotificationService(bot=None)
@@ -1235,28 +1456,46 @@ async def check_staking_pools(callback: CallbackQuery):
                     )
                     # Добавляем информацию о фильтрации
                     total_with_fill = len([s for s in stakings if s.get('fill_percentage') is not None])
+                    total_sold_out = len([s for s in stakings if s.get('status') == 'Sold Out' or s.get('fill_percentage', 0) >= 100])
                     info_parts = []
 
-                    if len(pools_with_fill) > MAX_POOLS_TO_SHOW:
-                        info_parts.append(f"Показаны топ {MAX_POOLS_TO_SHOW} из {len(pools_with_fill)} пулов с APR ≥ 100%")
-                    elif total_with_fill > len(pools_with_fill):
-                        info_parts.append(f"Показаны только пулы с APR ≥ 100% ({len(pools_with_fill)} из {total_with_fill})")
+                    # Показываем статистику
+                    info_parts.append(f"Показано {len(pools_with_fill)} доступных пулов")
+
+                    if total_sold_out > 0:
+                        info_parts.append(f"Скрыто {total_sold_out} заполненных")
 
                     if info_parts:
                         message_text += f"\n\n<i>ℹ️ {' | '.join(info_parts)}</i>"
+                        message_text += f"\n<i>Фильтр: APR ≥ 100%, заполненность &lt; 100%</i>"
 
             # Отправляем результат
+            # Логируем сообщение для диагностики
+            logger.info(f"📝 Длина сообщения: {len(message_text)} символов")
+
+            # ДИАГНОСТИКА: Показываем контекст вокруг проблемной позиции 2466
+            if len(message_text) > 2466:
+                logger.warning(f"🔍 Контекст позиции 2466:")
+                logger.warning(f"   Символы 2450-2480: '{message_text[2450:2480]}'")
+                logger.warning(f"   Символ на 2466: '{message_text[2466]}' (код: {ord(message_text[2466])})")
+
+            # Проверяем на проблемные символы
+            for i, char in enumerate(message_text):
+                if char == '<' and i < len(message_text) - 3:
+                    # Проверяем, является ли это началом валидного тега
+                    next_chars = message_text[i:i+10]
+                    if not any(next_chars.startswith(tag) for tag in ['<b>', '</b>', '<i>', '</i>', '<code>', '</code>']):
+                        logger.error(f"❌ Невалидный '<' на позиции {i}: {message_text[max(0,i-20):i+20]}")
+
             await callback.message.edit_text(message_text, parse_mode="HTML", disable_web_page_preview=True)
-            await callback.answer()
 
         except Exception as e:
             logger.error(f"❌ Ошибка при проверке заполненности пулов: {e}", exc_info=True)
             await callback.message.edit_text(f"❌ Ошибка при проверке: {str(e)}")
-            await callback.answer()
 
     except Exception as e:
         logger.error(f"❌ Ошибка в обработчике check_staking_pools: {e}", exc_info=True)
-        await callback.answer("❌ Произошла ошибка", show_alert=True)
+        await callback.message.edit_text("❌ Произошла ошибка")
 
 @router.callback_query(F.data == "manage_delete")
 async def manage_delete(callback: CallbackQuery):

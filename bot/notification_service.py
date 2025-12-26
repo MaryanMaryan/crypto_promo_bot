@@ -1,13 +1,24 @@
 import logging
 import html
+import re
 from aiogram import Bot
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 class NotificationService:
-    def __init__(self, bot: Bot):
+    def __init__(self, bot: Bot, price_fetcher=None):
         self.bot = bot
+        self.price_fetcher = price_fetcher
+
+        # Если price_fetcher не передан, создаем его
+        if self.price_fetcher is None:
+            try:
+                from utils.price_fetcher import get_price_fetcher
+                self.price_fetcher = get_price_fetcher()
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось инициализировать price_fetcher: {e}")
+                self.price_fetcher = None
 
     @staticmethod
     def escape_html(text: Any) -> str:
@@ -15,6 +26,86 @@ class NotificationService:
         if text is None:
             return 'N/A'
         return html.escape(str(text))
+
+    def parse_token_amounts(self, text: str) -> List[Tuple[float, str, Optional[float]]]:
+        """
+        Парсит токены и их количество из текста
+
+        Args:
+            text: Текст для парсинга (например, "Win 100 BTC or 10,000 USDT Prize Pool")
+
+        Returns:
+            Список кортежей (amount, token_symbol, price_usd)
+            Пример: [(100.0, 'BTC', 95000.0), (10000.0, 'USDT', 1.0)]
+        """
+        if not text:
+            return []
+
+        # Паттерн для поиска токенов:
+        # - Число (с опциональными разделителями , и пробелами)
+        # - Затем символ токена (обычно 2-6 заглавных букв)
+        # Примеры: "100 BTC", "10,000 USDT", "1,500,000 SHIB"
+        pattern = r'([\d,]+(?:\.\d+)?)\s*([A-Z]{2,10})(?:\s|$|,|\.|\)|!)'
+
+        matches = re.findall(pattern, text)
+
+        if not matches:
+            logger.debug(f"🔍 Токены не найдены в тексте: {text[:100]}...")
+            return []
+
+        results = []
+        for amount_str, token_symbol in matches:
+            try:
+                # Убираем запятые и конвертируем в float
+                amount = float(amount_str.replace(',', ''))
+
+                # Получаем цену токена
+                price_usd = None
+                if self.price_fetcher:
+                    price_usd = self.price_fetcher.get_token_price(token_symbol)
+                    if price_usd:
+                        logger.info(f"💰 Найден токен: {amount} {token_symbol} = ${amount * price_usd:,.2f}")
+                    else:
+                        logger.warning(f"⚠️ Цена не найдена для {token_symbol}")
+                else:
+                    logger.warning(f"⚠️ Price fetcher недоступен для {token_symbol}")
+
+                results.append((amount, token_symbol, price_usd))
+
+            except (ValueError, TypeError) as e:
+                logger.error(f"❌ Ошибка парсинга токена {amount_str} {token_symbol}: {e}")
+                continue
+
+        return results
+
+    def format_token_value(self, amount: float, token_symbol: str, price_usd: Optional[float]) -> str:
+        """
+        Форматирует значение токена с опциональной ценой в USD
+
+        Args:
+            amount: Количество токенов
+            token_symbol: Символ токена
+            price_usd: Цена в USD (может быть None)
+
+        Returns:
+            Отформатированная строка
+            Примеры:
+            - "100 BTC (~$9,500,000)"
+            - "10,000 USDT (~$10,000)"
+            - "500 NEWTOKEN (цена недоступна)"
+        """
+        # Форматируем количество токенов
+        if amount >= 1000:
+            amount_str = f"{amount:,.0f}"
+        else:
+            amount_str = f"{amount:.2f}".rstrip('0').rstrip('.')
+
+        # Добавляем цену в USD если доступна
+        if price_usd:
+            usd_value = amount * price_usd
+            return f"{amount_str} {token_symbol} (~${usd_value:,.2f})"
+        else:
+            return f"{amount_str} {token_symbol} (цена недоступна)"
 
     def format_promo_message(self, promo: Dict[str, Any]) -> str:
         """Форматирует сообщение о промоакции в красивый HTML"""
@@ -35,13 +126,35 @@ class NotificationService:
                     desc = desc[:200] + "..."
                 message += f"<b>📝 Описание:</b> {self.escape_html(desc)}\n"
 
-            # Призовой фонд
+            # Призовой фонд с парсингом токенов и ценами
             if promo.get('total_prize_pool'):
-                message += f"<b>💰 Призовой фонд:</b> {self.escape_html(promo['total_prize_pool'])}\n"
+                prize_pool_text = str(promo['total_prize_pool'])
+                tokens = self.parse_token_amounts(prize_pool_text)
 
-            # Токен награды
+                if tokens:
+                    # Если нашли токены, показываем их с ценами
+                    message += f"<b>💰 Призовой фонд:</b>\n"
+                    for amount, token_symbol, price_usd in tokens:
+                        formatted_value = self.format_token_value(amount, token_symbol, price_usd)
+                        message += f"   • {formatted_value}\n"
+                else:
+                    # Если токены не найдены, показываем как есть
+                    message += f"<b>💰 Призовой фонд:</b> {self.escape_html(prize_pool_text)}\n"
+
+            # Токен награды с парсингом и ценой
             if promo.get('award_token'):
-                message += f"<b>🎯 Токен награды:</b> {self.escape_html(promo['award_token'])}\n"
+                award_token_text = str(promo['award_token'])
+                tokens = self.parse_token_amounts(award_token_text)
+
+                if tokens:
+                    # Если нашли токены, показываем их с ценами
+                    message += f"<b>🎯 Награды:</b>\n"
+                    for amount, token_symbol, price_usd in tokens:
+                        formatted_value = self.format_token_value(amount, token_symbol, price_usd)
+                        message += f"   • {formatted_value}\n"
+                else:
+                    # Если токены не найдены, показываем как есть
+                    message += f"<b>🎯 Токен награды:</b> {self.escape_html(award_token_text)}\n"
 
             # Количество участников/мест
             if promo.get('participants_count'):
