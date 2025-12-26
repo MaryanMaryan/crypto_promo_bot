@@ -67,3 +67,22 @@ backups/
 nul
 *.tmp
 *.bak
+tmp/
+temp/
+
+# Playwright
+.playwright/
+playwright/.cache/
+
+# Project specific
+config/proxy_config.json
+config/api_keys.json
+
+# Telegram session files
+*.session
+*.session-journal
+
+# Test files
+test_*.py
+check_*.py
+clear_*.py

@@ -10,6 +10,7 @@ from bot.parser_service import ParserService
 from bot.notification_service import NotificationService
 from bot.bot_manager import bot_manager
 import logging
+import asyncio
 from urllib.parse import urlparse
 from datetime import datetime
 
@@ -101,6 +102,9 @@ class AddLinkStates(StatesGroup):
     # Для стейкинга:
     waiting_for_min_apr = State()  # НОВОЕ: Минимальный APR
     waiting_for_statuses = State()  # НОВОЕ: Выбор статусов
+    # Для Telegram:
+    waiting_for_telegram_channel = State()  # НОВОЕ: Ввод канала Telegram
+    waiting_for_telegram_keywords = State()  # НОВОЕ: Ввод ключевых слов Telegram
 
 class IntervalStates(StatesGroup):
     waiting_for_interval = State()
@@ -125,6 +129,11 @@ class UserAgentStates(StatesGroup):
 class RotationSettingsStates(StatesGroup):
     waiting_for_rotation_interval = State()
 
+class TelegramAPIStates(StatesGroup):
+    waiting_for_api_id = State()
+    waiting_for_api_hash = State()
+    waiting_for_phone = State()
+
 # РАСШИРЕННОЕ ГЛАВНОЕ МЕНЮ
 def get_main_menu():
     builder = ReplyKeyboardBuilder()
@@ -133,6 +142,7 @@ def get_main_menu():
     builder.add(KeyboardButton(text="⚙️ Управление ссылками"))
     builder.add(KeyboardButton(text="🔄 Проверить всё"))
     builder.add(KeyboardButton(text="🛡️ Обход блокировок"))
+
     builder.adjust(2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
 
@@ -186,7 +196,8 @@ def get_links_keyboard(links, action_type="delete"):
         'combined': '🔄',
         'api': '📡',
         'html': '🌐',
-        'browser': '🌐'
+        'browser': '🌐',
+        'telegram': '📱'
     }
 
     # Словарь иконок для категорий
@@ -276,6 +287,7 @@ def get_parsing_type_keyboard(link_id):
     builder.add(InlineKeyboardButton(text="📡 Только API", callback_data=f"set_parsing_type_{link_id}_api"))
     builder.add(InlineKeyboardButton(text="🌐 Только HTML", callback_data=f"set_parsing_type_{link_id}_html"))
     builder.add(InlineKeyboardButton(text="🌐 Только Browser", callback_data=f"set_parsing_type_{link_id}_browser"))
+    builder.add(InlineKeyboardButton(text="📱 Telegram", callback_data=f"set_parsing_type_{link_id}_telegram"))
     builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"show_parsing_config_{link_id}"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
     builder.adjust(1)
@@ -329,6 +341,7 @@ def get_bypass_keyboard():
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="🔧 Управление прокси", callback_data="bypass_proxy"))
     builder.add(InlineKeyboardButton(text="👤 Управление User-Agent", callback_data="bypass_ua"))
+    builder.add(InlineKeyboardButton(text="📱 Telegram API", callback_data="bypass_telegram"))
     builder.add(InlineKeyboardButton(text="⚙️ Настройки ротации", callback_data="bypass_rotation"))
     builder.add(InlineKeyboardButton(text="📈 Статистика системы", callback_data="bypass_stats"))
     builder.add(InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_main_menu"))
@@ -413,7 +426,8 @@ async def menu_list_links(message: Message):
                     'combined': '🔄 Комбинированный',
                     'api': '📡 API',
                     'html': '🌐 HTML',
-                    'browser': '🌐 Browser'
+                    'browser': '🌐 Browser',
+                    'telegram': '📱 Telegram'
                 }
                 parsing_display = parsing_type_icons.get(parsing_type, '🔄 Комбинированный')
 
@@ -508,9 +522,10 @@ async def process_name_input(message: Message, state: FSMContext):
     builder.add(InlineKeyboardButton(text="📡 Только API", callback_data="parsing_type_api"))
     builder.add(InlineKeyboardButton(text="🌐 Только HTML", callback_data="parsing_type_html"))
     builder.add(InlineKeyboardButton(text="🌐 Только Browser", callback_data="parsing_type_browser"))
+    builder.add(InlineKeyboardButton(text="📱 Telegram", callback_data="parsing_type_telegram"))
     builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name"))
     builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
-    builder.adjust(1, 1, 1, 1, 2)
+    builder.adjust(1, 1, 1, 1, 1, 2)
 
     await message.answer(
         f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
@@ -519,7 +534,8 @@ async def process_name_input(message: Message, state: FSMContext):
         f"• <b>Комбинированный</b> - пробует все методы (Browser → API → HTML)\n"
         f"• <b>Только API</b> - быстрый, но может быть заблокирован\n"
         f"• <b>Только HTML</b> - стабильный для статических страниц\n"
-        f"• <b>Только Browser</b> - обходит капчи и динамический контент\n\n"
+        f"• <b>Только Browser</b> - обходит капчи и динамический контент\n"
+        f"• <b>Telegram</b> - мониторинг Telegram-каналов по ключевым словам\n\n"
         f"Рекомендуется <b>Комбинированный</b> для лучшей надежности.",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
@@ -582,6 +598,21 @@ async def process_parsing_type_selection(callback: CallbackQuery, state: FSMCont
             parse_mode="HTML"
         )
         await state.set_state(AddLinkStates.waiting_for_html_url)
+
+    elif parsing_type == 'telegram':
+        # Для Telegram парсинга запрашиваем канал
+        await callback.message.edit_text(
+            f"✅ Выбран тип: <b>Telegram</b>\n\n"
+            f"📱 <b>Шаг 3/5:</b> Введите имя или ссылку Telegram-канала\n\n"
+            f"Примеры:\n"
+            f"<code>@binance</code>\n"
+            f"<code>https://t.me/binance</code>\n"
+            f"<code>t.me/binance</code>\n\n"
+            f"Бот будет мониторить сообщения из этого канала по ключевым словам.",
+            reply_markup=cancel_builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_telegram_channel)
 
     else:  # combined
         # Для комбинированного парсинга запрашиваем API URL сначала
@@ -747,6 +778,127 @@ async def process_html_url_input(message: Message, state: FSMContext):
     )
 
 # =============================================================================
+# ОБРАБОТЧИКИ ДЛЯ TELEGRAM ПАРСИНГА
+# =============================================================================
+
+@router.message(AddLinkStates.waiting_for_telegram_channel)
+async def process_telegram_channel_input(message: Message, state: FSMContext):
+    """Обработка ввода Telegram-канала"""
+    channel_input = message.text.strip()
+
+    # Нормализуем ввод канала
+    channel_username = channel_input
+
+    # Убираем префикс https://
+    if channel_username.startswith('https://t.me/'):
+        channel_username = channel_username.replace('https://t.me/', '')
+    elif channel_username.startswith('http://t.me/'):
+        channel_username = channel_username.replace('http://t.me/', '')
+    elif channel_username.startswith('t.me/'):
+        channel_username = channel_username.replace('t.me/', '')
+
+    # Добавляем @ если его нет
+    if not channel_username.startswith('@'):
+        channel_username = '@' + channel_username
+
+    # Сохраняем канал
+    await state.update_data(telegram_channel=channel_username)
+
+    # Создаем кнопки
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2)
+
+    await message.answer(
+        f"✅ Канал сохранен: <b>{channel_username}</b>\n\n"
+        f"🔑 <b>Шаг 4/5:</b> Введите ключевые слова для поиска\n\n"
+        f"Введите слова или фразы через запятую, по которым бот будет искать сообщения в канале.\n\n"
+        f"<b>Примеры:</b>\n"
+        f"<code>airdrop, промо, campaign, giveaway</code>\n"
+        f"<code>listing, IEO, launchpad</code>\n"
+        f"<code>staking, earn, APR</code>\n\n"
+        f"Бот будет отправлять уведомления о сообщениях, содержащих эти слова.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_telegram_keywords)
+
+@router.message(AddLinkStates.waiting_for_telegram_keywords)
+async def process_telegram_keywords_input(message: Message, state: FSMContext):
+    """Обработка ввода ключевых слов для Telegram"""
+    keywords_input = message.text.strip()
+
+    if not keywords_input:
+        await message.answer("❌ Ключевые слова не могут быть пустыми. Попробуйте снова:")
+        return
+
+    # Разбиваем по запятой и очищаем
+    keywords = [kw.strip() for kw in keywords_input.split(',') if kw.strip()]
+
+    if not keywords:
+        await message.answer("❌ Не удалось распознать ключевые слова. Введите их через запятую:")
+        return
+
+    # Сохраняем ключевые слова
+    await state.update_data(telegram_keywords=keywords)
+
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    telegram_channel = data.get('telegram_channel')
+
+    keywords_str = ", ".join([f"<code>{kw}</code>" for kw in keywords])
+
+    # Создаем кнопки выбора интервала
+    builder = InlineKeyboardBuilder()
+    presets = [
+        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+    ]
+
+    for text, seconds in presets:
+        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_telegram_channel"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2, 2, 2, 2, 1, 2)
+
+    await message.answer(
+        f"✅ Ключевые слова сохранены!\n\n"
+        f"⏰ <b>Шаг 5/5: Выберите интервал проверки</b>\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Канал:</b> {telegram_channel}\n"
+        f"<b>Ключевые слова:</b> {keywords_str}\n\n"
+        f"Как часто проверять этот канал на новые промоакции?",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_interval)
+
+# Обработчик для кнопки "Назад" от ввода ключевых слов
+@router.callback_query(F.data == "back_to_telegram_channel")
+async def back_to_telegram_channel(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу Telegram-канала"""
+    # Создаем кнопки
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2)
+
+    await callback.message.edit_text(
+        f"📱 <b>Шаг 3/5:</b> Введите имя или ссылку Telegram-канала\n\n"
+        f"Примеры:\n"
+        f"<code>@binance</code>\n"
+        f"<code>https://t.me/binance</code>\n"
+        f"<code>t.me/binance</code>\n\n"
+        f"Бот будет мониторить сообщения из этого канала по ключевым словам.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_telegram_channel)
+    await callback.answer()
+
+# =============================================================================
 # НОВЫЕ ОБРАБОТЧИКИ ДЛЯ ПРИМЕРА ССЫЛКИ
 # =============================================================================
 
@@ -893,9 +1045,10 @@ async def back_to_parsing_type(callback: CallbackQuery, state: FSMContext):
     builder.add(InlineKeyboardButton(text="📡 Только API", callback_data="parsing_type_api"))
     builder.add(InlineKeyboardButton(text="🌐 Только HTML", callback_data="parsing_type_html"))
     builder.add(InlineKeyboardButton(text="🌐 Только Browser", callback_data="parsing_type_browser"))
+    builder.add(InlineKeyboardButton(text="📱 Telegram", callback_data="parsing_type_telegram"))
     builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name"))
     builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
-    builder.adjust(1, 1, 1, 1, 2)
+    builder.adjust(1, 1, 1, 1, 1, 2)
 
     await callback.message.edit_text(
         f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
@@ -904,7 +1057,8 @@ async def back_to_parsing_type(callback: CallbackQuery, state: FSMContext):
         f"• <b>Комбинированный</b> - пробует все методы (Browser → API → HTML)\n"
         f"• <b>Только API</b> - быстрый, но может быть заблокирован\n"
         f"• <b>Только HTML</b> - стабильный для статических страниц\n"
-        f"• <b>Только Browser</b> - обходит капчи и динамический контент\n\n"
+        f"• <b>Только Browser</b> - обходит капчи и динамический контент\n"
+        f"• <b>Telegram</b> - мониторинг Telegram-каналов по ключевым словам\n\n"
         f"Рекомендуется <b>Комбинированный</b> для лучшей надежности.",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
@@ -1150,10 +1304,14 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         min_apr = data.get('min_apr')
         statuses_filter = data.get('statuses_filter')
 
+        # ПОЛЯ ДЛЯ TELEGRAM:
+        telegram_channel = data.get('telegram_channel')
+        telegram_keywords = data.get('telegram_keywords', [])
+
         def add_link_operation(session):
             new_link = ApiLink(
                 name=custom_name,
-                url=api_url or html_url,  # Для совместимости (берем первый доступный)
+                url=api_url or html_url or telegram_channel,  # Для совместимости
                 api_url=api_url,  # НОВОЕ
                 html_url=html_url,  # НОВОЕ (может быть None)
                 parsing_type=parsing_type,  # НОВОЕ: тип парсинга
@@ -1163,13 +1321,56 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
                 category=category,
                 page_url=page_url,
                 min_apr=min_apr,
-                statuses_filter=statuses_filter
+                statuses_filter=statuses_filter,
+                # ПОЛЯ ДЛЯ TELEGRAM:
+                telegram_channel=telegram_channel
             )
+            # Устанавливаем ключевые слова для Telegram
+            if telegram_keywords:
+                new_link.set_telegram_keywords(telegram_keywords)
             session.add(new_link)
             session.flush()
             return new_link
 
         new_link = atomic_operation(add_link_operation)
+
+        # Для Telegram - автоматическая подписка на канал (в фоновом режиме)
+        subscription_status = ""
+        if parsing_type == 'telegram' and telegram_channel:
+            subscription_status = "🔄 Подписка на канал выполняется в фоновом режиме...\n"
+
+            # Запускаем подписку в фоновом режиме, чтобы не блокировать БД
+            async def subscribe_to_channel():
+                """Фоновая задача подписки на канал"""
+                try:
+                    # Небольшая задержка для завершения транзакции БД
+                    await asyncio.sleep(1)
+
+                    from parsers.telegram_parser import TelegramParser
+                    parser = TelegramParser()
+
+                    # Подключаемся к Telegram
+                    connected = await parser.connect()
+
+                    if connected:
+                        # Подписываемся на канал
+                        joined = await parser.join_channel(telegram_channel)
+
+                        if joined:
+                            logger.info(f"✅ Успешно подписан на канал {telegram_channel}")
+                        else:
+                            logger.warning(f"⚠️ Не удалось подписаться на канал {telegram_channel}")
+
+                        # Отключаемся
+                        await parser.disconnect()
+                    else:
+                        logger.warning(f"⚠️ Не удалось подключиться к Telegram для подписки на {telegram_channel}")
+
+                except Exception as e:
+                    logger.error(f"❌ Ошибка фоновой подписки на Telegram канал: {e}")
+
+            # Запускаем в фоновом режиме
+            asyncio.create_task(subscribe_to_channel())
 
         interval_minutes = interval_seconds // 60
 
@@ -1178,7 +1379,8 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
             'combined': '🔄 Комбинированный',
             'api': '📡 Только API',
             'html': '🌐 Только HTML',
-            'browser': '🌐 Только Browser'
+            'browser': '🌐 Только Browser',
+            'telegram': '📱 Telegram'
         }
         parsing_type_display = parsing_type_names.get(parsing_type, parsing_type)
 
@@ -1208,6 +1410,13 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
 
         if page_url:
             message_parts.append(f"\n<b>🔗 Страница акций:</b>\n<code>{page_url}</code>\n")
+
+        if telegram_channel:
+            message_parts.append(f"\n<b>📱 Telegram канал:</b> {telegram_channel}\n")
+            keywords_display = ", ".join([f"<code>{kw}</code>" for kw in telegram_keywords])
+            message_parts.append(f"<b>🔑 Ключевые слова:</b> {keywords_display}\n")
+            if subscription_status:
+                message_parts.append(f"\n{subscription_status}")
 
         if min_apr:
             message_parts.append(f"\n<b>📊 Минимальный APR:</b> {min_apr}%\n")
@@ -2661,6 +2870,231 @@ async def bypass_rotation_handler(callback: CallbackQuery):
     )
     await callback.answer()
 
+@router.callback_query(F.data == "bypass_telegram")
+async def bypass_telegram_handler(callback: CallbackQuery):
+    """Открыть настройки Telegram API из подменю обхода блокировок"""
+    try:
+        # Импортируем TelegramSettings
+        from data.models import TelegramSettings
+
+        # Получаем текущие настройки
+        with get_db_session() as db:
+            settings = db.query(TelegramSettings).first()
+
+            if settings and settings.is_configured:
+                status = "✅ Настроено"
+                api_id_display = settings.api_id if settings.api_id else "Не установлено"
+                api_hash_display = settings.api_hash[:10] + "..." if settings.api_hash else "Не установлено"
+                phone_display = settings.phone_number if settings.phone_number else "Не установлен"
+                last_auth = settings.last_auth.strftime("%d.%m.%Y %H:%M") if settings.last_auth else "Никогда"
+            else:
+                status = "❌ Не настроено"
+                api_id_display = "Не установлено"
+                api_hash_display = "Не установлено"
+                phone_display = "Не установлен"
+                last_auth = "Никогда"
+
+        # Создаем клавиатуру
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⚙️ Настроить API", callback_data="telegram_api_configure"))
+        builder.add(InlineKeyboardButton(text="🔄 Пересоздать сессию", callback_data="telegram_api_reset"))
+        builder.add(InlineKeyboardButton(text="📖 Инструкция", callback_data="telegram_api_help"))
+        builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_bypass"))
+        builder.adjust(2, 1, 1)
+
+        await callback.message.edit_text(
+            f"📱 <b>Настройки Telegram API</b>\n\n"
+            f"<b>Статус:</b> {status}\n\n"
+            f"<b>API ID:</b> <code>{api_id_display}</code>\n"
+            f"<b>API Hash:</b> <code>{api_hash_display}</code>\n"
+            f"<b>Номер телефона:</b> <code>{phone_display}</code>\n"
+            f"<b>Последняя авторизация:</b> {last_auth}\n\n"
+            f"Для использования Telegram парсинга необходимо настроить API.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"Ошибка показа настроек Telegram API: {e}")
+        await callback.answer("❌ Ошибка загрузки настроек")
+
+@router.callback_query(F.data == "back_to_bypass")
+async def back_to_bypass_menu(callback: CallbackQuery):
+    """Возврат к меню обхода блокировок"""
+    keyboard = get_bypass_keyboard()
+    await callback.message.edit_text(
+        "🛡️ <b>Обход блокировок</b>\n\n"
+        "Выберите нужную функцию:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "telegram_api_help")
+async def telegram_api_help_handler(callback: CallbackQuery):
+    """Показать инструкцию по получению Telegram API"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="bypass_telegram"))
+
+    await callback.message.edit_text(
+        "📖 <b>Как получить Telegram API</b>\n\n"
+        "<b>Шаг 1:</b> Перейдите на сайт\n"
+        "https://my.telegram.org/apps\n\n"
+        "<b>Шаг 2:</b> Войдите с помощью номера телефона\n\n"
+        "<b>Шаг 3:</b> Создайте новое приложение:\n"
+        "• <b>App title:</b> любое название (например 'My Parser Bot')\n"
+        "• <b>Short name:</b> короткое имя (например 'parser')\n"
+        "• <b>Platform:</b> выберите 'Other'\n\n"
+        "<b>Шаг 4:</b> Скопируйте <code>App api_id</code> и <code>App api_hash</code>\n\n"
+        "<b>Шаг 5:</b> Нажмите '⚙️ Настроить API' и введите данные\n\n"
+        "⚠️ <b>Важно:</b> Не делитесь API Hash с посторонними!",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "telegram_api_configure")
+async def telegram_api_configure_start(callback: CallbackQuery, state: FSMContext):
+    """Начало настройки Telegram API"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="bypass_telegram"))
+
+    await callback.message.edit_text(
+        "📱 <b>Настройка Telegram API</b>\n\n"
+        "🔢 <b>Шаг 1/3:</b> Введите <b>API ID</b>\n\n"
+        "Получите на https://my.telegram.org/apps\n\n"
+        "Пример: <code>12345678</code>",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(TelegramAPIStates.waiting_for_api_id)
+    await callback.answer()
+
+@router.message(TelegramAPIStates.waiting_for_api_id)
+async def process_telegram_api_id(message: Message, state: FSMContext):
+    """Обработка ввода API ID"""
+    api_id = message.text.strip()
+
+    # Проверяем, что это число
+    if not api_id.isdigit():
+        await message.answer("❌ API ID должен быть числом. Попробуйте снова:")
+        return
+
+    # Сохраняем
+    await state.update_data(telegram_api_id=api_id)
+
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_id"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="bypass_telegram"))
+    builder.adjust(2)
+
+    await message.answer(
+        f"✅ API ID сохранен: <code>{api_id}</code>\n\n"
+        f"🔑 <b>Шаг 2/3:</b> Введите <b>API Hash</b>\n\n"
+        f"Получите на https://my.telegram.org/apps\n\n"
+        f"Пример: <code>1234567890abcdef1234567890abcdef</code>",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(TelegramAPIStates.waiting_for_api_hash)
+
+@router.message(TelegramAPIStates.waiting_for_api_hash)
+async def process_telegram_api_hash(message: Message, state: FSMContext):
+    """Обработка ввода API Hash"""
+    api_hash = message.text.strip()
+
+    if len(api_hash) < 16:
+        await message.answer("❌ API Hash слишком короткий. Проверьте и введите снова:")
+        return
+
+    # Сохраняем
+    await state.update_data(telegram_api_hash=api_hash)
+
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_hash"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="bypass_telegram"))
+    builder.adjust(2)
+
+    await message.answer(
+        f"✅ API Hash сохранен\n\n"
+        f"📞 <b>Шаг 3/3:</b> Введите <b>номер телефона</b>\n\n"
+        f"Формат: <code>+79001234567</code>\n\n"
+        f"⚠️ Этот номер будет использоваться для авторизации в Telegram",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(TelegramAPIStates.waiting_for_phone)
+
+@router.message(TelegramAPIStates.waiting_for_phone)
+async def process_telegram_phone(message: Message, state: FSMContext):
+    """Обработка ввода номера телефона"""
+    phone = message.text.strip()
+
+    # Базовая валидация номера
+    if not phone.startswith('+'):
+        await message.answer("❌ Номер должен начинаться с '+'. Попробуйте снова:")
+        return
+
+    if len(phone) < 10:
+        await message.answer("❌ Номер слишком короткий. Попробуйте снова:")
+        return
+
+    # Получаем сохраненные данные
+    data = await state.get_data()
+    api_id = data.get('telegram_api_id')
+    api_hash = data.get('telegram_api_hash')
+
+    # Сохраняем в БД
+    try:
+        from data.models import TelegramSettings
+
+        with get_db_session() as db:
+            settings = db.query(TelegramSettings).first()
+
+            if not settings:
+                settings = TelegramSettings()
+                db.add(settings)
+
+            settings.api_id = api_id
+            settings.api_hash = api_hash
+            settings.phone_number = phone
+            settings.is_configured = True
+            db.commit()
+
+        await message.answer(
+            "✅ <b>Настройки Telegram API сохранены!</b>\n\n"
+            f"<b>API ID:</b> <code>{api_id}</code>\n"
+            f"<b>API Hash:</b> <code>{api_hash[:10]}...</code>\n"
+            f"<b>Номер:</b> <code>{phone}</code>\n\n"
+            "Теперь вы можете добавлять Telegram-ссылки для парсинга!",
+            parse_mode="HTML"
+        )
+
+        # Очищаем состояние
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"Ошибка сохранения настроек Telegram API: {e}")
+        await message.answer("❌ Ошибка сохранения настроек. Попробуйте снова.")
+
+@router.callback_query(F.data == "telegram_api_reset")
+async def telegram_api_reset_handler(callback: CallbackQuery):
+    """Сброс сессии Telegram"""
+    try:
+        import os
+        session_file = 'telegram_parser_session.session'
+
+        if os.path.exists(session_file):
+            os.remove(session_file)
+            await callback.answer("✅ Сессия удалена. При следующем запуске потребуется повторная авторизация")
+        else:
+            await callback.answer("ℹ️ Файл сессии не найден")
+
+    except Exception as e:
+        logger.error(f"Ошибка удаления сессии: {e}")
+        await callback.answer("❌ Ошибка удаления сессии")
+
 @router.callback_query(F.data == "bypass_stats")
 async def bypass_stats_handler(callback: CallbackQuery):
     """Открыть статистику системы из подменю обхода блокировок"""
@@ -3417,3 +3851,4 @@ def _format_timestamp(timestamp: float) -> str:
         return "никогда"
     dt = datetime.fromtimestamp(timestamp)
     return dt.strftime("%d.%m.%Y %H:%M:%S")
+

@@ -133,6 +133,21 @@ class UniversalFallbackParser(BaseParser):
                     else:
                         logger.warning(f"⚠️ Browser парсинг не вернул результатов")
 
+                elif strategy == "telegram":
+                    logger.info(f"📱 Начало Telegram парсинга для {self.exchange}")
+                    telegram_results = self._parse_via_telegram()
+
+                    if telegram_results:
+                        results.extend(telegram_results)
+                        self.strategy_used = "telegram" if not self.strategy_used else "combined"
+                        logger.info(f"✅ Telegram парсинг УСПЕШЕН: найдено {len(telegram_results)} промоакций")
+                        for j, promo in enumerate(telegram_results[:5], 1):
+                            logger.info(f"   {j}. {promo.get('title', 'Без названия')}")
+                        if len(telegram_results) > 5:
+                            logger.info(f"   ... и еще {len(telegram_results) - 5} промоакций")
+                    else:
+                        logger.warning(f"⚠️ Telegram парсинг не вернул результатов")
+
                 else:
                     if strategy == "api" and not self._is_api_url() and not self.api_url:
                         logger.info(f"⏭️ Пропускаем API парсинг: нет API URL")
@@ -256,6 +271,204 @@ class UniversalFallbackParser(BaseParser):
             return []
         except Exception as e:
             logger.error(f"❌ Ошибка Browser парсинга: {e}", exc_info=True)
+            return []
+
+    def _parse_via_telegram(self) -> List[Dict[str, Any]]:
+        """Парсинг через Telegram для получения последних сообщений из канала
+
+        ВАЖНО: Этот метод используется для принудительной проверки.
+        Автоматический мониторинг происходит через TelegramMonitor!
+        """
+        try:
+            import asyncio
+            from parsers.telegram_parser import TelegramParser
+            from data.database import get_db_session
+            from data.models import ApiLink
+
+            logger.info("📱 Запуск Telegram парсинга...")
+
+            # Получаем информацию о канале из БД
+            telegram_channel = None
+            keywords = []
+
+            # Пытаемся извлечь канал из URL
+            if '@' in self.url:
+                # Формат: @channelname или https://t.me/channelname
+                if self.url.startswith('@'):
+                    telegram_channel = self.url
+                elif 't.me/' in self.url:
+                    channel_part = self.url.split('t.me/')[-1].split('/')[0]
+                    telegram_channel = f"@{channel_part}" if not channel_part.startswith('@') else channel_part
+
+            # Если не удалось извлечь из URL, ищем в БД
+            if not telegram_channel:
+                try:
+                    with get_db_session() as db:
+                        link = db.query(ApiLink).filter(
+                            ApiLink.url == self.url
+                        ).first()
+
+                        if link and link.telegram_channel:
+                            telegram_channel = link.telegram_channel
+                            keywords = link.get_telegram_keywords()
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось получить данные из БД: {e}")
+
+            if not telegram_channel:
+                logger.warning("⚠️ Telegram канал не указан. Укажите канал в формате @channelname или настройте в БД")
+                return []
+
+            logger.info(f"📡 Канал: {telegram_channel}")
+            logger.info(f"🔑 Ключевые слова: {keywords if keywords else 'Нет (будут возвращены все сообщения)'}")
+
+            # Загружаем настройки Telegram из БД ДО создания потока
+            # Это важно, чтобы избежать "database is locked" в многопоточной среде
+            telegram_api_id = None
+            telegram_api_hash = None
+            # ВАЖНО: Используем отдельный файл сессии для принудительных проверок
+            # чтобы избежать конфликта с TelegramMonitor, который использует основную сессию
+            telegram_session_file = 'telegram_parser_manual_check'
+
+            try:
+                with get_db_session() as db:
+                    from data.models import TelegramSettings
+                    settings = db.query(TelegramSettings).first()
+                    if settings and settings.is_configured:
+                        telegram_api_id = settings.api_id
+                        telegram_api_hash = settings.api_hash
+                        # Используем отдельный файл сессии для ручных проверок
+                        logger.info("✅ Настройки Telegram загружены из БД")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось загрузить настройки из БД: {e}")
+
+            if not telegram_api_id or not telegram_api_hash:
+                logger.error("❌ Telegram API не настроен. Настройте API_ID и API_HASH")
+                return []
+
+            # Копируем основную сессию в файл для ручной проверки (если она существует)
+            # Это позволяет избежать повторной авторизации
+            import os
+            import shutil
+            main_session = 'telegram_parser_session.session'
+            manual_session = f'{telegram_session_file}.session'
+
+            if os.path.exists(main_session) and not os.path.exists(manual_session):
+                try:
+                    shutil.copy2(main_session, manual_session)
+                    logger.info(f"✅ Скопирована сессия для ручной проверки")
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось скопировать сессию: {e}")
+
+            # Запускаем асинхронную функцию
+            async def fetch_telegram_messages():
+                # Создаем парсер внутри async функции с явными настройками
+                # Это избегает обращения к БД из другого потока
+                parser = TelegramParser(
+                    api_id=telegram_api_id,
+                    api_hash=telegram_api_hash,
+                    session_file=telegram_session_file
+                )
+
+                try:
+                    # Подключаемся
+                    connected = await parser.connect_with_retry(max_retries=2, retry_delay=3)
+                    if not connected:
+                        logger.error("❌ Не удалось подключиться к Telegram")
+                        return []
+
+                    # Получаем последние 20 сообщений
+                    logger.info(f"📥 Получение последних 20 сообщений из {telegram_channel}...")
+                    messages = await parser.get_recent_messages(telegram_channel, limit=20)
+
+                    if not messages:
+                        logger.info(f"ℹ️ Нет сообщений в канале {telegram_channel}")
+                        return []
+
+                    logger.info(f"📬 Получено {len(messages)} сообщений")
+
+                    # Обрабатываем сообщения
+                    promotions = []
+                    for msg in messages:
+                        # Если есть ключевые слова, фильтруем
+                        if keywords:
+                            result = await parser.process_message(msg['text'], keywords)
+                            if not result:
+                                continue
+                        else:
+                            result = {
+                                'matched_keywords': [],
+                                'links': parser.extract_links(msg['text']),
+                                'dates': parser.extract_dates(msg['text'])
+                            }
+
+                        # Формируем промоакцию
+                        promo = {
+                            'promo_id': f"telegram_{telegram_channel.replace('@', '')}_{msg['id']}",
+                            'exchange': telegram_channel,
+                            'title': f"Telegram: {telegram_channel}",
+                            'description': msg['text'][:500],
+                            'link': result['links'][0] if result['links'] else f"https://t.me/{telegram_channel.replace('@', '')}/{msg['id']}",
+                            'start_time': msg['date'],
+                            'total_prize_pool': ', '.join(result['matched_keywords']) if result['matched_keywords'] else None,
+                            'data_source': 'telegram',
+                            'source_url': self.url
+                        }
+
+                        promotions.append(promo)
+
+                    return promotions
+
+                finally:
+                    # Гарантированное отключение
+                    await parser.disconnect()
+
+            # Запускаем асинхронную функцию
+            # ВАЖНО: Используем новый поток для избежания конфликтов с основным event loop
+            import threading
+
+            result = [None]  # Для хранения результата
+            exception = [None]  # Для хранения исключения
+
+            def run_in_new_loop():
+                """Запускает async функцию в новом event loop в отдельном потоке"""
+                try:
+                    # Создаем новый event loop для этого потока
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        result[0] = new_loop.run_until_complete(fetch_telegram_messages())
+                    finally:
+                        new_loop.close()
+                except Exception as e:
+                    exception[0] = e
+                    logger.error(f"❌ Ошибка в потоке Telegram парсинга: {e}", exc_info=True)
+
+            # Запускаем в отдельном потоке
+            logger.info("🔄 Запуск Telegram парсинга в отдельном потоке...")
+            thread = threading.Thread(target=run_in_new_loop, name='telegram_parser_thread')
+            thread.start()
+            thread.join(timeout=60)  # Ждем максимум 60 секунд
+
+            # Проверяем результат
+            if thread.is_alive():
+                logger.error("❌ Timeout: Telegram парсинг не завершился за 60 секунд")
+                return []
+
+            if exception[0]:
+                logger.error(f"❌ Ошибка при выполнении Telegram парсинга: {exception[0]}")
+                return []
+
+            promotions = result[0] or []
+
+            logger.info(f"📊 Telegram парсинг завершен: найдено {len(promotions)} сообщений")
+            return promotions
+
+        except ImportError as e:
+            logger.error(f"❌ TelegramParser не найден: {e}")
+            logger.error(f"   Убедитесь, что parsers/telegram_parser.py существует")
+            return []
+        except Exception as e:
+            logger.error(f"❌ Ошибка Telegram парсинга: {e}", exc_info=True)
             return []
 
     def _parse_via_html(self) -> List[Dict[str, Any]]:

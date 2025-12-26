@@ -18,7 +18,7 @@ class ApiLink(Base):
     # НОВЫЕ ОДИНОЧНЫЕ ПОЛЯ
     api_url = Column(String, nullable=True)  # Одиночный API URL
     html_url = Column(String, nullable=True)  # Одиночный HTML URL (опциональный)
-    parsing_type = Column(String, default='combined')  # Тип парсинга: api, html, browser, combined
+    parsing_type = Column(String, default='combined')  # Тип парсинга: api, html, browser, combined, telegram
     check_interval = Column(Integer, default=300)
     is_active = Column(Boolean, default=True)
     added_by = Column(Integer)
@@ -34,6 +34,10 @@ class ApiLink(Base):
     track_fill = Column(Boolean, default=False)  # Отслеживать заполненность
     statuses_filter = Column(String, nullable=True)  # JSON список статусов: ["ONGOING", "INTERESTING"]
     types_filter = Column(String, nullable=True)  # JSON список типов: ["Flexible", "Fixed"]
+
+    # ПОЛЯ ДЛЯ TELEGRAM ПАРСИНГА (только для parsing_type='telegram'):
+    telegram_channel = Column(String, nullable=True)  # @channel_name или ссылка
+    telegram_keywords = Column(Text, nullable=True, default='[]')  # JSON список ключевых слов
 
     def get_api_urls(self):
         """Получить список API URL"""
@@ -85,6 +89,33 @@ class ApiLink(Base):
     def has_legacy_data(self):
         """Проверяет, использует ли запись старую систему"""
         return (not self.api_url and len(self.get_api_urls()) > 0)
+
+    def get_telegram_keywords(self):
+        """Получить список ключевых слов для Telegram"""
+        try:
+            keywords = json.loads(self.telegram_keywords) if self.telegram_keywords else []
+            return keywords if keywords else []
+        except:
+            return []
+
+    def set_telegram_keywords(self, keywords):
+        """Установить список ключевых слов для Telegram"""
+        self.telegram_keywords = json.dumps(keywords) if keywords else '[]'
+
+    def add_telegram_keyword(self, keyword):
+        """Добавить ключевое слово для Telegram"""
+        keywords = self.get_telegram_keywords()
+        if keyword.lower() not in [k.lower() for k in keywords]:
+            keywords.append(keyword)
+            self.set_telegram_keywords(keywords)
+            return True
+        return False
+
+    def remove_telegram_keyword(self, keyword):
+        """Удалить ключевое слово для Telegram"""
+        keywords = self.get_telegram_keywords()
+        keywords = [k for k in keywords if k.lower() != keyword.lower()]
+        self.set_telegram_keywords(keywords)
 
 class PromoHistory(Base):
     __tablename__ = 'promo_history'
@@ -181,6 +212,19 @@ class RotationSettings(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class TelegramSettings(Base):
+    __tablename__ = 'telegram_settings'
+
+    id = Column(Integer, primary_key=True)
+    api_id = Column(String, nullable=True)  # Telegram API ID
+    api_hash = Column(String, nullable=True)  # Telegram API Hash
+    phone_number = Column(String, nullable=True)  # Номер телефона для авторизации
+    session_file = Column(String, default='telegram_parser_session')  # Имя файла сессии
+    is_configured = Column(Boolean, default=False)  # Флаг настроенности
+    last_auth = Column(DateTime, nullable=True)  # Последняя успешная авторизация
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class StakingHistory(Base):
     __tablename__ = 'staking_history'
 
@@ -226,3 +270,111 @@ class StakingHistory(Base):
     __table_args__ = (
         UniqueConstraint('exchange', 'product_id', name='_exchange_product_uc'),
     )
+
+class TelegramChannel(Base):
+    __tablename__ = 'telegram_channels'
+
+    id = Column(Integer, primary_key=True)
+
+    # Информация о канале
+    channel_username = Column(String, unique=True)  # @channel_name или ссылка
+    channel_title = Column(String, nullable=True)  # Название канала
+    channel_id = Column(Integer, nullable=True)  # Telegram ID канала
+
+    # Ключевые слова для поиска (JSON массив)
+    keywords = Column(Text, default='[]')  # ["airdrop", "промо", "campaign"]
+
+    # Настройки мониторинга
+    is_active = Column(Boolean, default=True)
+    check_interval = Column(Integer, default=60)  # Проверка каждые 60 сек
+
+    # Статистика
+    total_messages_found = Column(Integer, default=0)
+    last_message_date = Column(DateTime, nullable=True)
+    last_checked = Column(DateTime, nullable=True)
+
+    # Мета-информация
+    added_by = Column(Integer)  # User ID кто добавил
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def get_keywords(self):
+        """Получить список ключевых слов"""
+        try:
+            return json.loads(self.keywords) if self.keywords else []
+        except:
+            return []
+
+    def set_keywords(self, keywords_list):
+        """Установить список ключевых слов"""
+        self.keywords = json.dumps(keywords_list) if keywords_list else '[]'
+
+    def add_keyword(self, keyword):
+        """Добавить ключевое слово"""
+        keywords = self.get_keywords()
+        if keyword.lower() not in [k.lower() for k in keywords]:
+            keywords.append(keyword)
+            self.set_keywords(keywords)
+            return True
+        return False
+
+    def remove_keyword(self, keyword):
+        """Удалить ключевое слово"""
+        keywords = self.get_keywords()
+        keywords = [k for k in keywords if k.lower() != keyword.lower()]
+        self.set_keywords(keywords)
+
+class TelegramMessage(Base):
+    __tablename__ = 'telegram_messages'
+
+    id = Column(Integer, primary_key=True)
+
+    # Связь с каналом
+    channel_id = Column(Integer, ForeignKey('telegram_channels.id'))
+
+    # Информация о сообщении
+    message_id = Column(Integer)  # ID сообщения в Telegram
+    message_text = Column(Text)  # Полный текст сообщения
+    message_date = Column(DateTime)  # Дата публикации
+
+    # Найденные данные
+    matched_keywords = Column(Text, default='[]')  # Какие ключевые слова совпали
+    extracted_links = Column(Text, default='[]')  # Извлеченные ссылки из текста
+    extracted_dates = Column(Text, nullable=True)  # Найденные даты (период акции)
+
+    # Обработка
+    notification_sent = Column(Boolean, default=False)
+    sent_at = Column(DateTime, nullable=True)
+
+    # Мета-информация
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Связь
+    channel = relationship("TelegramChannel", backref="messages")
+
+    # Уникальность: один message_id на канал
+    __table_args__ = (
+        UniqueConstraint('channel_id', 'message_id', name='_channel_message_uc'),
+    )
+
+    def get_matched_keywords(self):
+        """Получить список совпавших ключевых слов"""
+        try:
+            return json.loads(self.matched_keywords) if self.matched_keywords else []
+        except:
+            return []
+
+    def set_matched_keywords(self, keywords_list):
+        """Установить список совпавших ключевых слов"""
+        self.matched_keywords = json.dumps(keywords_list) if keywords_list else '[]'
+
+    def get_extracted_links(self):
+        """Получить список извлеченных ссылок"""
+        try:
+            return json.loads(self.extracted_links) if self.extracted_links else []
+        except:
+            return []
+
+    def set_extracted_links(self, links_list):
+        """Установить список извлеченных ссылок"""
+        self.extracted_links = json.dumps(links_list) if links_list else '[]'

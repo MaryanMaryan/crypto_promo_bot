@@ -70,3 +70,24 @@ MIN_CHECK_INTERVAL = int(os.getenv('MIN_CHECK_INTERVAL', '60'))
 # =============================================================================
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FORMAT = os.getenv('LOG_FORMAT', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# =============================================================================
+# TELEGRAM PARSER CONFIGURATION
+# =============================================================================
+# ВАЖНО: Telegram API настройки теперь хранятся в БД (TelegramSettings)
+# Настройте через бота: Меню → Обход блокировок → Telegram API
+TELEGRAM_PARSER_ENABLED = os.getenv('TELEGRAM_PARSER_ENABLED', 'false').lower() == 'true'
+
+# Legacy support (для обратной совместимости, если кто-то использует старый способ)
+TELEGRAM_API_ID = os.getenv('TELEGRAM_API_ID')
+TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH')
+
+if TELEGRAM_PARSER_ENABLED:
+    print(f"📡 Telegram Parser включен")
+    if TELEGRAM_API_ID and TELEGRAM_API_HASH:
+        print(f"⚠️  ВНИМАНИЕ: Используются устаревшие настройки из .env")
+        print(f"⚠️  Рекомендуется настроить через бота: Обход блокировок → Telegram API")
+    else:
+        print(f"ℹ️  Настройте Telegram API через бота: Обход блокировок → Telegram API")
+else:
+    print(f"ℹ️ Telegram Parser отключен (TELEGRAM_PARSER_ENABLED=false)")

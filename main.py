@@ -30,6 +30,8 @@ class CryptoPromoBot:
         self.scheduler = None
         self.parser_service = None
         self.notification_service = None
+        self.telegram_monitor = None  # Telegram Monitor
+        self.telegram_monitor_task = None  # Задача мониторинга Telegram
         self.YOUR_CHAT_ID = config.ADMIN_CHAT_ID
         self._shutdown_event = asyncio.Event()
 
@@ -59,7 +61,15 @@ class CryptoPromoBot:
         self.dp = Dispatcher(storage=storage)
         self.parser_service = ParserService()
         self.notification_service = NotificationService(self.bot)
-        
+
+        # Инициализация Telegram Monitor (если включен)
+        if config.TELEGRAM_PARSER_ENABLED:
+            from services.telegram_monitor import TelegramMonitor
+            self.telegram_monitor = TelegramMonitor(self.bot)
+            logger.info("📡 Telegram Monitor инициализирован")
+        else:
+            logger.info("ℹ️ Telegram Parser отключен (TELEGRAM_PARSER_ENABLED=false)")
+
         # Регистрируем роутеры
         self.dp.include_router(router)
 
@@ -287,6 +297,7 @@ class CryptoPromoBot:
                         )
 
                         new_count = len(new_stakings) if new_stakings else 0
+                        count_after = 0  # Для стейкинга не считаем total_promos_in_db
 
                         # Определяем статус
                         if new_count > 0:
@@ -474,15 +485,20 @@ class CryptoPromoBot:
             await self.init_services()
             self.setup_scheduler()
             self.scheduler.start()
-            
+
+            # Запускаем Telegram Monitor в фоновом режиме (если включен)
+            if self.telegram_monitor:
+                logger.info("🚀 Запуск Telegram Monitor в фоновом режиме...")
+                self.telegram_monitor_task = asyncio.create_task(self.telegram_monitor.start())
+
             logger.info("🤖 Crypto Promo Bot запускается...")
             logger.info("⏰ Автоматическая проверка активирована")
             logger.info("🎯 Проверяются ТОЛЬКО активные ссылки")
             logger.info("🚫 Остановленные ссылки игнорируются в автоматическом и ручном режиме")
-            
+
             # Запускаем поллинг
             await self.dp.start_polling(self.bot)
-            
+
         except Exception as e:
             logger.error(f"❌ Фатальная ошибка при запуске: {e}")
         finally:
@@ -492,10 +508,21 @@ class CryptoPromoBot:
         """Корректное завершение работы"""
         if self._shutdown_event.is_set():
             return
-            
+
         self._shutdown_event.set()
         logger.info("🛑 Завершение работы бота...")
-        
+
+        # Останавливаем Telegram Monitor (если запущен)
+        if self.telegram_monitor:
+            logger.info("🛑 Остановка Telegram Monitor...")
+            await self.telegram_monitor.shutdown()
+            if self.telegram_monitor_task:
+                self.telegram_monitor_task.cancel()
+                try:
+                    await self.telegram_monitor_task
+                except asyncio.CancelledError:
+                    pass
+
         if self.scheduler:
             self.scheduler.shutdown()
         if self.bot:

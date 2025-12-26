@@ -31,7 +31,10 @@ def init_database():
         # Настройки для SQLite
         engine_kwargs = {
             'echo': False,
-            'connect_args': {'check_same_thread': False}
+            'connect_args': {
+                'check_same_thread': False,
+                'timeout': 30.0  # Timeout 30 секунд для database locked
+            }
         }
         
         engine_kwargs.update({
@@ -84,7 +87,12 @@ def create_indexes():
         Index('idx_ua_status_success', UserAgent.status, UserAgent.success_rate),
         Index('idx_stats_exchange_time', RotationStats.exchange, RotationStats.timestamp),
         Index('idx_stats_proxy_ua', RotationStats.proxy_id, RotationStats.user_agent_id),
-        Index('idx_aggregated_date_exchange', AggregatedStats.date, AggregatedStats.exchange)
+        Index('idx_aggregated_date_exchange', AggregatedStats.date, AggregatedStats.exchange),
+        # Индексы для Telegram
+        Index('idx_tg_channel_username', TelegramChannel.channel_username),
+        Index('idx_tg_channel_active', TelegramChannel.is_active),
+        Index('idx_tg_message_channel_date', TelegramMessage.channel_id, TelegramMessage.message_date),
+        Index('idx_tg_message_notification', TelegramMessage.notification_sent)
     ]
     return indexes
 
@@ -128,7 +136,8 @@ class DatabaseMigration:
             self._migration_003_add_multiple_urls,
             self._migration_004_convert_to_single_urls,
             self._migration_005_add_parsing_type,
-            self._migration_006_add_staking_fields
+            self._migration_006_add_staking_fields,
+            self._migration_007_add_telegram_tables
         ])
     
     def _migration_001_initial(self, session):
@@ -287,6 +296,30 @@ class DatabaseMigration:
 
         except Exception as e:
             logging.error(f"❌ Ошибка в миграции 006: {e}")
+            raise
+
+    def _migration_007_add_telegram_tables(self, session):
+        """Миграция 007: Добавление таблиц для Telegram-парсера"""
+        try:
+            from sqlalchemy import inspect
+            inspector = inspect(session.bind)
+            tables = inspector.get_table_names()
+
+            if 'telegram_channels' in tables:
+                logging.info("✅ Таблица telegram_channels уже существует")
+            else:
+                logging.info("📡 Создание таблицы telegram_channels...")
+
+            if 'telegram_messages' in tables:
+                logging.info("✅ Таблица telegram_messages уже существует")
+            else:
+                logging.info("📡 Создание таблицы telegram_messages...")
+
+            # Таблицы создаются автоматически через Base.metadata.create_all()
+            logging.info("✅ Миграция 007: Telegram таблицы проверены/созданы")
+
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 007: {e}")
             raise
 
     def run_migrations(self):

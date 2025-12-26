@@ -1,0 +1,25 @@
+[Unit]
+Description=Crypto Promo Bot - Telegram Bot for Crypto Promotions
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/crypto_promo_bot
+Environment="PATH=/home/ubuntu/crypto_promo_bot/venv/bin"
+ExecStart=/home/ubuntu/crypto_promo_bot/venv/bin/python main.py
+
+# Автоматический перезапуск при сбоях
+Restart=always
+RestartSec=10
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crypto_promo_bot
+
+# Безопасность
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
