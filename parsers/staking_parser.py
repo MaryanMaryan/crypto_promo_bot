@@ -43,7 +43,7 @@ class StakingParser:
                 }
 
                 payload = {
-                    "tab": "0",  # 0 - все, 1 - flexible, 2 - fixed
+                    "tab": "2",  # 0 - все, 1 - flexible, 2 - fixed (только Fixed Term)
                     "page": 1,
                     "limit": 100,
                     "fixed_saving_version": 1,
@@ -178,18 +178,59 @@ class StakingParser:
 
         for coin_product in coin_products:
             try:
-                # ID монеты от Bybit - используем расширенный маппинг
-                coin_id = coin_product.get('coin')
-                coin_name = BYBIT_COIN_MAPPING.get(coin_id, f"COIN_{coin_id}")
+                # ID монеты от Bybit
+                # ВАЖНО: В Bybit API поле 'coin' указывает на монету награды для продуктов с return_coin=0,
+                # а не на монету которая стейкается!
+                api_coin_id = coin_product.get('coin')
 
                 # Продукты этой монеты
                 saving_products = coin_product.get('saving_products', [])
 
                 for product in saving_products:
                     try:
-                        # APY (строка с %)
+                        # ОТЛАДКА: Проверяем ВСЕ продукты на проблемные символы
+                        term = product.get('staking_term', '0')
+
+                        # Определяем ПРАВИЛЬНУЮ монету для стейкинга
+                        # В Bybit API поле 'coin' может указывать на монету награды, а не стейкинга!
+                        # ВАЖНО: Нужно анализировать тег и return_coin для определения правильной монеты
+
+                        return_coin = product.get('return_coin')
+                        product_coin_id = product.get('coin', api_coin_id)
+                        tag = product.get('product_tag_info', {}).get('display_tag_key', '')
+
+                        # Сначала получаем APY для дополнительных проверок
                         apy_str = product.get('apy', '0%')
                         apy_float = float(apy_str.replace('%', '').strip())
+
+                        # Определяем монету по тегу (наиболее надёжный способ)
+                        if 'USDT' in tag or 'usdt' in tag:
+                            # Тег содержит USDT - это USDT стейкинг
+                            coin_id = 3  # USDT
+                        elif api_coin_id == 5 and apy_float >= 500:
+                            # ВАЖНО: BNB в API с очень высоким APR (≥500%) обычно означает USDT стейкинг
+                            # Bybit не предлагает такие высокие ставки для BNB стейкинга
+                            coin_id = 3  # USDT
+                        elif return_coin == 0:
+                            # Награда в других монетах, тега нет - определяем по api_coin_id
+                            if api_coin_id == 5:  # BNB в API обычно означает USDT стейкинг
+                                coin_id = 3  # USDT
+                            elif api_coin_id == 463:  # MNT
+                                coin_id = 463  # Стейкаем MNT
+                            else:
+                                # Для остальных используем coin из product или coin_product
+                                coin_id = product_coin_id
+                        else:
+                            # Стандартный случай: стейкаем и получаем ту же монету
+                            coin_id = return_coin if return_coin else api_coin_id
+
+                        coin_name = BYBIT_COIN_MAPPING.get(coin_id, f"COIN_{coin_id}")
+
+                        # Проверяем все текстовые поля на наличие < или >
+                        for key, value in product.items():
+                            if isinstance(value, str) and ('<' in value or '>' in value):
+                                logger.warning(f"⚠️ [{coin_name}] Поле '{key}' содержит < или >: {value}")
+                                logger.info(f"🔍 Полные данные продукта: {product}")
 
                         # Получаем цену токена
                         token_price = self.price_fetcher.get_token_price(coin_name) if coin_name else None
@@ -198,7 +239,6 @@ class StakingParser:
                         product_id = str(product.get('product_id', ''))
 
                         # Тип (определяем по staking_term)
-                        term = product.get('staking_term', '0')
                         product_type = "Flexible" if term == "0" else f"Fixed {term}d"
                         term_days = int(term)
 
@@ -222,6 +262,47 @@ class StakingParser:
 
                         # VIP продукт
                         is_vip = product.get('is_vip', False)
+                        if not is_vip and tag:
+                            # Проверяем тег на VIP
+                            is_vip = 'VIP' in tag or 'vip' in tag
+
+                        # Продукт для новых пользователей
+                        is_new_user = False
+                        if tag:
+                            is_new_user = 'newuser' in tag.lower() or 'new user' in tag.lower()
+
+                        # Региональные теги (для СНГ, Азии и т.д.)
+                        regional_tag = None
+                        regional_countries = None
+                        tag_info = product.get('product_tag_info', {})
+                        if tag_info:
+                            display_tag = tag_info.get('display_tag_key', '')
+                            countries = tag_info.get('display_on_country_code', '')
+
+                            # Определяем региональные предложения
+                            if 'CIS' in display_tag:
+                                regional_tag = 'CIS'  # СНГ
+                                regional_countries = countries
+                            elif 'Asia' in display_tag:
+                                regional_tag = 'Asia'
+                                regional_countries = countries
+                            elif countries and not is_vip and not is_new_user:
+                                # Есть страны, но не VIP и не New User - значит региональное
+                                regional_tag = 'Regional'
+                                regional_countries = countries
+
+                        # Определяем категорию
+                        category = None
+                        category_text = None
+                        if is_vip:
+                            category = 'VIP'
+                            category_text = 'VIP Product'
+                        elif is_new_user:
+                            category = 'New User'
+                            category_text = 'New User Only'
+                        elif regional_tag:
+                            category = regional_tag
+                            category_text = f'{regional_tag} Regional Offer'
 
                         staking = {
                             'exchange': 'Bybit',
@@ -231,8 +312,8 @@ class StakingParser:
                             'apr': apy_float,
                             'type': product_type,
                             'status': status,
-                            'category': 'VIP' if is_vip else None,
-                            'category_text': 'VIP Product' if is_vip else None,
+                            'category': category,
+                            'category_text': category_text,
                             'term_days': term_days,
                             'token_price_usd': token_price,
                             'reward_token_price_usd': None,
@@ -244,6 +325,10 @@ class StakingParser:
                             'max_capacity': max_capacity,
                             'current_deposit': current_deposit,
                             'fill_percentage': fill_percentage,
+                            'is_vip': is_vip,
+                            'is_new_user': is_new_user,
+                            'regional_tag': regional_tag,
+                            'regional_countries': regional_countries,
                         }
 
                         stakings.append(staking)

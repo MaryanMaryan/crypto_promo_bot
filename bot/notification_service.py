@@ -1,4 +1,5 @@
 import logging
+import html
 from aiogram import Bot
 from typing import List, Dict, Any
 
@@ -8,32 +9,39 @@ class NotificationService:
     def __init__(self, bot: Bot):
         self.bot = bot
 
+    @staticmethod
+    def escape_html(text: Any) -> str:
+        """Безопасное экранирование HTML-символов"""
+        if text is None:
+            return 'N/A'
+        return html.escape(str(text))
+
     def format_promo_message(self, promo: Dict[str, Any]) -> str:
         """Форматирует сообщение о промоакции в красивый HTML"""
         try:
             message = "🎉 <b>НОВАЯ ПРОМОАКЦИЯ!</b>\n\n"
 
             # Биржа
-            message += f"<b>🏢 Биржа:</b> {promo.get('exchange', 'Unknown')}\n"
+            message += f"<b>🏢 Биржа:</b> {self.escape_html(promo.get('exchange', 'Unknown'))}\n"
 
             # Название
             if promo.get('title'):
-                message += f"<b>📌 Название:</b> {promo['title']}\n"
+                message += f"<b>📌 Название:</b> {self.escape_html(promo['title'])}\n"
 
             # Описание (обрезаем если слишком длинное)
             if promo.get('description'):
-                desc = promo['description']
+                desc = str(promo['description'])
                 if len(desc) > 200:
                     desc = desc[:200] + "..."
-                message += f"<b>📝 Описание:</b> {desc}\n"
+                message += f"<b>📝 Описание:</b> {self.escape_html(desc)}\n"
 
             # Призовой фонд
             if promo.get('total_prize_pool'):
-                message += f"<b>💰 Призовой фонд:</b> {promo['total_prize_pool']}\n"
+                message += f"<b>💰 Призовой фонд:</b> {self.escape_html(promo['total_prize_pool'])}\n"
 
             # Токен награды
             if promo.get('award_token'):
-                message += f"<b>🎯 Токен награды:</b> {promo['award_token']}\n"
+                message += f"<b>🎯 Токен награды:</b> {self.escape_html(promo['award_token'])}\n"
 
             # Количество участников/мест
             if promo.get('participants_count'):
@@ -225,16 +233,16 @@ class NotificationService:
             Отформатированное HTML сообщение
         """
         try:
-            # Базовая информация
-            coin = staking.get('coin', 'N/A')
-            reward_coin = staking.get('reward_coin')
-            exchange = staking.get('exchange', 'N/A')
+            # Базовая информация (с экранированием HTML)
+            coin = self.escape_html(staking.get('coin', 'N/A'))
+            reward_coin = self.escape_html(staking.get('reward_coin')) if staking.get('reward_coin') else None
+            exchange = self.escape_html(staking.get('exchange', 'N/A'))
             apr = staking.get('apr', 0)
             term_days = staking.get('term_days', 0)
-            term_type = staking.get('type', 'N/A')
+            term_type = self.escape_html(staking.get('type', 'N/A'))
             token_price = staking.get('token_price_usd')
-            status = staking.get('status', 'N/A')
-            category = staking.get('category_text', staking.get('category'))
+            status = self.escape_html(staking.get('status', 'N/A'))
+            category = self.escape_html(staking.get('category_text', staking.get('category')))
 
             # Лимиты
             user_limit_tokens = staking.get('user_limit_tokens')
@@ -260,6 +268,28 @@ class NotificationService:
 
             message += f"<b>🏦 Биржа:</b> {exchange}\n"
             message += f"<b>💰 APR:</b> {apr}%\n"
+
+            # Пометки для VIP, New User и Regional
+            is_vip = staking.get('is_vip', False)
+            is_new_user = staking.get('is_new_user', False)
+            regional_tag = staking.get('regional_tag')
+            regional_countries = staking.get('regional_countries')
+
+            if is_vip:
+                message += f"<b>👑 VIP:</b> Только для VIP пользователей\n"
+
+            if is_new_user:
+                message += f"<b>🎁 NEW USER:</b> Только для новых пользователей\n"
+
+            if regional_tag:
+                # Региональное предложение
+                region_name = regional_tag
+                if regional_tag == 'CIS':
+                    region_name = 'СНГ (CIS)'
+                message += f"<b>🌍 REGIONAL:</b> {region_name}"
+                if regional_countries:
+                    message += f" ({regional_countries})"
+                message += "\n"
 
             # Период
             if term_days == 0:
@@ -305,24 +335,34 @@ class NotificationService:
 
                 if total_places:
                     message += f"└─ Всего мест: {total_places}\n"
+            elif exchange == 'Kucoin':
+                # KuCoin не предоставляет данные о лимитах в публичном API
+                message += f"\n<i>ℹ️ Данные о лимитах доступны только на сайте биржи</i>\n"
 
-            # Даты
+            # Даты (с экранированием)
             if start_time or end_time:
                 message += "\n"
                 if start_time:
-                    message += f"<b>⏰ Старт:</b> {start_time}\n"
+                    message += f"<b>⏰ Старт:</b> {self.escape_html(start_time)}\n"
                 if end_time:
-                    message += f"<b>🕐 Конец:</b> {end_time}\n"
+                    message += f"<b>🕐 Конец:</b> {self.escape_html(end_time)}\n"
 
             # Ссылка
             if page_url:
-                message += f"\n<b>🔗 Ссылка:</b> {page_url}"
+                message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+
+            # ВАЖНО: Telegram имеет лимит 4096 символов
+            # Если сообщение слишком длинное, обрезаем его безопасно на границе строки
+            if len(message) > 4090:
+                logger.warning(f"⚠️ Сообщение слишком длинное ({len(message)} символов), обрезаем")
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Сообщение обрезано из-за лимита длины</i>"
 
             return message
 
         except Exception as e:
             logger.error(f"❌ Ошибка форматирования стейкинга: {e}")
-            return f"🆕 <b>Новый стейкинг!</b>\n\n<b>Монета:</b> {staking.get('coin', 'Unknown')}\n<b>APR:</b> {staking.get('apr', 0)}%"
+            return f"🆕 <b>Новый стейкинг!</b>\n\n<b>Монета:</b> {self.escape_html(staking.get('coin', 'Unknown'))}\n<b>APR:</b> {staking.get('apr', 0)}%"
 
     def format_pools_report(self, pools: List[Dict[str, Any]], exchange_name: str, page_url: str = None) -> str:
         """
@@ -338,27 +378,27 @@ class NotificationService:
         """
         try:
             if not pools:
-                return f"📭 Нет активных пулов с данными о заполненности на <b>{exchange_name}</b>"
+                return f"📭 Нет активных пулов с данными о заполненности на <b>{self.escape_html(exchange_name)}</b>"
 
             # Заголовок
             from datetime import datetime
             now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
             message = f"📊 <b>ОТЧЁТ: ЗАПОЛНЕННОСТЬ ПУЛОВ</b>\n\n"
-            message += f"<b>🏦 Биржа:</b> {exchange_name}\n"
+            message += f"<b>🏦 Биржа:</b> {self.escape_html(exchange_name)}\n"
             message += f"<b>🕐 Обновлено:</b> {now}\n\n"
             message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
             # Перебираем пулы
             for pool in pools:
-                coin = pool.get('coin', 'N/A')
+                coin = self.escape_html(pool.get('coin', 'N/A'))
                 apr = pool.get('apr', 0)
                 term_days = pool.get('term_days', 0)
-                term_type = pool.get('type', 'N/A')
+                term_type = self.escape_html(pool.get('type', 'N/A'))
 
                 fill_percentage = pool.get('fill_percentage', 0)
                 max_capacity = pool.get('max_capacity', 0)
                 current_deposit = pool.get('current_deposit', 0)
-                status = pool.get('status', 'N/A')
+                status = self.escape_html(pool.get('status', 'N/A'))
 
                 # Заголовок пула
                 if term_days == 0:
@@ -367,6 +407,16 @@ class NotificationService:
                     term_text = f"{term_days} дней" if term_days > 1 else f"{term_days} день"
 
                 message += f"<b>💰 {coin}</b> | {apr}% APR | {term_text}\n"
+
+                # Пометки для VIP и New User
+                is_vip = pool.get('is_vip', False)
+                is_new_user = pool.get('is_new_user', False)
+
+                if is_vip:
+                    message += f"<b>👑 VIP</b> | "
+                if is_new_user:
+                    message += f"<b>🎁 NEW USER</b> | "
+
                 message += f"<b>📊 Статус:</b> {status}\n"
 
                 # Прогресс бар
@@ -375,7 +425,7 @@ class NotificationService:
                 progress_bar = "▓" * filled_blocks + "░" * empty_blocks
                 message += f"{progress_bar} <b>{fill_percentage:.2f}%</b>\n"
 
-                # Данные о пуле
+                # Данные о пуле (coin уже экранирован выше)
                 if max_capacity and current_deposit:
                     available = max_capacity - current_deposit
                     message += f"Лимит: {max_capacity:,.2f} {coin} | "
@@ -401,10 +451,26 @@ class NotificationService:
 
             # Ссылка
             if page_url:
-                message += f"\n<b>🔗 Ссылка:</b> {page_url}"
+                message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+
+            # ВАЖНО: Telegram имеет лимит 4096 символов
+            # Если сообщение слишком длинное, обрезаем его безопасно на границе строки
+            if len(message) > 4090:
+                logger.warning(f"⚠️ Сообщение слишком длинное ({len(message)} символов), обрезаем")
+                # Находим последнюю строку до лимита
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Сообщение обрезано из-за лимита длины</i>"
+
+            # Дополнительная проверка на невалидные символы
+            if '<' in message.replace('<b>', '').replace('</b>', '').replace('<i>', '').replace('</i>', '').replace('<code>', '').replace('</code>', ''):
+                logger.warning(f"⚠️ В сообщении найдены подозрительные символы '<' вне тегов")
+                # Показываем где именно
+                for i, char in enumerate(message):
+                    if char == '<' and not any(message[i:i+len(tag)] == tag for tag in ['<b>', '</b>', '<i>', '</i>', '<code>', '</code>']):
+                        logger.warning(f"   Позиция {i}: ...{message[max(0,i-20):i+20]}...")
 
             return message
 
         except Exception as e:
-            logger.error(f"❌ Ошибка форматирования отчёта о пулах: {e}")
-            return f"📊 <b>Отчёт о заполненности пулов</b>\n\n<b>Биржа:</b> {exchange_name}\n\nНайдено пулов: {len(pools)}"
+            logger.error(f"❌ Ошибка форматирования отчёта о пулах: {e}", exc_info=True)
+            return f"📊 <b>Отчёт о заполненности пулов</b>\n\n<b>Биржа:</b> {self.escape_html(exchange_name)}\n\nНайдено пулов: {len(pools)}"
