@@ -137,7 +137,8 @@ class DatabaseMigration:
             self._migration_004_convert_to_single_urls,
             self._migration_005_add_parsing_type,
             self._migration_006_add_staking_fields,
-            self._migration_007_add_telegram_tables
+            self._migration_007_add_telegram_tables,
+            self._migration_008_add_telegram_accounts
         ])
     
     def _migration_001_initial(self, session):
@@ -320,6 +321,25 @@ class DatabaseMigration:
 
         except Exception as e:
             logging.error(f"❌ Ошибка в миграции 007: {e}")
+            raise
+
+    def _migration_008_add_telegram_accounts(self, session):
+        """Миграция 008: Добавление таблицы telegram_accounts для множественных аккаунтов"""
+        try:
+            from sqlalchemy import inspect
+            inspector = inspect(session.bind)
+            tables = inspector.get_table_names()
+
+            if 'telegram_accounts' in tables:
+                logging.info("✅ Таблица telegram_accounts уже существует")
+            else:
+                logging.info("📱 Создание таблицы telegram_accounts...")
+                # Таблица создается автоматически через Base.metadata.create_all()
+
+            logging.info("✅ Миграция 008: Таблица telegram_accounts проверена/создана")
+
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 008: {e}")
             raise
 
     def run_migrations(self):

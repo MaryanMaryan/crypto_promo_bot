@@ -213,17 +213,39 @@ class RotationSettings(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class TelegramSettings(Base):
+    """Глобальные настройки Telegram API (общие для всех аккаунтов)"""
     __tablename__ = 'telegram_settings'
 
     id = Column(Integer, primary_key=True)
-    api_id = Column(String, nullable=True)  # Telegram API ID
-    api_hash = Column(String, nullable=True)  # Telegram API Hash
-    phone_number = Column(String, nullable=True)  # Номер телефона для авторизации
-    session_file = Column(String, default='telegram_parser_session')  # Имя файла сессии
-    is_configured = Column(Boolean, default=False)  # Флаг настроенности
-    last_auth = Column(DateTime, nullable=True)  # Последняя успешная авторизация
+    api_id = Column(String, nullable=True)  # Telegram API ID (общий для всех аккаунтов)
+    api_hash = Column(String, nullable=True)  # Telegram API Hash (общий для всех аккаунтов)
+    # DEPRECATED поля (для обратной совместимости):
+    phone_number = Column(String, nullable=True)
+    session_file = Column(String, default='telegram_parser_session')
+    is_configured = Column(Boolean, default=False)
+    last_auth = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class TelegramAccount(Base):
+    """Модель для хранения нескольких Telegram аккаунтов-парсеров"""
+    __tablename__ = 'telegram_accounts'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)  # Название аккаунта (для удобства)
+    phone_number = Column(String, nullable=False, unique=True)  # Номер телефона
+    session_file = Column(String, nullable=False, unique=True)  # Уникальное имя файла сессии
+    is_active = Column(Boolean, default=True)  # Активен ли аккаунт
+    is_authorized = Column(Boolean, default=False)  # Авторизован ли
+    last_used = Column(DateTime, nullable=True)  # Последнее использование
+    added_by = Column(Integer, nullable=False)  # ID пользователя, добавившего аккаунт
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Статистика использования
+    messages_parsed = Column(Integer, default=0)  # Количество обработанных сообщений
+    channels_monitored = Column(Integer, default=0)  # Количество отслеживаемых каналов
+    last_error = Column(Text, nullable=True)  # Последняя ошибка
 
 class StakingHistory(Base):
     __tablename__ = 'staking_history'

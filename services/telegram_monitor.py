@@ -51,14 +51,18 @@ class TelegramMonitor:
                 # Загружаем активные каналы
                 await self.load_active_channels()
 
-                # Подписываемся на новые сообщения
-                self.parser.client.add_event_handler(
-                    self.handle_new_message,
-                    events.NewMessage()
-                )
+                # Подписываемся на новые сообщения для ВСЕХ подключенных клиентов
+                for account_id, client_data in self.parser.clients.items():
+                    if client_data['is_connected']:
+                        client_data['client'].add_event_handler(
+                            self.handle_new_message,
+                            events.NewMessage()
+                        )
+                        logger.info(f"📡 Event handler добавлен для аккаунта {client_data['account']['name']}")
 
+                connected_count = self.parser.get_connected_clients_count()
                 self.is_running = True
-                logger.info(f"✅ Telegram Monitor запущен. Отслеживается {len(self.monitored_channels)} каналов")
+                logger.info(f"✅ Telegram Monitor запущен. {connected_count} аккаунтов отслеживают {len(self.monitored_channels)} каналов")
 
                 # Ожидаем сигнала завершения
                 await self._shutdown_event.wait()

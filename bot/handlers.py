@@ -129,10 +129,7 @@ class UserAgentStates(StatesGroup):
 class RotationSettingsStates(StatesGroup):
     waiting_for_rotation_interval = State()
 
-class TelegramAPIStates(StatesGroup):
-    waiting_for_api_id = State()
-    waiting_for_api_hash = State()
-    waiting_for_phone = State()
+# СТАРЫЕ СОСТОЯНИЯ TelegramAPIStates УДАЛЕНЫ - используется TelegramAccountStates из bot/states.py
 
 # РАСШИРЕННОЕ ГЛАВНОЕ МЕНЮ
 def get_main_menu():
@@ -2870,54 +2867,7 @@ async def bypass_rotation_handler(callback: CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(F.data == "bypass_telegram")
-async def bypass_telegram_handler(callback: CallbackQuery):
-    """Открыть настройки Telegram API из подменю обхода блокировок"""
-    try:
-        # Импортируем TelegramSettings
-        from data.models import TelegramSettings
-
-        # Получаем текущие настройки
-        with get_db_session() as db:
-            settings = db.query(TelegramSettings).first()
-
-            if settings and settings.is_configured:
-                status = "✅ Настроено"
-                api_id_display = settings.api_id if settings.api_id else "Не установлено"
-                api_hash_display = settings.api_hash[:10] + "..." if settings.api_hash else "Не установлено"
-                phone_display = settings.phone_number if settings.phone_number else "Не установлен"
-                last_auth = settings.last_auth.strftime("%d.%m.%Y %H:%M") if settings.last_auth else "Никогда"
-            else:
-                status = "❌ Не настроено"
-                api_id_display = "Не установлено"
-                api_hash_display = "Не установлено"
-                phone_display = "Не установлен"
-                last_auth = "Никогда"
-
-        # Создаем клавиатуру
-        builder = InlineKeyboardBuilder()
-        builder.add(InlineKeyboardButton(text="⚙️ Настроить API", callback_data="telegram_api_configure"))
-        builder.add(InlineKeyboardButton(text="🔄 Пересоздать сессию", callback_data="telegram_api_reset"))
-        builder.add(InlineKeyboardButton(text="📖 Инструкция", callback_data="telegram_api_help"))
-        builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_bypass"))
-        builder.adjust(2, 1, 1)
-
-        await callback.message.edit_text(
-            f"📱 <b>Настройки Telegram API</b>\n\n"
-            f"<b>Статус:</b> {status}\n\n"
-            f"<b>API ID:</b> <code>{api_id_display}</code>\n"
-            f"<b>API Hash:</b> <code>{api_hash_display}</code>\n"
-            f"<b>Номер телефона:</b> <code>{phone_display}</code>\n"
-            f"<b>Последняя авторизация:</b> {last_auth}\n\n"
-            f"Для использования Telegram парсинга необходимо настроить API.",
-            reply_markup=builder.as_markup(),
-            parse_mode="HTML"
-        )
-        await callback.answer()
-
-    except Exception as e:
-        logger.error(f"Ошибка показа настроек Telegram API: {e}")
-        await callback.answer("❌ Ошибка загрузки настроек")
+# СТАРЫЙ ОБРАБОТЧИК bypass_telegram УДАЛЕН - используется новый из telegram_account_handlers.py
 
 @router.callback_query(F.data == "back_to_bypass")
 async def back_to_bypass_menu(callback: CallbackQuery):
@@ -2931,169 +2881,7 @@ async def back_to_bypass_menu(callback: CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(F.data == "telegram_api_help")
-async def telegram_api_help_handler(callback: CallbackQuery):
-    """Показать инструкцию по получению Telegram API"""
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="bypass_telegram"))
-
-    await callback.message.edit_text(
-        "📖 <b>Как получить Telegram API</b>\n\n"
-        "<b>Шаг 1:</b> Перейдите на сайт\n"
-        "https://my.telegram.org/apps\n\n"
-        "<b>Шаг 2:</b> Войдите с помощью номера телефона\n\n"
-        "<b>Шаг 3:</b> Создайте новое приложение:\n"
-        "• <b>App title:</b> любое название (например 'My Parser Bot')\n"
-        "• <b>Short name:</b> короткое имя (например 'parser')\n"
-        "• <b>Platform:</b> выберите 'Other'\n\n"
-        "<b>Шаг 4:</b> Скопируйте <code>App api_id</code> и <code>App api_hash</code>\n\n"
-        "<b>Шаг 5:</b> Нажмите '⚙️ Настроить API' и введите данные\n\n"
-        "⚠️ <b>Важно:</b> Не делитесь API Hash с посторонними!",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "telegram_api_configure")
-async def telegram_api_configure_start(callback: CallbackQuery, state: FSMContext):
-    """Начало настройки Telegram API"""
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="bypass_telegram"))
-
-    await callback.message.edit_text(
-        "📱 <b>Настройка Telegram API</b>\n\n"
-        "🔢 <b>Шаг 1/3:</b> Введите <b>API ID</b>\n\n"
-        "Получите на https://my.telegram.org/apps\n\n"
-        "Пример: <code>12345678</code>",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-    await state.set_state(TelegramAPIStates.waiting_for_api_id)
-    await callback.answer()
-
-@router.message(TelegramAPIStates.waiting_for_api_id)
-async def process_telegram_api_id(message: Message, state: FSMContext):
-    """Обработка ввода API ID"""
-    api_id = message.text.strip()
-
-    # Проверяем, что это число
-    if not api_id.isdigit():
-        await message.answer("❌ API ID должен быть числом. Попробуйте снова:")
-        return
-
-    # Сохраняем
-    await state.update_data(telegram_api_id=api_id)
-
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_id"))
-    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="bypass_telegram"))
-    builder.adjust(2)
-
-    await message.answer(
-        f"✅ API ID сохранен: <code>{api_id}</code>\n\n"
-        f"🔑 <b>Шаг 2/3:</b> Введите <b>API Hash</b>\n\n"
-        f"Получите на https://my.telegram.org/apps\n\n"
-        f"Пример: <code>1234567890abcdef1234567890abcdef</code>",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-    await state.set_state(TelegramAPIStates.waiting_for_api_hash)
-
-@router.message(TelegramAPIStates.waiting_for_api_hash)
-async def process_telegram_api_hash(message: Message, state: FSMContext):
-    """Обработка ввода API Hash"""
-    api_hash = message.text.strip()
-
-    if len(api_hash) < 16:
-        await message.answer("❌ API Hash слишком короткий. Проверьте и введите снова:")
-        return
-
-    # Сохраняем
-    await state.update_data(telegram_api_hash=api_hash)
-
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_hash"))
-    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="bypass_telegram"))
-    builder.adjust(2)
-
-    await message.answer(
-        f"✅ API Hash сохранен\n\n"
-        f"📞 <b>Шаг 3/3:</b> Введите <b>номер телефона</b>\n\n"
-        f"Формат: <code>+79001234567</code>\n\n"
-        f"⚠️ Этот номер будет использоваться для авторизации в Telegram",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-    await state.set_state(TelegramAPIStates.waiting_for_phone)
-
-@router.message(TelegramAPIStates.waiting_for_phone)
-async def process_telegram_phone(message: Message, state: FSMContext):
-    """Обработка ввода номера телефона"""
-    phone = message.text.strip()
-
-    # Базовая валидация номера
-    if not phone.startswith('+'):
-        await message.answer("❌ Номер должен начинаться с '+'. Попробуйте снова:")
-        return
-
-    if len(phone) < 10:
-        await message.answer("❌ Номер слишком короткий. Попробуйте снова:")
-        return
-
-    # Получаем сохраненные данные
-    data = await state.get_data()
-    api_id = data.get('telegram_api_id')
-    api_hash = data.get('telegram_api_hash')
-
-    # Сохраняем в БД
-    try:
-        from data.models import TelegramSettings
-
-        with get_db_session() as db:
-            settings = db.query(TelegramSettings).first()
-
-            if not settings:
-                settings = TelegramSettings()
-                db.add(settings)
-
-            settings.api_id = api_id
-            settings.api_hash = api_hash
-            settings.phone_number = phone
-            settings.is_configured = True
-            db.commit()
-
-        await message.answer(
-            "✅ <b>Настройки Telegram API сохранены!</b>\n\n"
-            f"<b>API ID:</b> <code>{api_id}</code>\n"
-            f"<b>API Hash:</b> <code>{api_hash[:10]}...</code>\n"
-            f"<b>Номер:</b> <code>{phone}</code>\n\n"
-            "Теперь вы можете добавлять Telegram-ссылки для парсинга!",
-            parse_mode="HTML"
-        )
-
-        # Очищаем состояние
-        await state.clear()
-
-    except Exception as e:
-        logger.error(f"Ошибка сохранения настроек Telegram API: {e}")
-        await message.answer("❌ Ошибка сохранения настроек. Попробуйте снова.")
-
-@router.callback_query(F.data == "telegram_api_reset")
-async def telegram_api_reset_handler(callback: CallbackQuery):
-    """Сброс сессии Telegram"""
-    try:
-        import os
-        session_file = 'telegram_parser_session.session'
-
-        if os.path.exists(session_file):
-            os.remove(session_file)
-            await callback.answer("✅ Сессия удалена. При следующем запуске потребуется повторная авторизация")
-        else:
-            await callback.answer("ℹ️ Файл сессии не найден")
-
-    except Exception as e:
-        logger.error(f"Ошибка удаления сессии: {e}")
-        await callback.answer("❌ Ошибка удаления сессии")
+# СТАРЫЕ ОБРАБОТЧИКИ telegram_api_* УДАЛЕНЫ - используется новая система из telegram_account_handlers.py
 
 @router.callback_query(F.data == "bypass_stats")
 async def bypass_stats_handler(callback: CallbackQuery):

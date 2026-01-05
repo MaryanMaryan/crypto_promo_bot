@@ -1,5 +1,6 @@
 import re
 import logging
+import random
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from telethon import TelegramClient
@@ -15,21 +16,19 @@ import asyncio
 logger = logging.getLogger(__name__)
 
 class TelegramParser:
-    """Парсер для мониторинга Telegram-каналов"""
+    """Парсер для мониторинга Telegram-каналов с поддержкой нескольких аккаунтов"""
 
-    def __init__(self, api_id: Optional[str] = None, api_hash: Optional[str] = None, session_file: Optional[str] = None):
+    def __init__(self, api_id: Optional[str] = None, api_hash: Optional[str] = None):
         """
         Инициализация парсера
 
         Args:
             api_id: Telegram API ID (если None - загружается из БД)
             api_hash: Telegram API Hash (если None - загружается из БД)
-            session_file: Имя файла сессии (если None - загружается из БД)
         """
         self.api_id = api_id
         self.api_hash = api_hash
-        self.session_file = session_file or 'telegram_parser_session'
-        self.client = None
+        self.clients = {}  # account_id -> {'client': TelegramClient, 'account': dict, 'is_connected': bool}
         self.is_connected = False
 
         # Если credentials не переданы - загружаем из БД
@@ -41,7 +40,7 @@ class TelegramParser:
         self.date_pattern = re.compile(r'\d{1,2}[./-]\d{1,2}[./-]\d{2,4}')
 
     def _load_settings_from_db(self):
-        """Загрузка настроек Telegram из базы данных"""
+        """Загрузка настроек Telegram API из базы данных"""
         try:
             from data.database import get_db_session
             from data.models import TelegramSettings
@@ -49,11 +48,10 @@ class TelegramParser:
             with get_db_session() as db:
                 settings = db.query(TelegramSettings).first()
 
-                if settings and settings.is_configured:
+                if settings and settings.api_id and settings.api_hash:
                     self.api_id = settings.api_id
                     self.api_hash = settings.api_hash
-                    self.session_file = settings.session_file or 'telegram_parser_session'
-                    logger.info("✅ Настройки Telegram загружены из БД")
+                    logger.info("✅ Telegram API credentials загружены из БД")
                 else:
                     logger.warning("⚠️ Telegram API не настроен в БД")
                     self.api_id = None
@@ -64,126 +62,124 @@ class TelegramParser:
             self.api_id = None
             self.api_hash = None
 
+    def _load_accounts_from_db(self) -> List[Dict]:
+        """Загрузка активных и авторизованных аккаунтов из БД"""
+        try:
+            from data.database import get_db_session
+            from data.models import TelegramAccount
+
+            with get_db_session() as db:
+                accounts = db.query(TelegramAccount).filter_by(
+                    is_active=True,
+                    is_authorized=True
+                ).all()
+
+                # Конвертируем в словари
+                result = []
+                for acc in accounts:
+                    result.append({
+                        'id': acc.id,
+                        'name': acc.name,
+                        'phone_number': acc.phone_number,
+                        'session_file': acc.session_file
+                    })
+
+                logger.info(f"📋 Загружено {len(result)} активных аккаунтов из БД")
+                return result
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки аккаунтов из БД: {e}")
+            return []
+
     def is_configured(self) -> bool:
         """Проверка наличия API credentials"""
         return bool(self.api_id and self.api_hash)
 
+    def get_connected_clients_count(self) -> int:
+        """Получить количество подключенных клиентов"""
+        return sum(1 for c in self.clients.values() if c['is_connected'])
+
+    def get_random_client(self) -> Optional[TelegramClient]:
+        """Получить случайный подключенный клиент для распределения нагрузки"""
+        connected = [c['client'] for c in self.clients.values() if c['is_connected']]
+        if connected:
+            return random.choice(connected)
+        return None
+
+    def get_client_by_id(self, account_id: int) -> Optional[TelegramClient]:
+        """Получить клиент конкретного аккаунта"""
+        client_data = self.clients.get(account_id)
+        if client_data and client_data['is_connected']:
+            return client_data['client']
+        return None
+
     async def connect(self):
-        """Подключение к Telegram"""
+        """Подключение всех активных аккаунтов к Telegram"""
         try:
             if not self.is_configured():
                 logger.error("❌ Telegram API не настроен. Настройте API_ID и API_HASH в разделе 'Обход блокировок'")
                 return False
 
-            logger.info("🔌 Подключение к Telegram...")
+            # Загружаем аккаунты из БД
+            accounts = self._load_accounts_from_db()
 
-            self.client = TelegramClient(self.session_file, self.api_id, self.api_hash)
-            await self.client.start()
+            if not accounts:
+                logger.warning("⚠️ Нет активных аккаунтов в БД. Добавьте аккаунты в разделе 'Обход блокировок → Telegram API'")
+                return False
 
-            self.is_connected = True
-            logger.info("✅ Успешно подключено к Telegram")
+            logger.info(f"🔌 Подключение {len(accounts)} аккаунтов к Telegram...")
 
-            return True
+            # Подключаем каждый аккаунт
+            connected_count = 0
+            for account in accounts:
+                try:
+                    client = TelegramClient(account['session_file'], self.api_id, self.api_hash)
+                    await client.connect()
+
+                    # Проверяем авторизацию
+                    if not await client.is_user_authorized():
+                        logger.warning(f"⚠️ Аккаунт {account['name']} не авторизован, пропускаем")
+                        await client.disconnect()
+                        continue
+
+                    self.clients[account['id']] = {
+                        'client': client,
+                        'account': account,
+                        'is_connected': True
+                    }
+                    connected_count += 1
+                    logger.info(f"✅ Аккаунт {account['name']} ({account['phone_number']}) подключен")
+
+                except Exception as e:
+                    logger.error(f"❌ Ошибка подключения аккаунта {account['name']}: {e}")
+                    continue
+
+            if connected_count > 0:
+                self.is_connected = True
+                logger.info(f"✅ Подключено {connected_count} из {len(accounts)} аккаунтов")
+                return True
+            else:
+                logger.error("❌ Не удалось подключить ни один аккаунт")
+                return False
 
         except Exception as e:
-            logger.error(f"❌ Ошибка подключения к Telegram: {e}")
+            logger.error(f"❌ Критическая ошибка подключения: {e}")
             self.is_connected = False
-
-            # Закрываем клиент при ошибке
-            if self.client:
-                try:
-                    await self.client.disconnect()
-                except:
-                    pass
-
             return False
 
     async def connect_with_retry(self, max_retries: int = 3, retry_delay: int = 5) -> bool:
-        """Подключение к Telegram с повторными попытками"""
-        if not self.is_configured():
-            logger.error("❌ Telegram API не настроен. Настройте API_ID и API_HASH в разделе 'Обход блокировок'")
-            return False
-
+        """Подключение всех аккаунтов к Telegram с повторными попытками"""
         for attempt in range(1, max_retries + 1):
-            try:
-                logger.info(f"🔌 Попытка подключения {attempt}/{max_retries}...")
+            logger.info(f"🔌 Попытка подключения {attempt}/{max_retries}...")
 
-                self.client = TelegramClient(self.session_file, self.api_id, self.api_hash)
-                await self.client.start()
-
-                self.is_connected = True
-                logger.info("✅ Успешно подключено к Telegram")
+            if await self.connect():
                 return True
 
-            except PhoneNumberBannedError:
-                logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Номер телефона заблокирован Telegram")
-                # Закрываем клиент
-                if self.client:
-                    try:
-                        await self.client.disconnect()
-                    except:
-                        pass
-                return False
-
-            except AuthKeyUnregisteredError:
-                logger.error("❌ Сессия недействительна. Необходима повторная авторизация")
-
-                # Закрываем клиент
-                if self.client:
-                    try:
-                        await self.client.disconnect()
-                    except:
-                        pass
-
-                # Удаляем старую сессию
-                import os
-                session_path = f'{self.session_file}.session'
-                if os.path.exists(session_path):
-                    os.remove(session_path)
-                    logger.info(f"🗑️ Удалена старая сессия: {session_path}")
-
-                if attempt < max_retries:
-                    logger.info(f"🔄 Повторная попытка через {retry_delay} сек...")
-                    await asyncio.sleep(retry_delay)
-                continue
-
-            except ConnectionError as e:
-                logger.error(f"❌ Ошибка соединения: {e}")
-                # Закрываем клиент
-                if self.client:
-                    try:
-                        await self.client.disconnect()
-                    except:
-                        pass
-
-                if attempt < max_retries:
-                    logger.info(f"🔄 Повторная попытка через {retry_delay} сек...")
-                    await asyncio.sleep(retry_delay)
-                continue
-
-            except Exception as e:
-                logger.error(f"❌ Неожиданная ошибка подключения: {e}")
-                # Закрываем клиент
-                if self.client:
-                    try:
-                        await self.client.disconnect()
-                    except:
-                        pass
-
-                if attempt < max_retries:
-                    await asyncio.sleep(retry_delay)
-                continue
+            if attempt < max_retries:
+                logger.info(f"🔄 Повторная попытка через {retry_delay} сек...")
+                await asyncio.sleep(retry_delay)
 
         logger.error("❌ Не удалось подключиться после всех попыток")
-        self.is_connected = False
-
-        # Финальная очистка клиента
-        if self.client:
-            try:
-                await self.client.disconnect()
-            except:
-                pass
-
         return False
 
     async def handle_flood_wait(self, error: FloodWaitError):
@@ -201,35 +197,54 @@ class TelegramParser:
             return False
 
     async def disconnect(self):
-        """Отключение от Telegram"""
-        if self.client:
+        """Отключение всех аккаунтов от Telegram"""
+        disconnected_count = 0
+        for account_id, client_data in list(self.clients.items()):
             try:
-                await self.client.disconnect()
-                self.is_connected = False
-                logger.info("👋 Отключено от Telegram")
+                if client_data['is_connected']:
+                    await client_data['client'].disconnect()
+                    client_data['is_connected'] = False
+                    disconnected_count += 1
+                    logger.info(f"👋 Отключен аккаунт {client_data['account']['name']}")
             except Exception as e:
-                logger.warning(f"⚠️ Ошибка при отключении от Telegram: {e}")
-                self.is_connected = False
+                logger.warning(f"⚠️ Ошибка отключения аккаунта {client_data['account']['name']}: {e}")
+
+        self.is_connected = False
+        logger.info(f"👋 Отключено {disconnected_count} аккаунтов от Telegram")
 
     def __del__(self):
-        """Деструктор для гарантированного закрытия клиента"""
-        if self.client and self.is_connected:
+        """Деструктор для гарантированного закрытия всех клиентов"""
+        if self.clients:
             try:
                 # Получаем event loop
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     # Если loop уже запущен, создаем задачу на отключение
-                    asyncio.create_task(self.client.disconnect())
+                    for client_data in self.clients.values():
+                        if client_data['is_connected']:
+                            asyncio.create_task(client_data['client'].disconnect())
                 else:
                     # Если loop не запущен, запускаем синхронно
-                    loop.run_until_complete(self.client.disconnect())
+                    loop.run_until_complete(self.disconnect())
             except:
                 pass  # Игнорируем ошибки в деструкторе
 
-    async def get_channel_info(self, channel_username: str) -> Optional[Dict]:
-        """Получить информацию о канале"""
+    async def get_channel_info(self, channel_username: str, account_id: Optional[int] = None) -> Optional[Dict]:
+        """
+        Получить информацию о канале
+
+        Args:
+            channel_username: Username канала
+            account_id: ID конкретного аккаунта (если None - используется случайный)
+        """
         try:
-            entity = await self.client.get_entity(channel_username)
+            client = self.get_client_by_id(account_id) if account_id else self.get_random_client()
+
+            if not client:
+                logger.error("❌ Нет подключенных аккаунтов")
+                return None
+
+            entity = await client.get_entity(channel_username)
 
             if isinstance(entity, Channel):
                 return {
@@ -245,9 +260,13 @@ class TelegramParser:
             logger.error(f"❌ Ошибка получения информации о канале {channel_username}: {e}")
             return None
 
-    async def join_channel(self, channel_username: str) -> bool:
+    async def join_channel(self, channel_username: str, account_id: Optional[int] = None) -> bool:
         """
         Подписаться на канал
+
+        Args:
+            channel_username: Username канала
+            account_id: ID конкретного аккаунта (если None - используется случайный)
 
         Returns:
             bool: True если подписка успешна или уже подписан, False если ошибка
@@ -257,11 +276,17 @@ class TelegramParser:
                 logger.error("❌ Не подключено к Telegram")
                 return False
 
-            entity = await self.client.get_entity(channel_username)
+            client = self.get_client_by_id(account_id) if account_id else self.get_random_client()
+
+            if not client:
+                logger.error("❌ Нет подключенных аккаунтов")
+                return False
+
+            entity = await client.get_entity(channel_username)
 
             # Проверяем, подписаны ли уже
             try:
-                participant = await self.client.get_permissions(entity)
+                participant = await client.get_permissions(entity)
                 if participant.is_admin or participant.is_creator or hasattr(participant, 'until_date'):
                     logger.info(f"✅ Уже подписан на канал {channel_username}")
                     return True
@@ -269,7 +294,7 @@ class TelegramParser:
                 pass  # Если не подписаны - продолжаем
 
             # Подписываемся на канал
-            await self.client(
+            await client(
                 __import__('telethon.tl.functions.channels', fromlist=['JoinChannelRequest']).JoinChannelRequest(entity)
             )
 
@@ -314,12 +339,25 @@ class TelegramParser:
         dates = self.date_pattern.findall(text)
         return ', '.join(dates) if dates else None
 
-    async def get_recent_messages(self, channel_username: str, limit: int = 10) -> List[Dict]:
-        """Получить последние сообщения из канала"""
+    async def get_recent_messages(self, channel_username: str, limit: int = 10, account_id: Optional[int] = None) -> List[Dict]:
+        """
+        Получить последние сообщения из канала
+
+        Args:
+            channel_username: Username канала
+            limit: Количество сообщений
+            account_id: ID конкретного аккаунта (если None - используется случайный)
+        """
         try:
+            client = self.get_client_by_id(account_id) if account_id else self.get_random_client()
+
+            if not client:
+                logger.error("❌ Нет подключенных аккаунтов")
+                return []
+
             messages = []
 
-            async for message in self.client.iter_messages(channel_username, limit=limit):
+            async for message in client.iter_messages(channel_username, limit=limit):
                 if message.text:
                     messages.append({
                         'id': message.id,
