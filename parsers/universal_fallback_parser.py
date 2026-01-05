@@ -349,8 +349,8 @@ class UniversalFallbackParser(BaseParser):
             # Это позволяет избежать повторной авторизации
             import os
             import shutil
-            main_session = 'telegram_parser_session.session'
-            manual_session = f'{telegram_session_file}.session'
+            main_session = 'sessions/telegram_parser_session.session'
+            manual_session = f'sessions/{telegram_session_file}.session'
 
             if os.path.exists(main_session) and not os.path.exists(manual_session):
                 try:
@@ -365,8 +365,7 @@ class UniversalFallbackParser(BaseParser):
                 # Это избегает обращения к БД из другого потока
                 parser = TelegramParser(
                     api_id=telegram_api_id,
-                    api_hash=telegram_api_hash,
-                    session_file=telegram_session_file
+                    api_hash=telegram_api_hash
                 )
 
                 try:

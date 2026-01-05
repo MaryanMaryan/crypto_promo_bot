@@ -79,10 +79,12 @@ config/proxy_config.json
 config/api_keys.json
 
 # Telegram session files
+sessions/
 *.session
 *.session-journal
 
-# Test files
+# Test files (теперь в dev/)
+# Тестовые файлы должны находиться в папке dev/
 test_*.py
 check_*.py
 clear_*.py

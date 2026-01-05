@@ -88,7 +88,7 @@ class TelegramAuthManager:
                     return False, f"Аккаунт с номером {phone_number} уже существует"
 
             # Создаем уникальное имя сессии
-            session_name = f"tg_session_{user_id}_{phone_number.replace('+', '').replace(' ', '')}"
+            session_name = f"sessions/tg_session_{user_id}_{phone_number.replace('+', '').replace(' ', '')}"
 
             # Создаем клиент Telethon
             client = TelegramClient(session_name, api_id, api_hash)

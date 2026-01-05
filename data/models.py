@@ -221,7 +221,7 @@ class TelegramSettings(Base):
     api_hash = Column(String, nullable=True)  # Telegram API Hash (общий для всех аккаунтов)
     # DEPRECATED поля (для обратной совместимости):
     phone_number = Column(String, nullable=True)
-    session_file = Column(String, default='telegram_parser_session')
+    session_file = Column(String, default='sessions/telegram_parser_session')
     is_configured = Column(Boolean, default=False)
     last_auth = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
