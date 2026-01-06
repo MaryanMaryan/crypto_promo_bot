@@ -214,7 +214,7 @@ class TelegramParser:
 
     def __del__(self):
         """Деструктор для гарантированного закрытия всех клиентов"""
-        if self.clients:
+        if hasattr(self, 'clients') and self.clients:
             try:
                 # Получаем event loop
                 loop = asyncio.get_event_loop()

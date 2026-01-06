@@ -218,7 +218,8 @@ class UserAgentManager:
                 ua.last_used = datetime.utcnow()
 
                 # Деактивируем User-Agent если успешность слишком низкая
-                if ua.usage_count >= 10 and ua.success_rate < 0.2:
+                # Понижен порог с 20% до 10% для меньшей агрессивности деактивации
+                if ua.usage_count >= 10 and ua.success_rate < 0.10:
                     ua.status = 'inactive'
                     logger.warning(f"User-Agent {user_agent_id} деактивирован (низкая успешность: {ua.success_rate:.2%})")
 

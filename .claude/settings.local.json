@@ -38,7 +38,19 @@
       "Bash(scp:*)",
       "Bash(timeout 10 cmd /c \"python main.py 2>&1 | Select-String -Pattern ''ТЕСТ|инициализирован|Миграция|ERROR|WARNING|Бот|started|Polling'' -Context 0,0\")",
       "Bash(Start-Sleep -Seconds 5)",
-      "Bash(Select-String -Pattern \"ТЕСТ|инициализирован|Миграция|ERROR|WARNING|Бот|started|Polling|Telegram\" -Context 0,0)"
+      "Bash(Select-String -Pattern \"ТЕСТ|инициализирован|Миграция|ERROR|WARNING|Бот|started|Polling|Telegram\" -Context 0,0)",
+      "Bash(Select-String -Pattern \"ТЕСТ|Создание|Подключение|аккаунтов|канал|сообщений|НАЙДЕНО|ПРОПУЩЕНО|ЗАВЕРШЕН|ОШИБКА|ERROR|WARNING\" -Context 0,0)",
+      "Bash(Start-Sleep -Seconds 8)",
+      "Bash(Select-String -Pattern \"ТЕСТ|Найдено|НАЙДЕНО|СОВПАДЕНИЕ|Ключевые|Дата:|Ссылка:|ТЕКСТ|найденные|Итого|Ошибка|ERROR|WARNING\" -Context 0,2)",
+      "Bash(ls:*)",
+      "Bash(tasklist:*)",
+      "Bash(taskkill:*)",
+      "Bash(timeout 8 python:*)",
+      "Bash(Select-String -Pattern \"ТЕСТ|Traceback|ModuleNotFoundError|ImportError|successfully|started|Бот|инициализирован\" -Context 0,1)",
+      "Bash(dir:*)",
+      "Bash(if exist \"tg_session_7193869664_27657361808.session\" move \"tg_session_7193869664_27657361808.session\" \"sessions\" && if exist \"tg_session_7193869664_27659927468.session\" move \"tg_session_7193869664_27659927468.session\" \"sessions\")",
+      "Bash(if exist \"tg_session_7193869664_27649286375.session\" move \"tg_session_7193869664_27649286375.session\" \"sessions\")",
+      "Bash(move tg_session_*.session sessions)"
     ],
     "deny": [],
     "ask": []

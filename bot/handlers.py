@@ -117,6 +117,8 @@ class ConfigureParsingStates(StatesGroup):
     waiting_for_parsing_type_edit = State()  # Изменение типа парсинга
     waiting_for_api_url_edit = State()  # Изменение API URL
     waiting_for_html_url_edit = State()  # Изменение HTML URL
+    waiting_for_telegram_channel_edit = State()  # Изменение Telegram канала
+    waiting_for_telegram_keywords_edit = State()  # Изменение Telegram ключевых слов
 
 # НОВЫЕ FSM СОСТОЯНИЯ
 class ProxyManagementStates(StatesGroup):
@@ -266,12 +268,19 @@ def get_toggle_parsing_keyboard(links, action_type="pause"):
     builder.adjust(1)
     return builder.as_markup()
 
-def get_configure_parsing_submenu(link_id):
+def get_configure_parsing_submenu(link_id, parsing_type='combined'):
     """Подменю для настройки парсинга конкретной ссылки"""
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="🎯 Изменить тип парсинга", callback_data=f"edit_parsing_type_{link_id}"))
-    builder.add(InlineKeyboardButton(text="📡 Изменить API URL", callback_data=f"edit_api_url_{link_id}"))
-    builder.add(InlineKeyboardButton(text="🌐 Изменить HTML URL", callback_data=f"edit_html_url_{link_id}"))
+
+    # Разные кнопки в зависимости от типа парсинга
+    if parsing_type == 'telegram':
+        builder.add(InlineKeyboardButton(text="📱 Изменить Telegram канал", callback_data=f"edit_telegram_channel_{link_id}"))
+        builder.add(InlineKeyboardButton(text="🔑 Изменить ключевые слова", callback_data=f"edit_telegram_keywords_{link_id}"))
+    else:
+        builder.add(InlineKeyboardButton(text="📡 Изменить API URL", callback_data=f"edit_api_url_{link_id}"))
+        builder.add(InlineKeyboardButton(text="🌐 Изменить HTML URL", callback_data=f"edit_html_url_{link_id}"))
+
     builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_configure_parsing"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
     builder.adjust(1)
@@ -2533,7 +2542,9 @@ async def show_parsing_configuration(callback: CallbackQuery):
                 'name': link.name,
                 'parsing_type': link.parsing_type or 'combined',
                 'api_url': link.api_url,
-                'html_url': link.html_url
+                'html_url': link.html_url,
+                'telegram_channel': link.telegram_channel,
+                'telegram_keywords': link.get_telegram_keywords()
             }
 
         # Словарь для отображения типа парсинга с описанием
@@ -2553,6 +2564,10 @@ async def show_parsing_configuration(callback: CallbackQuery):
             'browser': {
                 'name': '🌐 Только Browser',
                 'description': 'Браузерная автоматизация, обходит капчи и защиты'
+            },
+            'telegram': {
+                'name': '📱 Telegram',
+                'description': 'Мониторинг Telegram канала по ключевым словам'
             }
         }
 
@@ -2565,19 +2580,34 @@ async def show_parsing_configuration(callback: CallbackQuery):
             f"<i>{type_info['description']}</i>\n\n",
         ]
 
-        if link_data['api_url']:
-            message_parts.append(f"<b>📡 API URL:</b>\n<code>{link_data['api_url']}</code>\n\n")
-        else:
-            message_parts.append(f"<b>📡 API URL:</b> <i>Не указан</i>\n\n")
+        # Отображение параметров в зависимости от типа парсинга
+        if current_type == 'telegram':
+            # Для Telegram показываем канал и ключевые слова
+            if link_data['telegram_channel']:
+                message_parts.append(f"<b>📱 Telegram канал:</b>\n<code>{link_data['telegram_channel']}</code>\n\n")
+            else:
+                message_parts.append(f"<b>📱 Telegram канал:</b> <i>Не указан</i>\n\n")
 
-        if link_data['html_url']:
-            message_parts.append(f"<b>🌐 HTML URL:</b>\n<code>{link_data['html_url']}</code>\n\n")
+            if link_data['telegram_keywords']:
+                keywords_str = ", ".join([f"<code>{kw}</code>" for kw in link_data['telegram_keywords']])
+                message_parts.append(f"<b>🔑 Ключевые слова:</b>\n{keywords_str}\n\n")
+            else:
+                message_parts.append(f"<b>🔑 Ключевые слова:</b> <i>Не указаны</i>\n\n")
         else:
-            message_parts.append(f"<b>🌐 HTML URL:</b> <i>Не указан</i>\n\n")
+            # Для остальных типов показываем API и HTML URL
+            if link_data['api_url']:
+                message_parts.append(f"<b>📡 API URL:</b>\n<code>{link_data['api_url']}</code>\n\n")
+            else:
+                message_parts.append(f"<b>📡 API URL:</b> <i>Не указан</i>\n\n")
+
+            if link_data['html_url']:
+                message_parts.append(f"<b>🌐 HTML URL:</b>\n<code>{link_data['html_url']}</code>\n\n")
+            else:
+                message_parts.append(f"<b>🌐 HTML URL:</b> <i>Не указан</i>\n\n")
 
         message_parts.append("Выберите параметр для изменения:")
 
-        keyboard = get_configure_parsing_submenu(link_id)
+        keyboard = get_configure_parsing_submenu(link_id, current_type)
         await callback.message.edit_text(
             "".join(message_parts),
             reply_markup=keyboard,
@@ -2595,9 +2625,14 @@ async def show_parsing_configuration(callback: CallbackQuery):
 async def show_parsing_config_callback(callback: CallbackQuery):
     """Возврат к настройкам конкретной ссылки"""
     link_id = int(callback.data.split("_")[-1])
-    # Повторно используем функцию показа конфигурации
-    callback.data = f"configure_parsing_link_{link_id}"
-    await show_parsing_configuration(callback)
+    # Создаем новый callback с правильным data для повторного использования
+    # Используем Mock объект для имитации callback с нужным data
+    from unittest.mock import Mock
+    new_callback = Mock()
+    new_callback.data = f"configure_parsing_link_{link_id}"
+    new_callback.message = callback.message
+    new_callback.answer = callback.answer
+    await show_parsing_configuration(new_callback)
 
 @router.callback_query(F.data.startswith("edit_parsing_type_"))
 async def edit_parsing_type(callback: CallbackQuery):
@@ -2624,7 +2659,7 @@ async def edit_parsing_type(callback: CallbackQuery):
         await callback.answer()
 
 @router.callback_query(F.data.startswith("set_parsing_type_"))
-async def set_parsing_type(callback: CallbackQuery):
+async def set_parsing_type(callback: CallbackQuery, state: FSMContext):
     """Сохраняет выбранный тип парсинга"""
     try:
         parts = callback.data.split("_")
@@ -2637,10 +2672,32 @@ async def set_parsing_type(callback: CallbackQuery):
                 raise ValueError("Ссылка не найдена")
 
             link.parsing_type = parsing_type
-            return link.name
+            return link.name, link.telegram_channel
 
-        link_name = atomic_operation(update_parsing_type)
+        link_name, current_telegram_channel = atomic_operation(update_parsing_type)
 
+        # Если выбран тип Telegram - запускаем процесс настройки канала и ключевых слов
+        if parsing_type == 'telegram':
+            await state.update_data(link_id=link_id, link_name=link_name)
+            await state.set_state(ConfigureParsingStates.waiting_for_telegram_channel_edit)
+
+            current_channel_text = f"\n\n<b>Текущий канал:</b> {current_telegram_channel}" if current_telegram_channel else ""
+
+            await callback.message.edit_text(
+                f"📱 <b>Настройка Telegram парсинга</b>\n\n"
+                f"<b>Ссылка:</b> {link_name}\n"
+                f"<b>Тип парсинга:</b> Telegram{current_channel_text}\n\n"
+                f"📝 <b>Введите ссылку на Telegram канал:</b>\n\n"
+                f"<i>Форматы:</i>\n"
+                f"• @channelname\n"
+                f"• https://t.me/channelname\n"
+                f"• t.me/channelname",
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+
+        # Для остальных типов - стандартное поведение
         parsing_type_display = {
             'combined': '🔄 Комбинированный',
             'api': '📡 Только API',
@@ -2808,6 +2865,206 @@ async def process_html_url_edit(message: Message, state: FSMContext):
     except Exception as e:
         logger.error(f"❌ Ошибка при сохранении HTML URL: {e}")
         await message.answer("❌ Ошибка при сохранении HTML URL")
+        await state.clear()
+
+@router.callback_query(F.data.startswith("edit_telegram_channel_"))
+async def edit_telegram_channel(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс изменения Telegram канала"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            current_channel = link.telegram_channel or "Не указан"
+            link_name = link.name
+
+        await state.update_data(link_id=link_id, link_name=link_name, direct_edit=True)
+        await state.set_state(ConfigureParsingStates.waiting_for_telegram_channel_edit)
+
+        await callback.message.edit_text(
+            f"📱 <b>Изменение Telegram канала</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Текущий канал:</b> {current_channel}\n\n"
+            f"📝 Введите новую ссылку на Telegram канал:\n\n"
+            f"<i>Форматы:</i>\n"
+            f"• @channelname\n"
+            f"• https://t.me/channelname\n"
+            f"• t.me/channelname",
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании Telegram канала: {e}")
+        await callback.message.edit_text("❌ Ошибка при редактировании Telegram канала")
+        await callback.answer()
+
+@router.callback_query(F.data.startswith("edit_telegram_keywords_"))
+async def edit_telegram_keywords(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс изменения Telegram ключевых слов"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            current_keywords = link.get_telegram_keywords()
+            link_name = link.name
+
+        await state.update_data(link_id=link_id, link_name=link_name)
+        await state.set_state(ConfigureParsingStates.waiting_for_telegram_keywords_edit)
+
+        keywords_text = ", ".join([f"<code>{kw}</code>" for kw in current_keywords]) if current_keywords else "<i>Не указаны</i>"
+
+        await callback.message.edit_text(
+            f"🔑 <b>Изменение ключевых слов</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Текущие ключевые слова:</b> {keywords_text}\n\n"
+            f"📝 Введите новые ключевые слова через запятую:\n\n"
+            f"<b>Примеры:</b>\n"
+            f"<code>airdrop, промо, campaign, giveaway</code>\n"
+            f"<code>listing, IEO, launchpad</code>\n"
+            f"<code>staking, earn, APR</code>",
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании ключевых слов: {e}")
+        await callback.message.edit_text("❌ Ошибка при редактировании ключевых слов")
+        await callback.answer()
+
+@router.message(ConfigureParsingStates.waiting_for_telegram_channel_edit)
+async def process_telegram_channel_edit(message: Message, state: FSMContext):
+    """Обрабатывает изменение Telegram канала"""
+    try:
+        data = await state.get_data()
+        link_id = data['link_id']
+        link_name = data['link_name']
+
+        channel_input = message.text.strip()
+
+        # Нормализуем ввод канала
+        channel_username = channel_input
+
+        # Убираем префикс https://
+        if channel_username.startswith('https://t.me/'):
+            channel_username = channel_username.replace('https://t.me/', '')
+        elif channel_username.startswith('http://t.me/'):
+            channel_username = channel_username.replace('http://t.me/', '')
+        elif channel_username.startswith('t.me/'):
+            channel_username = channel_username.replace('t.me/', '')
+
+        # Добавляем @ если его нет
+        if not channel_username.startswith('@'):
+            channel_username = '@' + channel_username
+
+        # Сохраняем канал в базу данных
+        def update_telegram_channel(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+
+            link.telegram_channel = channel_username
+            return link.get_telegram_keywords()
+
+        current_keywords = atomic_operation(update_telegram_channel)
+
+        # Проверяем, это прямое редактирование или часть процесса изменения типа
+        direct_edit = data.get('direct_edit', False)
+
+        if direct_edit:
+            # Прямое редактирование - завершаем
+            await message.answer(
+                f"✅ <b>Telegram канал успешно обновлён!</b>\n\n"
+                f"<b>Ссылка:</b> {link_name}\n"
+                f"<b>Новый канал:</b> {channel_username}",
+                parse_mode="HTML"
+            )
+            await state.clear()
+        else:
+            # Часть процесса изменения типа - переходим к ключевым словам
+            await state.set_state(ConfigureParsingStates.waiting_for_telegram_keywords_edit)
+
+            current_keywords_text = ""
+            if current_keywords:
+                keywords_list = ", ".join([f"<code>{kw}</code>" for kw in current_keywords])
+                current_keywords_text = f"\n\n<b>Текущие ключевые слова:</b> {keywords_list}"
+
+            await message.answer(
+                f"✅ <b>Канал сохранён:</b> {channel_username}\n\n"
+                f"🔑 <b>Введите ключевые слова для поиска:</b>{current_keywords_text}\n\n"
+                f"Введите слова или фразы через запятую, по которым бот будет искать сообщения в канале.\n\n"
+                f"<b>Примеры:</b>\n"
+                f"<code>airdrop, промо, campaign, giveaway</code>\n"
+                f"<code>listing, IEO, launchpad</code>\n"
+                f"<code>staking, earn, APR</code>\n\n"
+                f"Бот будет отправлять уведомления о сообщениях, содержащих эти слова.",
+                parse_mode="HTML"
+            )
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении Telegram канала: {e}")
+        await message.answer("❌ Ошибка при сохранении Telegram канала")
+        await state.clear()
+
+@router.message(ConfigureParsingStates.waiting_for_telegram_keywords_edit)
+async def process_telegram_keywords_edit(message: Message, state: FSMContext):
+    """Обрабатывает изменение Telegram ключевых слов"""
+    try:
+        data = await state.get_data()
+        link_id = data['link_id']
+        link_name = data['link_name']
+
+        keywords_input = message.text.strip()
+
+        if not keywords_input:
+            await message.answer("❌ Ключевые слова не могут быть пустыми. Попробуйте снова:")
+            return
+
+        # Разбиваем по запятой и очищаем
+        keywords = [kw.strip() for kw in keywords_input.split(',') if kw.strip()]
+
+        if not keywords:
+            await message.answer("❌ Не удалось распознать ключевые слова. Введите их через запятую:")
+            return
+
+        # Сохраняем ключевые слова в базу данных
+        def update_telegram_keywords(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+
+            link.set_telegram_keywords(keywords)
+
+        atomic_operation(update_telegram_keywords)
+
+        keywords_str = ", ".join([f"<code>{kw}</code>" for kw in keywords])
+
+        await message.answer(
+            f"✅ <b>Настройка Telegram парсинга завершена!</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Тип парсинга:</b> Telegram\n"
+            f"<b>Ключевые слова:</b> {keywords_str}",
+            parse_mode="HTML"
+        )
+
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении ключевых слов: {e}")
+        await message.answer("❌ Ошибка при сохранении ключевых слов")
         await state.clear()
 
 @router.message(F.text == "🔄 Проверить всё")
