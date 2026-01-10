@@ -138,7 +138,8 @@ class DatabaseMigration:
             self._migration_005_add_parsing_type,
             self._migration_006_add_staking_fields,
             self._migration_007_add_telegram_tables,
-            self._migration_008_add_telegram_accounts
+            self._migration_008_add_telegram_accounts,
+            self._migration_009_add_staking_snapshots
         ])
     
     def _migration_001_initial(self, session):
@@ -340,6 +341,28 @@ class DatabaseMigration:
 
         except Exception as e:
             logging.error(f"❌ Ошибка в миграции 008: {e}")
+            raise
+
+    def _migration_009_add_staking_snapshots(self, session):
+        """Миграция 009: Добавление таблицы staking_snapshots для истории изменений"""
+        try:
+            from sqlalchemy import inspect
+            inspector = inspect(session.bind)
+            tables = inspector.get_table_names()
+
+            if 'staking_snapshots' in tables:
+                logging.info("✅ Таблица staking_snapshots уже существует")
+            else:
+                logging.info("📸 Создание таблицы staking_snapshots...")
+                # Таблица создается автоматически через Base.metadata.create_all()
+                from data.models import StakingSnapshot
+                StakingSnapshot.__table__.create(session.bind, checkfirst=True)
+                logging.info("✅ Таблица staking_snapshots создана")
+
+            logging.info("✅ Миграция 009: Таблица staking_snapshots проверена/создана")
+
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 009: {e}")
             raise
 
     def run_migrations(self):

@@ -371,7 +371,7 @@ class ParserService:
             'last_check_time': self.stats['last_check_time']
         }
     
-    def parse_staking_link(self, link_id: int, api_url: str, exchange_name: str, page_url: str = None) -> List[Dict[str, Any]]:
+    def parse_staking_link(self, link_id: int, api_url: str, exchange_name: str, page_url: str = None, min_apr: float = None) -> List[Dict[str, Any]]:
         """
         Парсит стейкинг-ссылку и возвращает новые стейкинги
 
@@ -380,6 +380,7 @@ class ParserService:
             api_url: URL API для парсинга стейкингов
             exchange_name: Название биржи (Bybit, Kucoin и т.д.)
             page_url: URL страницы для пользователя (опционально)
+            min_apr: Минимальный APR для фильтрации (опционально)
 
         Returns:
             Список новых стейкингов
@@ -388,6 +389,8 @@ class ParserService:
             logger.info(f"🔍 ParserService: Начало парсинга стейкинг-ссылки {link_id}")
             logger.info(f"   Биржа: {exchange_name}")
             logger.info(f"   API URL: {api_url}")
+            if min_apr is not None:
+                logger.info(f"   Min APR: {min_apr}%")
 
             # Создаем парсер стейкингов
             parser = StakingParser(api_url=api_url, exchange_name=exchange_name)
@@ -412,9 +415,9 @@ class ParserService:
             if len(stakings) > 10:
                 logger.info(f"   ... и ещё {len(stakings) - 10} стейкингов")
 
-            # Проверяем на новые стейкинги
+            # Проверяем на новые стейкинги (с фильтрацией по min_apr)
             logger.info(f"🔍 Проверка новых стейкингов...")
-            new_stakings = check_and_save_new_stakings(stakings, link_id=link_id)
+            new_stakings = check_and_save_new_stakings(stakings, link_id=link_id, min_apr=min_apr)
 
             if new_stakings:
                 logger.info(f"🎉 ParserService: Найдено {len(new_stakings)} НОВЫХ стейкингов для ссылки {link_id}")
@@ -425,6 +428,17 @@ class ParserService:
                     staking_type = staking.get('type', 'N/A')
                     logger.info(f"   {i}. {coin} - {apr}% ({staking_type})")
 
+                # Для OKX группируем пулы по проектам
+                if 'okx' in exchange_name.lower():
+                    logger.info(f"🔍 Группировка пулов OKX по проектам...")
+                    grouped = self._group_okx_pools(new_stakings)
+                    logger.info(f"📦 Сгруппировано в {len(grouped)} проектов")
+                    # Помечаем что это группы
+                    for group in grouped:
+                        group[0]['_is_okx_group'] = True
+                        group[0]['_group_pools'] = group
+                    return grouped[0] if grouped else []  # Возвращаем первую группу (все пулы одного проекта)
+
                 return new_stakings
             else:
                 logger.info(f"ℹ️ ParserService: Все стейкинги уже были в базе данных (нет новых)")
@@ -433,6 +447,37 @@ class ParserService:
         except Exception as e:
             logger.error(f"❌ ParserService: Критическая ошибка при парсинге стейкинг-ссылки {link_id}: {e}", exc_info=True)
             return []
+
+    def _group_okx_pools(self, stakings: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+        """
+        Группирует пулы OKX по проектам (по reward_coin + start_time + end_time)
+
+        Args:
+            stakings: Список стейкингов OKX
+
+        Returns:
+            Список групп (каждая группа = список пулов одного проекта)
+        """
+        groups = {}
+        for staking in stakings:
+            # Группируем по награде и датам (одна промоакция = одинаковая награда и даты)
+            reward_coin = staking.get('reward_coin', '')
+            start_time = staking.get('start_time')
+            end_time = staking.get('end_time')
+
+            # Создаем ключ для группировки
+            group_key = (reward_coin, start_time, end_time)
+
+            if group_key not in groups:
+                groups[group_key] = []
+            groups[group_key].append(staking)
+
+        logger.info(f"📊 Группировка OKX: найдено {len(groups)} уникальных проектов")
+        for key, pools in groups.items():
+            reward, start, end = key
+            logger.debug(f"   Проект: награда={reward}, пулов={len(pools)}, даты={start}-{end}")
+
+        return list(groups.values())
 
     def reset_stats(self):
         """Сбрасывает статистику"""
@@ -449,20 +494,25 @@ class ParserService:
 
 # ========== ФУНКЦИИ ДЛЯ СТЕЙКИНГОВ ==========
 
-def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = None) -> List[Dict[str, Any]]:
+def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = None, min_apr: float = None) -> List[Dict[str, Any]]:
     """
     Проверяет стейкинги на новизну и сохраняет новые в БД
 
     Args:
         stakings: Список распарсенных стейкингов
         link_id: ID ссылки из которой получены стейкинги (опционально)
+        min_apr: Минимальный APR для фильтрации (опционально)
 
     Returns:
         Список НОВЫХ стейкингов (которых не было в БД)
     """
     from data.models import StakingHistory
+    from services.staking_snapshot_service import StakingSnapshotService
 
+    # Инициализируем сервис снимков
+    snapshot_service = StakingSnapshotService()
     new_stakings = []
+    filtered_count = 0
 
     with get_db_session() as session:
         for staking in stakings:
@@ -490,14 +540,31 @@ def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = N
                 existing.last_updated = datetime.utcnow()
 
                 logger.debug(f"🔄 Обновлён стейкинг: {exchange} {staking.get('coin')} - {product_id}")
+
+                # Коммитим изменения перед созданием снимка
+                session.commit()
+
+                # Создаем снимок (если прошло >= 1 час)
+                snapshot_service.create_snapshot(existing)
+
             else:
                 # Новый стейкинг!
+                apr = staking.get('apr', 0)
+
+                # ФИЛЬТР ПО MIN_APR - проверяем ДО сохранения и добавления в new_stakings
+                if min_apr is not None and apr < min_apr:
+                    logger.info(f"🔽 Пропущен стейкинг (APR {apr}% < {min_apr}%): {exchange} {staking.get('coin')}")
+                    filtered_count += 1
+                    # Все равно сохраняем в БД, но НЕ отправляем уведомление
+                    # Это нужно чтобы в следующий раз не считать его новым
+
+                # Сохраняем в БД всегда (чтобы не считать новым в следующий раз)
                 new_staking_record = StakingHistory(
                     exchange=exchange,
                     product_id=product_id,
                     coin=staking.get('coin'),
                     reward_coin=staking.get('reward_coin'),
-                    apr=staking.get('apr'),
+                    apr=apr,
                     type=staking.get('type'),
                     status=staking.get('status'),
                     category=staking.get('category'),
@@ -516,11 +583,19 @@ def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = N
                 )
 
                 session.add(new_staking_record)
-                new_stakings.append(staking)
 
-                logger.info(f"🆕 Новый стейкинг: {exchange} {staking.get('coin')} {staking.get('apr')}% APR")
+                # Добавляем в список новых только если прошел фильтр
+                if min_apr is None or apr >= min_apr:
+                    new_stakings.append(staking)
+                    logger.info(f"🆕 Новый стейкинг: {exchange} {staking.get('coin')} {apr}% APR")
 
-        session.commit()
+                # Коммитим чтобы получить ID
+                session.commit()
 
-    logger.info(f"✅ Проверено {len(stakings)} стейкингов, найдено {len(new_stakings)} новых")
+                # Создаем первый снимок для нового стейкинга
+                snapshot_service.create_snapshot(new_staking_record)
+
+    if filtered_count > 0:
+        logger.info(f"🔽 Отфильтровано {filtered_count} стейкингов по min_apr={min_apr}%")
+    logger.info(f"✅ Проверено {len(stakings)} стейкингов, найдено {len(new_stakings)} новых (соответствующих фильтру)")
     return new_stakings

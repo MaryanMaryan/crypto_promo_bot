@@ -15,10 +15,51 @@ logger = logging.getLogger(__name__)
 class StakingParser:
     """Парсер стейкингов"""
 
-    def __init__(self, api_url: str, exchange_name: str):
+    def __init__(self, api_url: str, exchange_name: str = None):
         self.api_url = api_url
-        self.exchange_name = exchange_name.lower()
+        # Автоопределение биржи по URL если exchange_name не указан
+        self.exchange_name = self._detect_exchange(api_url, exchange_name)
         self.price_fetcher = get_price_fetcher()
+
+    def _detect_exchange(self, api_url: str, exchange_name: str = None) -> str:
+        """
+        Автоматически определяет биржу по URL API
+
+        Args:
+            api_url: URL API для парсинга
+            exchange_name: Название биржи (если указано, используется оно)
+
+        Returns:
+            Название биржи в нижнем регистре
+        """
+        # Если exchange_name уже указан и не пустой, используем его
+        if exchange_name and exchange_name.lower() not in ['none', 'unknown', '']:
+            return exchange_name.lower()
+
+        # Автоопределение по URL
+        url_lower = api_url.lower()
+
+        if 'bybit.com' in url_lower:
+            logger.info("🔍 Автоопределение: биржа Bybit")
+            return 'bybit'
+        elif 'kucoin.com' in url_lower:
+            logger.info("🔍 Автоопределение: биржа Kucoin")
+            return 'kucoin'
+        elif 'okx.com' in url_lower:
+            logger.info("🔍 Автоопределение: биржа OKX")
+            return 'okx'
+        elif 'binance.com' in url_lower:
+            logger.info("🔍 Автоопределение: биржа Binance")
+            return 'binance'
+        elif 'gate.io' in url_lower or 'gate.com' in url_lower:
+            logger.info("🔍 Автоопределение: биржа Gate.io")
+            return 'gate'
+        elif 'mexc.com' in url_lower:
+            logger.info("🔍 Автоопределение: биржа MEXC")
+            return 'mexc'
+        else:
+            logger.warning(f"⚠️ Не удалось определить биржу по URL: {api_url}")
+            return 'unknown'
 
     def parse(self) -> List[Dict[str, Any]]:
         """
@@ -43,7 +84,7 @@ class StakingParser:
                 }
 
                 payload = {
-                    "tab": "2",  # 0 - все, 1 - flexible, 2 - fixed (только Fixed Term)
+                    "tab": "2",  # 0 - все, 1 - flexible, 2 - fixed (ТОЛЬКО ФИКСИРОВАННЫЕ стейкинги)
                     "page": 1,
                     "limit": 100,
                     "fixed_saving_version": 1,
@@ -70,6 +111,18 @@ class StakingParser:
                 response.raise_for_status()
                 data = response.json()
                 return self._parse_kucoin(data)
+
+            elif 'okx' in self.exchange_name:
+                # OKX использует обычный GET
+                headers = {
+                    'accept': 'application/json',
+                    'x-locale': 'en_US',
+                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = requests.get(self.api_url, headers=headers, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                return self._parse_okx(data)
 
             else:
                 logger.warning(f"⚠️ Неизвестная биржа: {self.exchange_name}")
@@ -304,6 +357,28 @@ class StakingParser:
                             category = regional_tag
                             category_text = f'{regional_tag} Regional Offer'
 
+                        # Даты начала и конца (unix timestamp -> datetime string)
+                        from datetime import datetime
+                        start_time_str = None
+                        end_time_str = None
+
+                        subscribe_start = product.get('subscribe_start_at')
+                        subscribe_end = product.get('subscribe_end_at')
+
+                        if subscribe_start and subscribe_start != '0':
+                            try:
+                                start_dt = datetime.utcfromtimestamp(int(subscribe_start))
+                                start_time_str = start_dt.strftime('%d.%m.%Y %H:%M UTC')
+                            except:
+                                pass
+
+                        if subscribe_end and subscribe_end != '0':
+                            try:
+                                end_dt = datetime.utcfromtimestamp(int(subscribe_end))
+                                end_time_str = end_dt.strftime('%d.%m.%Y %H:%M UTC')
+                            except:
+                                pass
+
                         staking = {
                             'exchange': 'Bybit',
                             'product_id': product_id,
@@ -317,8 +392,8 @@ class StakingParser:
                             'term_days': term_days,
                             'token_price_usd': token_price,
                             'reward_token_price_usd': None,
-                            'start_time': None,  # Bybit не предоставляет в этом API
-                            'end_time': None,
+                            'start_time': start_time_str,
+                            'end_time': end_time_str,
                             'user_limit_tokens': None,  # Требует авторизации
                             'user_limit_usd': None,
                             'total_places': None,
@@ -343,6 +418,140 @@ class StakingParser:
                 continue
 
         logger.info(f"✅ Bybit: обработано {total_products} продуктов")
+        return stakings
+
+    def _parse_okx(self, data: dict) -> List[Dict[str, Any]]:
+        """
+        Парсинг OKX Flash Earn стейкингов
+        ВАЖНО: OKX API использует GET запрос и возвращает только активные проекты
+        """
+        stakings = []
+
+        # Структура: data -> ongoingProjects
+        ongoing_projects = data.get('data', {}).get('ongoingProjects', [])
+        if not ongoing_projects:
+            logger.warning("⚠️ OKX: нет активных проектов")
+            return []
+
+        logger.info(f"📊 OKX: найдено {len(ongoing_projects)} активных проектов")
+
+        total_pools = 0
+
+        for project in ongoing_projects:
+            try:
+                # Данные проекта
+                project_id = project.get('projectId')
+                end_time = project.get('endTime')  # timestamp в миллисекундах
+
+                # Награды проекта (общие)
+                project_rewards = project.get('rewardDetails', [])
+
+                # Пулы проекта
+                pool_details = project.get('poolDetails', [])
+
+                if not pool_details:
+                    logger.warning(f"⚠️ OKX: проект {project_id} не имеет пулов")
+                    continue
+
+                for pool in pool_details:
+                    try:
+                        # ID пула
+                        pool_id = str(pool.get('projectId', ''))
+
+                        # Монета стейкинга (из purchaseDetails)
+                        purchase_details = pool.get('purchaseDetails', [])
+                        if not purchase_details:
+                            logger.warning(f"⚠️ OKX: пул {pool_id} не имеет purchaseDetails")
+                            continue
+
+                        purchase_detail = purchase_details[0]
+                        coin = purchase_detail.get('currencyName')
+
+                        # APR (в формате строки "0.0437" = 4.37%)
+                        apr_data = pool.get('apr', {})
+                        apr_str = apr_data.get('apr', '0')
+                        apr = float(apr_str) * 100  # Конвертируем в проценты
+
+                        # Монета награды (из rewardDetails пула)
+                        reward_details = pool.get('rewardDetails', [])
+                        reward_coin = None
+                        reward_amount = None
+                        if reward_details:
+                            reward_coin = reward_details[0].get('currencyName')
+                            reward_amount = reward_details[0].get('rewardAmount')
+
+                        # Заполненность пула
+                        pool_accumulated = purchase_detail.get('poolAccumulatedPurchaseAmount')
+                        current_deposit = float(pool_accumulated) if pool_accumulated else None
+
+                        # Лимиты
+                        # ВАЖНО: В OKX API нет информации об общем лимите пула!
+                        # maxStakingLimit - это лимит для ОДНОГО пользователя максимального VIP уровня
+                        # Поэтому мы НЕ можем рассчитать корректный fill_percentage
+                        limit_data = purchase_detail.get('limit', {})
+                        max_staking_limit = limit_data.get('maxStakingLimit')
+
+                        # Лимит для VIP 0 (обычные пользователи)
+                        user_limit_str = purchase_detail.get('upperLimit')
+                        user_limit_tokens = float(user_limit_str) if user_limit_str else None
+
+                        # Процент заполнения - недоступен для OKX (нет данных об общем лимите)
+                        fill_percentage = None
+                        max_capacity = None  # Общий лимит пула недоступен в API
+
+                        # Получаем цену токена стейкинга
+                        token_price = self.price_fetcher.get_token_price(coin) if coin else None
+
+                        # Получаем цену токена награды
+                        reward_token_price = None
+                        if reward_coin and reward_coin != coin:
+                            reward_token_price = self.price_fetcher.get_token_price(reward_coin)
+
+                        # Лимит в USD
+                        user_limit_usd = None
+                        if user_limit_tokens and token_price:
+                            user_limit_usd = round(user_limit_tokens * token_price, 2)
+
+                        # Название пула (обычно совпадает с монетой стейкинга)
+                        pool_name = pool.get('projectName', coin)
+
+                        staking = {
+                            'exchange': 'OKX',
+                            'product_id': pool_id,
+                            'coin': coin,
+                            'reward_coin': reward_coin if reward_coin != coin else None,
+                            'apr': apr,
+                            'type': 'Flash Earn',  # OKX Flash Earn - всегда flexible
+                            'status': 'Active',  # Только активные в ongoingProjects
+                            'category': None,
+                            'category_text': None,
+                            'term_days': 0,  # Flash Earn = flexible
+                            'token_price_usd': token_price,
+                            'reward_token_price_usd': reward_token_price,
+                            'start_time': project.get('startTime'),
+                            'end_time': end_time,
+                            'user_limit_tokens': user_limit_tokens,
+                            'user_limit_usd': user_limit_usd,
+                            'total_places': None,
+                            'max_capacity': max_capacity,
+                            'current_deposit': current_deposit,
+                            'fill_percentage': fill_percentage,
+                            'pool_name': pool_name,
+                            'reward_amount': reward_amount,
+                        }
+
+                        stakings.append(staking)
+                        total_pools += 1
+
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка парсинга OKX пула: {e}")
+                        continue
+
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка парсинга OKX проекта: {e}")
+                continue
+
+        logger.info(f"✅ OKX: обработано {total_pools} пулов")
         return stakings
 
     def get_pool_fills(self) -> List[Dict[str, Any]]:

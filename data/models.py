@@ -1,5 +1,5 @@
 # data/models.py
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Text, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from data.database import Base
@@ -38,6 +38,10 @@ class ApiLink(Base):
     # ПОЛЯ ДЛЯ TELEGRAM ПАРСИНГА (только для parsing_type='telegram'):
     telegram_channel = Column(String, nullable=True)  # @channel_name или ссылка
     telegram_keywords = Column(Text, nullable=True, default='[]')  # JSON список ключевых слов
+    telegram_account_id = Column(Integer, ForeignKey('telegram_accounts.id'), nullable=True)  # Назначенный аккаунт
+
+    # Связи
+    telegram_account = relationship("TelegramAccount", backref="assigned_links")
 
     def get_api_urls(self):
         """Получить список API URL"""
@@ -247,6 +251,11 @@ class TelegramAccount(Base):
     channels_monitored = Column(Integer, default=0)  # Количество отслеживаемых каналов
     last_error = Column(Text, nullable=True)  # Последняя ошибка
 
+    # Система fallback (блокировки)
+    is_blocked = Column(Boolean, default=False)  # Заблокирован ли аккаунт
+    blocked_at = Column(DateTime, nullable=True)  # Когда был заблокирован
+    blocked_reason = Column(String, nullable=True)  # Причина блокировки (тип ошибки)
+
 class StakingHistory(Base):
     __tablename__ = 'staking_history'
 
@@ -291,6 +300,38 @@ class StakingHistory(Base):
     # Уникальность по бирже и product_id
     __table_args__ = (
         UniqueConstraint('exchange', 'product_id', name='_exchange_product_uc'),
+    )
+
+class StakingSnapshot(Base):
+    """Снимки стейкингов для отслеживания истории изменений APR, заполненности и цен"""
+    __tablename__ = 'staking_snapshots'
+
+    id = Column(Integer, primary_key=True)
+
+    # Связь с основной записью стейкинга
+    staking_history_id = Column(Integer, ForeignKey('staking_history.id'), nullable=False)
+
+    # Дубликаты для независимости запросов
+    exchange = Column(String, nullable=False)  # 'Kucoin', 'Bybit', 'OKX'
+    product_id = Column(String, nullable=False)  # ID от биржи
+    coin = Column(String, nullable=False)  # 'BTC', 'ETH', 'USDT'
+
+    # Снимок данных на момент проверки
+    apr = Column(Float, nullable=False)  # APR на момент снимка
+    fill_percentage = Column(Float, nullable=True)  # Заполненность пула
+    token_price_usd = Column(Float, nullable=True)  # Цена токена в USD
+    status = Column(String, nullable=True)  # 'Active', 'Sold Out'
+
+    # Временная метка снимка
+    snapshot_time = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Связь
+    staking_history = relationship("StakingHistory", backref="snapshots")
+
+    # Индексы для быстрых запросов
+    __table_args__ = (
+        Index('idx_snapshot_staking_time', 'staking_history_id', 'snapshot_time'),
+        Index('idx_snapshot_exchange_product', 'exchange', 'product_id'),
     )
 
 class TelegramChannel(Base):

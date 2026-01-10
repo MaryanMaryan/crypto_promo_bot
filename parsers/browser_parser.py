@@ -50,7 +50,7 @@ class BrowserParser(BaseParser):
 
             if is_api_request:
                 # Для API получаем JSON напрямую
-                logger.info(f"📡 Обнаружен API endpoint, получаем JSON через браузер")
+                logger.info(f"👾 Обнаружен API endpoint, получаем JSON через браузер")
                 json_data = self._fetch_json_with_browser(proxy, user_agent)
 
                 if not json_data:
@@ -212,7 +212,7 @@ class BrowserParser(BaseParser):
             stealth = Stealth()
             stealth.apply_stealth_sync(page)
 
-            logger.info(f"📡 Загрузка API: {self.url}")
+            logger.info(f"👾 Загрузка API: {self.url}")
 
             start_time = time.time()
             # Используем domcontentloaded вместо networkidle для Akamai защиты
@@ -431,7 +431,7 @@ class BrowserParser(BaseParser):
             stealth = Stealth()
             stealth.apply_stealth_sync(page)
 
-            logger.info(f"📡 Загрузка страницы: {self.url}")
+            logger.info(f"👾 Загрузка страницы: {self.url}")
 
             start_time = time.time()
 

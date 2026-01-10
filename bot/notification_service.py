@@ -334,6 +334,128 @@ class NotificationService:
 
     # ========== ФОРМАТТЕРЫ ДЛЯ СТЕЙКИНГОВ ==========
 
+    def format_okx_project(self, stakings: List[Dict[str, Any]], page_url: str = None) -> str:
+        """
+        Форматирование уведомления о новом проекте OKX (все пулы в одном сообщении)
+
+        Args:
+            stakings: Список пулов проекта
+            page_url: Ссылка на страницу
+
+        Returns:
+            Отформатированное HTML сообщение
+        """
+        if not stakings:
+            return ""
+
+        # Берём общие данные из первого пула
+        first = stakings[0]
+        reward_coin = self.escape_html(first.get('reward_coin') or first.get('coin'))
+        exchange = self.escape_html(first.get('exchange', 'OKX'))
+        end_time = first.get('end_time')
+        start_time = first.get('start_time')
+        reward_amount = first.get('reward_amount')
+        term_days = first.get('term_days', 0)
+        term_type = self.escape_html(first.get('type', 'N/A'))
+        status = self.escape_html(first.get('status', 'Active'))
+
+        # Формируем сообщение
+        message = f"🆕 <b>НОВЫЙ СТЕЙКИНГ!</b>\n\n"
+
+        # Собираем все стейкаемые монеты
+        stake_coins = [self.escape_html(pool.get('coin', 'N/A')) for pool in stakings]
+        message += f"<b>💎 Стейкай:</b> {', '.join(stake_coins)}\n"
+
+        # Награда с количеством на пул и стоимостью в USD
+        reward_price = first.get('reward_token_price_usd')
+        if reward_amount:
+            message += f"<b>🎁 Награда:</b> {reward_coin} ({reward_amount} на пул"
+
+            # Добавляем стоимость в USD если известна цена
+            if reward_price:
+                try:
+                    # Убираем запятые из числа и конвертируем
+                    clean_amount = reward_amount.replace(',', '')
+                    total_reward_usd = float(clean_amount) * reward_price
+                    message += f", ~${total_reward_usd:,.2f}"
+                except (ValueError, AttributeError):
+                    pass
+
+            message += ")\n"
+        else:
+            message += f"<b>🎁 Награда:</b> {reward_coin}\n"
+
+        message += f"<b>🏦 Биржа:</b> {exchange}\n"
+
+        # APR для каждого пула
+        apr_parts = []
+        for pool in stakings:
+            coin = self.escape_html(pool.get('coin', 'N/A'))
+            apr = pool.get('apr', 0)
+            apr_parts.append(f"{coin}: {apr:.2f}%")
+        message += f"<b>💰 APR:</b> {' | '.join(apr_parts)}\n"
+
+        # Период
+        if term_days == 0:
+            message += f"<b>📅 Период:</b> Flexible (бессрочно)\n"
+        else:
+            message += f"<b>📅 Период:</b> {term_days} дней\n"
+
+        # Тип и статус
+        if term_type:
+            message += f"<b>🔧 Тип:</b> {term_type}\n"
+        if status:
+            message += f"<b>📊 Статус:</b> {status}\n"
+
+        # Лимиты на человека для каждого пула
+        message += f"\n<b>👤 ЛИМИТЫ НА ЧЕЛОВЕКА:</b>\n"
+        for i, pool in enumerate(stakings):
+            coin = self.escape_html(pool.get('coin', 'N/A'))
+            user_limit = pool.get('user_limit_tokens')
+            token_price = pool.get('token_price_usd')
+
+            if user_limit:
+                # Определяем символ для форматирования
+                if i == len(stakings) - 1:
+                    symbol = "└─"
+                else:
+                    symbol = "├─"
+
+                limit_str = f"{symbol} {coin}: {user_limit:,.2f}"
+
+                # USD эквивалент
+                if token_price:
+                    limit_usd = user_limit * token_price
+                    limit_str += f" (~${limit_usd:,.2f})"
+
+                message += limit_str + "\n"
+
+        # Даты
+        if start_time or end_time:
+            message += "\n"
+
+        if start_time:
+            try:
+                from datetime import datetime
+                start_dt = datetime.fromtimestamp(start_time / 1000)
+                message += f"<b>⏰ Старт:</b> {start_dt.strftime('%d.%m.%Y, %H:%M')}\n"
+            except:
+                message += f"<b>⏰ Старт:</b> Информация недоступна\n"
+
+        if end_time:
+            try:
+                from datetime import datetime
+                end_dt = datetime.fromtimestamp(end_time / 1000)
+                message += f"<b>🕐 Конец:</b> {end_dt.strftime('%d.%m.%Y, %H:%M')}\n"
+            except:
+                message += f"<b>🕐 Конец:</b> Информация недоступна\n"
+
+        # Ссылка
+        if page_url:
+            message += f"\n<b>🔗 Ссылка:</b> {page_url}"
+
+        return message
+
     def format_new_staking(self, staking: Dict[str, Any], page_url: str = None) -> str:
         """
         Форматирование уведомления о новом стейкинге
@@ -587,3 +709,264 @@ class NotificationService:
         except Exception as e:
             logger.error(f"❌ Ошибка форматирования отчёта о пулах: {e}", exc_info=True)
             return f"📊 <b>Отчёт о заполненности пулов</b>\n\n<b>Биржа:</b> {self.escape_html(exchange_name)}\n\nНайдено пулов: {len(pools)}"
+
+    def format_current_stakings_page(
+        self,
+        stakings_with_deltas: List[Dict],
+        page: int,
+        total_pages: int,
+        exchange_name: str,
+        min_apr: float = None,
+        page_url: str = None
+    ) -> str:
+        """
+        Форматирует страницу текущих стейкингов с историей изменений
+
+        Args:
+            stakings_with_deltas: Список словарей с ключами:
+                - staking: объект StakingHistory
+                - deltas: {apr_delta, fill_delta, price_delta_pct, has_previous}
+                - alerts: список строк с алертами
+            page: Текущая страница (1-based)
+            total_pages: Всего страниц
+            exchange_name: Название биржи
+            min_apr: Минимальный APR фильтр (если установлен)
+            page_url: Ссылка на страницу стейкингов
+
+        Returns:
+            Отформатированное HTML сообщение
+        """
+        try:
+            from datetime import datetime
+
+            # Заголовок
+            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+            message = f"📈 <b>ТЕКУЩИЕ СТЕЙКИНГИ</b>\n\n"
+            message += f"<b>🏦 Биржа:</b> {self.escape_html(exchange_name)}\n"
+
+            if min_apr is not None:
+                message += f"<b>🔍 Фильтр APR:</b> ≥ {min_apr}%\n"
+
+            message += f"<b>🕐 Обновлено:</b> {now}\n\n"
+            message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Если стейкингов нет
+            if not stakings_with_deltas:
+                message += "📭 <i>Нет стейкингов, соответствующих фильтру</i>\n\n"
+                message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                # Пагинация
+                message += f"📄 Страница {page} из {total_pages}\n"
+
+                if page_url:
+                    message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+
+                return message
+
+            # Форматируем каждый стейкинг
+            for idx, item in enumerate(stakings_with_deltas):
+                staking = item['staking']
+                deltas = item['deltas']
+                alerts = item.get('alerts', [])
+
+                # ЗАГОЛОВОК: Монета | APR | Срок
+                coin = self.escape_html(staking['coin'] or 'N/A')
+                apr = staking['apr'] or 0
+                term_days = staking.get('term_days', 0)
+
+                # Форматируем срок
+                if term_days == 0:
+                    term_text = "Flexible"
+                elif term_days == 1:
+                    term_text = "1 день"
+                elif term_days < 5:
+                    term_text = f"{term_days} дня"
+                elif term_days < 21:
+                    term_text = f"{term_days} дней"
+                else:
+                    term_text = f"{term_days} дней"
+
+                message += f"💰 <b>{coin}</b> | {apr:.1f}% APR | {term_text}\n"
+
+                # СТАТУС
+                status = staking.get('status')
+                if status:
+                    if status.lower() in ['active', 'ongoing']:
+                        status_emoji = "✅"
+                    elif status.lower() in ['sold out', 'soldout']:
+                        status_emoji = "🔴"
+                    else:
+                        status_emoji = "⚪"
+                    message += f"📊 <b>Статус:</b> {status_emoji} {self.escape_html(status)}\n"
+
+                # ВИЗУАЛЬНАЯ ШКАЛА ЗАПОЛНЕННОСТИ
+                fill_percentage = staking.get('fill_percentage')
+                fill_delta = deltas.get('fill_delta')
+
+                if fill_percentage is not None:
+                    # Создаем визуальную шкалу (20 блоков)
+                    filled_blocks = int(fill_percentage / 5)  # 100% / 5 = 20 блоков
+                    empty_blocks = 20 - filled_blocks
+                    bar = "▓" * filled_blocks + "░" * empty_blocks
+
+                    # Показываем дельту рядом с процентами
+                    if deltas.get('has_previous', False) and fill_delta is not None and abs(fill_delta) >= 0.01:
+                        if fill_delta > 0:
+                            message += f"{bar} {fill_percentage:.2f}% (↑ +{fill_delta:.2f}% за час)\n"
+                        else:
+                            message += f"{bar} {fill_percentage:.2f}% (↓ {fill_delta:.2f}% за час)\n"
+                    else:
+                        message += f"{bar} {fill_percentage:.2f}%\n"
+
+                # ЛИМИТЫ И ЗАПОЛНЕННОСТЬ
+                max_capacity = staking.get('max_capacity')
+                current_deposit = staking.get('current_deposit')
+                token_price = staking.get('token_price_usd')
+
+                if max_capacity and max_capacity > 0 and current_deposit is not None:
+                    message += "\n💎 <b>ЛИМИТЫ И ЗАПОЛНЕННОСТЬ:</b>\n"
+
+                    # Форматируем большие числа
+                    def format_number(num):
+                        if num >= 1_000_000_000:
+                            return f"{num:,.2f}"
+                        else:
+                            return f"{num:,.2f}"
+
+                    # Общий пул
+                    if token_price:
+                        pool_usd = max_capacity * token_price
+                        message += f"   • Общий пул: {format_number(max_capacity)} {coin} (${pool_usd:,.0f})\n"
+                    else:
+                        message += f"   • Общий пул: {format_number(max_capacity)} {coin}\n"
+
+                    # Занято
+                    message += f"   • Занято: {format_number(current_deposit)} {coin} ({fill_percentage:.2f}%)\n"
+
+                    # Осталось
+                    available = max_capacity - current_deposit
+                    if token_price:
+                        available_usd = available * token_price
+                        message += f"   • Осталось: <b>{format_number(available)} {coin}</b> (~${available_usd:,.0f})\n"
+                    else:
+                        message += f"   • Осталось: <b>{format_number(available)} {coin}</b>\n"
+
+                    # Лимит на аккаунт (только если есть данные)
+                    user_limit = staking.get('user_limit_tokens')
+                    if user_limit and user_limit > 0:
+                        if token_price:
+                            limit_usd = user_limit * token_price
+                            message += f"   • Лимит/аккаунт: {format_number(user_limit)} {coin} (~${limit_usd:,.0f})\n"
+                        else:
+                            message += f"   • Лимит/аккаунт: {format_number(user_limit)} {coin}\n"
+
+                # ПЕРИОД СТЕЙКИНГА
+                start_time = staking.get('start_time')
+                end_time = staking.get('end_time')
+
+                if start_time or end_time:
+                    message += "\n⏰ <b>ПЕРИОД СТЕЙКИНГА:</b>\n"
+                    if start_time:
+                        message += f"   • Начало: {self.escape_html(start_time)}\n"
+                    if end_time:
+                        message += f"   • Конец: {self.escape_html(end_time)}\n"
+                    if term_days and term_days > 0:
+                        message += f"   • Длительность: {term_days} дней\n"
+
+                # ТЕГИ (если есть)
+                category_text = staking.get('category_text')
+                if category_text:
+                    message += f"\n🏷 <b>Теги:</b> {self.escape_html(category_text)}\n"
+
+                # Разделитель между стейкингами (кроме последнего)
+                if idx < len(stakings_with_deltas) - 1:
+                    message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                else:
+                    message += "\n"
+
+            # Пагинация
+            message += f"📄 Страница {page} из {total_pages}\n"
+
+            # Ссылка на биржу
+            if page_url:
+                message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+
+            # Проверяем лимит Telegram (4096 символов)
+            if len(message) > 4090:
+                logger.warning(f"⚠️ Сообщение слишком длинное ({len(message)} символов), обрезаем")
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Сообщение обрезано из-за лимита длины</i>"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования страницы стейкингов: {e}", exc_info=True)
+            return f"📈 <b>Текущие стейкинги</b>\n\n<b>Биржа:</b> {self.escape_html(exchange_name)}\n\n❌ Ошибка форматирования данных"
+
+    async def notify_account_blocked(
+        self,
+        chat_id: int,
+        account_name: str,
+        phone_number: str,
+        reason: str,
+        new_account_name: Optional[str] = None,
+        new_phone_number: Optional[str] = None,
+        affected_links: List[str] = None
+    ):
+        """
+        Отправляет уведомление о блокировке Telegram аккаунта и автоматическом переключении
+
+        Args:
+            chat_id: ID чата для отправки уведомления
+            account_name: Имя заблокированного аккаунта
+            phone_number: Номер заблокированного аккаунта
+            reason: Причина блокировки (тип ошибки)
+            new_account_name: Имя нового аккаунта (если fallback успешен)
+            new_phone_number: Номер нового аккаунта
+            affected_links: Список названий затронутых ссылок
+        """
+        try:
+            # Формируем сообщение о блокировке
+            message = "⚠️ <b>TELEGRAM АККАУНТ ЗАБЛОКИРОВАН!</b>\n\n"
+
+            # Информация о заблокированном аккаунте
+            message += f"<b>🚫 Заблокированный аккаунт:</b>\n"
+            message += f"├─ Имя: {self.escape_html(account_name)}\n"
+            message += f"├─ Номер: +{self.escape_html(phone_number)}\n"
+            message += f"└─ Причина: {self.escape_html(reason)}\n\n"
+
+            # Информация о переключении
+            if new_account_name:
+                message += "✅ <b>АВТОМАТИЧЕСКОЕ ПЕРЕКЛЮЧЕНИЕ УСПЕШНО!</b>\n\n"
+                message += f"<b>🔄 Новый аккаунт:</b>\n"
+                message += f"├─ Имя: {self.escape_html(new_account_name)}\n"
+                message += f"└─ Номер: +{self.escape_html(new_phone_number)}\n\n"
+                message += "<i>✓ Парсинг продолжается с новым аккаунтом</i>"
+            else:
+                message += "❌ <b>НЕТ ДОСТУПНЫХ АККАУНТОВ ДЛЯ ЗАМЕНЫ!</b>\n\n"
+                message += "<i>⚠️ Парсинг Telegram ссылок остановлен</i>\n\n"
+                message += "Действия для исправления:\n"
+                message += "1. Добавьте новый Telegram аккаунт\n"
+                message += "2. Или разблокируйте существующий аккаунт\n"
+                message += "3. Парсинг возобновится автоматически"
+
+            # Список затронутых ссылок (если есть)
+            if affected_links:
+                message += "\n\n<b>📋 Затронутые ссылки:</b>\n"
+                for link_name in affected_links[:5]:  # Показываем максимум 5 ссылок
+                    message += f"  • {self.escape_html(link_name)}\n"
+
+                if len(affected_links) > 5:
+                    message += f"  <i>...и еще {len(affected_links) - 5}</i>\n"
+
+            # Отправляем уведомление
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode="HTML"
+            )
+
+            logger.info(f"📤 Уведомление о блокировке аккаунта отправлено в чат {chat_id}")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки уведомления о блокировке: {e}")

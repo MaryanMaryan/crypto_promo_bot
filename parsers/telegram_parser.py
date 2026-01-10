@@ -150,6 +150,13 @@ class TelegramParser:
                     connected_count += 1
                     logger.info(f"✅ Аккаунт {account['name']} ({account['phone_number']}) подключен")
 
+                except (PhoneNumberBannedError, AuthKeyUnregisteredError) as e:
+                    # НОВОЕ: Обработка блокировки аккаунта
+                    logger.error(f"❌ Аккаунт {account['name']} заблокирован: {type(e).__name__}")
+                    # Помечаем аккаунт как заблокированный через handle_client_error
+                    await self.handle_client_error(account['id'], e)
+                    continue
+
                 except Exception as e:
                     logger.error(f"❌ Ошибка подключения аккаунта {account['name']}: {e}")
                     continue
@@ -386,3 +393,141 @@ class TelegramParser:
             'links': self.extract_links(message_text),
             'dates': self.extract_dates(message_text)
         }
+
+    async def handle_client_error(self, account_id: int, error: Exception) -> bool:
+        """
+        Обработка ошибок клиента с определением блокировки
+
+        Args:
+            account_id: ID аккаунта, на котором произошла ошибка
+            error: Исключение которое произошло
+
+        Returns:
+            bool: True если аккаунт заблокирован и нужен fallback, False иначе
+        """
+        from datetime import datetime
+
+        # Определяем блокирующие ошибки
+        blocking_errors = {
+            PhoneNumberBannedError: "PhoneNumberBanned",
+            AuthKeyUnregisteredError: "AuthKeyUnregistered",
+        }
+
+        # Проверяем, является ли ошибка блокирующей
+        error_type = type(error)
+        blocked_reason = None
+
+        if error_type in blocking_errors:
+            blocked_reason = blocking_errors[error_type]
+        elif isinstance(error, FloodWaitError) and error.seconds > 3600:
+            # FloodWait больше часа считаем блокировкой
+            blocked_reason = f"FloodWait_{error.seconds}s"
+        else:
+            # Не блокирующая ошибка
+            logger.warning(f"Не блокирующая ошибка для аккаунта {account_id}: {error}")
+            return False
+
+        # Помечаем аккаунт как заблокированный в БД
+        try:
+            from data.database import get_db_session
+            from data.models import TelegramAccount
+
+            with get_db_session() as db:
+                account = db.query(TelegramAccount).filter_by(id=account_id).first()
+                if account:
+                    account.is_blocked = True
+                    account.blocked_at = datetime.utcnow()
+                    account.blocked_reason = blocked_reason
+                    account.last_error = str(error)
+                    db.commit()
+
+                    logger.error(f"❌ Аккаунт {account.name} (ID: {account_id}) заблокирован. Причина: {blocked_reason}")
+
+                    # Отключаем клиент от парсера
+                    if account_id in self.clients:
+                        try:
+                            await self.clients[account_id]['client'].disconnect()
+                        except:
+                            pass
+                        self.clients[account_id]['is_connected'] = False
+
+                    return True
+                else:
+                    logger.error(f"❌ Аккаунт ID {account_id} не найден в БД")
+                    return False
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при пометке аккаунта как заблокированного: {e}")
+            return False
+
+    async def switch_account_for_link(self, link_id: int, old_account_id: int) -> Optional[int]:
+        """
+        Переключить аккаунт для парсинга ссылки (fallback)
+
+        Args:
+            link_id: ID ссылки для переключения
+            old_account_id: ID заблокированного аккаунта
+
+        Returns:
+            int: ID нового аккаунта или None если не удалось
+        """
+        try:
+            from data.database import get_db_session
+            from data.models import TelegramAccount, ApiLink
+            from sqlalchemy import func
+
+            with get_db_session() as db:
+                link = db.query(ApiLink).filter_by(id=link_id).first()
+                if not link:
+                    logger.error(f"❌ Ссылка ID {link_id} не найдена")
+                    return None
+
+                # Находим доступные аккаунты (активные, авторизованные, не заблокированные)
+                available_accounts = db.query(TelegramAccount).filter(
+                    TelegramAccount.is_active == True,
+                    TelegramAccount.is_authorized == True,
+                    TelegramAccount.is_blocked == False,
+                    TelegramAccount.id != old_account_id  # Исключаем старый аккаунт
+                ).all()
+
+                if not available_accounts:
+                    logger.error(f"❌ Нет доступных аккаунтов для замены аккаунта ID {old_account_id}")
+                    return None
+
+                # Load balancing: выбираем аккаунт с наименьшим количеством назначенных ссылок
+                account_loads = []
+                for acc in available_accounts:
+                    # Считаем количество назначенных активных ссылок
+                    load_count = db.query(func.count(ApiLink.id)).filter(
+                        ApiLink.telegram_account_id == acc.id,
+                        ApiLink.is_active == True,
+                        ApiLink.parsing_type == 'telegram'
+                    ).scalar()
+                    account_loads.append((acc, load_count))
+
+                # Сортируем по нагрузке (меньше нагрузка = выше приоритет)
+                account_loads.sort(key=lambda x: x[1])
+                new_account = account_loads[0][0]
+
+                old_account_name = db.query(TelegramAccount).filter_by(id=old_account_id).first()
+                old_name = old_account_name.name if old_account_name else f"ID {old_account_id}"
+
+                logger.info(f"🔄 Fallback: {old_name} → {new_account.name} для ссылки '{link.name}'")
+
+                # Переназначаем ссылку на новый аккаунт
+                link.telegram_account_id = new_account.id
+                db.commit()
+
+                # Переподключаемся к каналу с новым аккаунтом
+                if link.telegram_channel and new_account.id in self.clients:
+                    try:
+                        await self.join_channel(link.telegram_channel, new_account.id)
+                        logger.info(f"✅ Переподключено к каналу {link.telegram_channel} с аккаунтом {new_account.name}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Не удалось переподключиться к каналу: {e}")
+
+                return new_account.id
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при переключении аккаунта: {e}")
+            return None

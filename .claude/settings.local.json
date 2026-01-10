@@ -50,7 +50,22 @@
       "Bash(dir:*)",
       "Bash(if exist \"tg_session_7193869664_27657361808.session\" move \"tg_session_7193869664_27657361808.session\" \"sessions\" && if exist \"tg_session_7193869664_27659927468.session\" move \"tg_session_7193869664_27659927468.session\" \"sessions\")",
       "Bash(if exist \"tg_session_7193869664_27649286375.session\" move \"tg_session_7193869664_27649286375.session\" \"sessions\")",
-      "Bash(move tg_session_*.session sessions)"
+      "Bash(move tg_session_*.session sessions)",
+      "Bash(Select-String -Pattern \"ТЕСТ|Найдено|стейкингов|APR|Заполненность|ЗАВЕРШЕН|ERROR|Traceback\" -Context 0,2)",
+      "Bash(claude doctor)",
+      "Bash(Select-String -Pattern \"ПРИМЕР|Всего|После|^\\\\[|APR|Заполненность|Цена|Тип|Статус|Окончание|еще|навигации|ЗАВЕРШЕНА|Примечания\" -Context 0,0)",
+      "Bash(Select-String -Pattern \"ТЕСТ|Миграция|инициализирован|ERROR|WARNING|Бот|started|staking_snapshots\" -Context 0,0)",
+      "Bash(timeout /t 5 /nobreak)",
+      "Bash(Select-String -Pattern \"ТЕСТ|стейкинг|BybitEARN|Найдено|обновление|snapshot|ERROR|WARNING|Telegram|инициализ\" -Context 0,0)",
+      "Bash(timeout /t 8 /nobreak)",
+      "Bash(timeout /t 3 /nobreak)",
+      "Bash(kill:*)",
+      "Bash(xargs kill:*)",
+      "Bash(timeout /t 5)",
+      "Bash(more:*)",
+      "Bash(timeout /t 1)",
+      "Bash(timeout /t 3)",
+      "Bash(echo:*)"
     ],
     "deny": [],
     "ask": []

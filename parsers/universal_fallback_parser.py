@@ -209,7 +209,7 @@ class UniversalFallbackParser(BaseParser):
 
             # Парсим основной URL если он API
             if self._is_api_url():
-                logger.info(f"📡 Парсинг основного API URL: {self.url}")
+                logger.info(f"👾 Парсинг основного API URL: {self.url}")
                 api_parser = UniversalParser(self.url)
                 promotions = api_parser.get_promotions()
 
@@ -224,7 +224,7 @@ class UniversalFallbackParser(BaseParser):
 
             # Парсим дополнительный API URL (НОВОЕ: одиночный)
             if self.api_url and self.api_url != self.url:
-                logger.info(f"📡 Парсинг дополнительного API URL: {self.api_url}")
+                logger.info(f"👾 Парсинг дополнительного API URL: {self.api_url}")
                 try:
                     api_parser = UniversalParser(self.api_url)
                     promotions = api_parser.get_promotions()
@@ -318,7 +318,7 @@ class UniversalFallbackParser(BaseParser):
                 logger.warning("⚠️ Telegram канал не указан. Укажите канал в формате @channelname или настройте в БД")
                 return []
 
-            logger.info(f"📡 Канал: {telegram_channel}")
+            logger.info(f"👾 Канал: {telegram_channel}")
             logger.info(f"🔑 Ключевые слова: {keywords if keywords else 'Нет (будут возвращены все сообщения)'}")
 
             # Загружаем настройки Telegram из БД ДО создания потока

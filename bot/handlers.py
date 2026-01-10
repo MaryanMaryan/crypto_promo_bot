@@ -55,6 +55,9 @@ user_selections = {}
 # Система контекстной навигации - хранит историю навигации пользователя
 navigation_stack = {}
 
+# Состояние пагинации для текущих стейкингов
+current_stakings_state = {}  # {user_id: {'page': 1, 'link_id': 5, 'total_pages': 3}}
+
 # Контексты навигации
 NAV_MAIN = "main"
 NAV_LINKS_LIST = "links_list"
@@ -146,12 +149,17 @@ def get_main_menu():
     return builder.as_markup(resize_keyboard=True)
 
 # СУЩЕСТВУЮЩИЕ КЛАВИАТУРЫ
-def get_management_keyboard():
+def get_management_keyboard(link=None):
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="🗑️ Удалить ссылку", callback_data="manage_delete"))
     builder.add(InlineKeyboardButton(text="⏰ Изменить интервал", callback_data="manage_interval"))
     builder.add(InlineKeyboardButton(text="✏️ Переименовать ссылку", callback_data="manage_rename"))
     builder.add(InlineKeyboardButton(text="🎯 Настроить парсинг", callback_data="manage_configure_parsing"))
+
+    # НОВОЕ: Кнопка смены Telegram аккаунта (только для telegram ссылок)
+    if link and link.parsing_type == 'telegram':
+        builder.add(InlineKeyboardButton(text="📱 Сменить Telegram аккаунт", callback_data="manage_change_tg_account"))
+
     builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
     builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
     builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
@@ -178,13 +186,37 @@ def get_staking_management_keyboard():
     builder.add(InlineKeyboardButton(text="⏰ Изменить интервал", callback_data="manage_interval"))
     builder.add(InlineKeyboardButton(text="✏️ Переименовать ссылку", callback_data="manage_rename"))
     builder.add(InlineKeyboardButton(text="🎯 Настроить парсинг", callback_data="manage_configure_parsing"))
-    # НОВАЯ КНОПКА ДЛЯ СТЕЙКИНГА:
-    builder.add(InlineKeyboardButton(text="📊 Проверить заполненность пулов", callback_data="manage_check_pools"))
+    builder.add(InlineKeyboardButton(text="📈 Текущие стейкинги", callback_data="manage_view_current_stakings"))
     builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
     builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
     builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="manage_cancel"))
     builder.adjust(1)
+    return builder.as_markup()
+
+def get_current_stakings_keyboard(current_page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Клавиатура навигации для текущих стейкингов"""
+    builder = InlineKeyboardBuilder()
+
+    # Кнопки навигации
+    nav_buttons = []
+    if current_page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data="stakings_page_prev"))
+    if current_page < total_pages:
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data="stakings_page_next"))
+
+    if nav_buttons:
+        builder.row(*nav_buttons)
+
+    # Управление
+    builder.row(
+        InlineKeyboardButton(text="🔄 Обновить", callback_data="stakings_refresh"),
+        InlineKeyboardButton(text="⚙️ Настройки APR", callback_data="stakings_configure_apr")
+    )
+
+    # Закрыть
+    builder.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="manage_cancel"))
+
     return builder.as_markup()
 
 def get_links_keyboard(links, action_type="delete"):
@@ -430,7 +462,7 @@ async def menu_list_links(message: Message):
                 parsing_type = link.parsing_type or 'combined'
                 parsing_type_icons = {
                     'combined': '🔄 Комбинированный',
-                    'api': '📡 API',
+                    'api': '👾 API',
                     'html': '🌐 HTML',
                     'browser': '🌐 Browser',
                     'telegram': '📱 Telegram'
@@ -442,6 +474,23 @@ async def menu_list_links(message: Message):
                 response += f"Статус: {status}\n"
                 response += f"Парсинг: {parsing_display}\n"
                 response += f"Интервал: {interval_minutes} мин\n"
+
+                # НОВОЕ: Отображение Telegram аккаунта
+                if link.parsing_type == 'telegram' and link.telegram_account:
+                    account = link.telegram_account
+
+                    # Иконка статуса аккаунта
+                    if account.is_blocked:
+                        account_status = "❌"
+                    elif not account.is_active:
+                        account_status = "💤"
+                    else:
+                        account_status = "✅"
+
+                    # Имя аккаунта (обрезаем если длинное)
+                    account_name = account.name[:20] + "..." if len(account.name) > 20 else account.name
+                    response += f"📱 TG аккаунт: {account_status} {account_name}\n"
+
                 response += f"URL: <code>{link.url}</code>\n\n"
             
             await message.answer(response, parse_mode="HTML")
@@ -1167,7 +1216,8 @@ async def cancel_add_link(callback: CallbackQuery, state: FSMContext):
     """Отмена добавления ссылки"""
     await state.clear()
     await callback.message.edit_text(
-        "❌ Добавление ссылки отменено"
+        "❌ Добавление ссылки отменено\n\nЧто вы хотите сделать?",
+        reply_markup=get_cancel_keyboard_with_navigation()
     )
     await callback.answer()
 
@@ -1409,7 +1459,7 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         ]
 
         if api_url:
-            message_parts.append(f"<b>📡 API URL:</b>\n<code>{api_url}</code>\n")
+            message_parts.append(f"<b>👾 API URL:</b>\n<code>{api_url}</code>\n")
 
         if html_url:
             message_parts.append(f"\n<b>🌐 HTML URL:</b>\n<code>{html_url}</code>\n")
@@ -1547,6 +1597,7 @@ async def show_link_management(callback: CallbackQuery):
     """Показать меню управления выбранной ссылкой (с учетом категории)"""
     try:
         link_id = int(callback.data.split("_")[2])
+        user_id = callback.from_user.id
 
         with get_db_session() as db:
             link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
@@ -1557,13 +1608,13 @@ async def show_link_management(callback: CallbackQuery):
                 return
 
             # Сохраняем link_id для использования в других обработчиках
-            user_selections[callback.from_user.id] = link_id
+            user_selections[user_id] = link_id
 
             # Выбираем правильную клавиатуру в зависимости от категории
             if link.category == 'staking':
                 keyboard = get_staking_management_keyboard()
             else:
-                keyboard = get_management_keyboard()
+                keyboard = get_management_keyboard(link=link)  # Передаем link для условной кнопки
 
             # Информация о ссылке
             status_text = "✅ Активна" if link.is_active else "❌ Остановлена"
@@ -1571,15 +1622,47 @@ async def show_link_management(callback: CallbackQuery):
                 'api': 'API',
                 'html': 'HTML',
                 'browser': 'Browser',
-                'combined': 'Комбинированный'
+                'combined': 'Комбинированный',
+                'telegram': 'Telegram'
             }.get(link.parsing_type, 'Комбинированный')
+
+            # НОВОЕ: Информация о Telegram аккаунте
+            telegram_info = ""
+            if link.parsing_type == 'telegram':
+                if link.telegram_account:
+                    account = link.telegram_account
+
+                    # Статус аккаунта
+                    if account.is_blocked:
+                        account_status = "❌ Заблокирован"
+                        if account.blocked_at:
+                            from datetime import datetime
+                            blocked_date = account.blocked_at.strftime('%d.%m.%Y %H:%M') if isinstance(account.blocked_at, datetime) else str(account.blocked_at)
+                            account_status += f" (с {blocked_date})"
+                    elif not account.is_active:
+                        account_status = "💤 Неактивен"
+                    else:
+                        account_status = "✅ Активен"
+
+                    telegram_info = (
+                        f"<b>📱 Telegram аккаунт:</b> {account.name}\n"
+                        f"<b>   Номер:</b> +{account.phone_number}\n"
+                        f"<b>   Статус:</b> {account_status}\n"
+                    )
+
+                    # Канал
+                    if link.telegram_channel:
+                        telegram_info += f"<b>🔗 Канал:</b> {link.telegram_channel}\n"
+                else:
+                    telegram_info = "<b>📱 Telegram аккаунт:</b> ⚠️ Не назначен\n"
 
             await callback.message.edit_text(
                 f"⚙️ <b>Управление ссылкой:</b> {link.name}\n\n"
                 f"<b>Статус:</b> {status_text}\n"
                 f"<b>Категория:</b> {link.category or 'general'}\n"
                 f"<b>Интервал:</b> {link.check_interval}с ({link.check_interval // 60} мин)\n"
-                f"<b>Тип парсинга:</b> {parsing_type_text}\n\n"
+                f"<b>Тип парсинга:</b> {parsing_type_text}\n"
+                f"{telegram_info}\n"
                 f"Выберите действие:",
                 reply_markup=keyboard,
                 parse_mode="HTML"
@@ -1590,6 +1673,129 @@ async def show_link_management(callback: CallbackQuery):
         logger.error(f"❌ Ошибка при показе меню управления ссылкой: {e}", exc_info=True)
         await callback.message.edit_text("❌ Ошибка при загрузке меню")
         await callback.answer()
+
+@router.callback_query(F.data == "manage_change_tg_account")
+async def manage_change_tg_account(callback: CallbackQuery):
+    """Смена Telegram аккаунта для ссылки"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        from data.models import TelegramAccount
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                await callback.answer()
+                return
+
+            if link.parsing_type != 'telegram':
+                await callback.answer("❌ Эта функция только для Telegram ссылок", show_alert=True)
+                return
+
+            # Получить доступные аккаунты
+            accounts = db.query(TelegramAccount).filter(
+                TelegramAccount.is_active == True,
+                TelegramAccount.is_authorized == True,
+                TelegramAccount.is_blocked == False
+            ).all()
+
+            if not accounts:
+                await callback.message.edit_text(
+                    "❌ <b>Нет доступных Telegram аккаунтов</b>\n\n"
+                    "Добавьте аккаунт через:\n"
+                    "🛡️ Обход блокировок → 📱 Telegram API",
+                    parse_mode="HTML"
+                )
+                await callback.answer()
+                return
+
+            # Создать клавиатуру выбора
+            builder = InlineKeyboardBuilder()
+            for acc in accounts:
+                # Пометка текущего
+                prefix = "✅ " if acc.id == link.telegram_account_id else ""
+
+                # Статистика нагрузки
+                from sqlalchemy import func
+                load_count = db.query(func.count(ApiLink.id)).filter(
+                    ApiLink.telegram_account_id == acc.id,
+                    ApiLink.is_active == True,
+                    ApiLink.parsing_type == 'telegram'
+                ).scalar()
+
+                button_text = f"{prefix}{acc.name} (+{acc.phone_number}) [{load_count} ссылок]"
+                builder.add(InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f"assign_tg_account_{acc.id}"
+                ))
+
+            builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data=f"manage_link_{link_id}"))
+            builder.adjust(1)
+
+            await callback.message.edit_text(
+                f"📱 <b>Выберите Telegram аккаунт для {link.name}:</b>\n\n"
+                f"<i>✅ - текущий аккаунт\n"
+                f"[N ссылок] - количество назначенных ссылок</i>",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка смены аккаунта: {e}", exc_info=True)
+        await callback.message.edit_text("❌ Ошибка при смене аккаунта")
+        await callback.answer()
+
+@router.callback_query(F.data.startswith("assign_tg_account_"))
+async def process_assign_tg_account(callback: CallbackQuery):
+    """Обработка назначения Telegram аккаунта"""
+    try:
+        account_id = int(callback.data.split("_")[-1])
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        from data.models import TelegramAccount
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            account = db.query(TelegramAccount).filter(TelegramAccount.id == account_id).first()
+
+            if not link or not account:
+                await callback.answer("❌ Ошибка: данные не найдены", show_alert=True)
+                return
+
+            old_account_name = link.telegram_account.name if link.telegram_account else "нет"
+
+            # Назначить новый аккаунт
+            link.telegram_account_id = account_id
+            db.commit()
+
+            await callback.message.edit_text(
+                f"✅ <b>Telegram аккаунт изменен!</b>\n\n"
+                f"<b>Ссылка:</b> {link.name}\n"
+                f"<b>Старый аккаунт:</b> {old_account_name}\n"
+                f"<b>Новый аккаунт:</b> {account.name} (+{account.phone_number})\n\n"
+                f"<i>Парсер переподключится к каналу при следующей проверке</i>",
+                parse_mode="HTML"
+            )
+            await callback.answer("✅ Аккаунт изменен")
+
+            logger.info(f"✅ Аккаунт для ссылки {link.name} изменен: {old_account_name} → {account.name}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка назначения аккаунта: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка назначения", show_alert=True)
 
 @router.callback_query(F.data == "manage_check_pools")
 async def check_staking_pools(callback: CallbackQuery):
@@ -1736,11 +1942,441 @@ async def check_staking_pools(callback: CallbackQuery):
         logger.error(f"❌ Ошибка в обработчике check_staking_pools: {e}", exc_info=True)
         await callback.message.edit_text("❌ Произошла ошибка")
 
+@router.callback_query(F.data == "manage_view_current_stakings")
+async def view_current_stakings(callback: CallbackQuery):
+    """Показать текущие стейкинги (страница 1)"""
+    logger.info(f"📋 ОТКРЫТИЕ ТЕКУЩИХ СТЕЙКИНГОВ")
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        logger.info(f"   User ID: {user_id}, Link ID: {link_id}")
+
+        if not link_id:
+            await callback.answer("❌ Ошибка: ссылка не выбрана", show_alert=True)
+            return
+
+        # Получить данные ссылки
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            if link.category != 'staking':
+                await callback.answer("❌ Эта функция доступна только для стейкинг-ссылок", show_alert=True)
+                return
+
+            exchange_name = link.name
+            exchange_filter = link.exchange or link.name  # Используем exchange для поиска в БД
+            min_apr = link.min_apr
+            page_url = link.page_url
+
+        # Получить стейкинги с дельтами
+        from services.staking_snapshot_service import StakingSnapshotService
+        snapshot_service = StakingSnapshotService()
+
+        stakings_with_deltas = snapshot_service.get_stakings_with_deltas(
+            exchange=exchange_filter,  # Ищем по exchange, а не по name
+            min_apr=min_apr
+        )
+
+        # Пагинация
+        page = 1
+        per_page = 5
+        total_pages = max(1, (len(stakings_with_deltas) + per_page - 1) // per_page)
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_stakings = stakings_with_deltas[start_idx:end_idx]
+
+        # Сохранить состояние
+        current_stakings_state[user_id] = {
+            'page': page,
+            'link_id': link_id,
+            'total_pages': total_pages
+        }
+        logger.info(f"   💾 Состояние сохранено: page={page}, link_id={link_id}, total_pages={total_pages}")
+        logger.info(f"   🔑 Текущее состояние в памяти: {current_stakings_state}")
+        logger.info(f"   📱 Всего стейкингов: {len(stakings_with_deltas)}, на странице: {len(page_stakings)}")
+
+        # Форматировать сообщение
+        from bot.notification_service import NotificationService
+        notif_service = NotificationService(bot=callback.bot)
+
+        message_text = notif_service.format_current_stakings_page(
+            stakings_with_deltas=page_stakings,
+            page=page,
+            total_pages=total_pages,
+            exchange_name=exchange_name,
+            min_apr=min_apr,
+            page_url=page_url
+        )
+
+        # Отправить с кнопками
+        keyboard = get_current_stakings_keyboard(page, total_pages)
+
+        await callback.message.edit_text(
+            message_text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+            disable_web_page_preview=True
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка просмотра стейкингов: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка загрузки данных", show_alert=True)
+
+@router.callback_query(F.data.startswith("stakings_page_"))
+async def navigate_stakings_page(callback: CallbackQuery):
+    """Навигация по страницам текущих стейкингов"""
+    try:
+        user_id = callback.from_user.id
+        action = callback.data.split("_")[2]  # "prev" или "next"
+
+        state = current_stakings_state.get(user_id)
+        if not state:
+            await callback.answer("❌ Сессия истекла. Откройте раздел заново.", show_alert=True)
+            return
+
+        current_page = state['page']
+        total_pages = state['total_pages']
+        link_id = state['link_id']
+
+        # Вычисляем новую страницу
+        if action == "prev":
+            new_page = max(1, current_page - 1)
+        else:  # next
+            new_page = min(total_pages, current_page + 1)
+
+        if new_page == current_page:
+            await callback.answer()
+            return
+
+        # Обновляем состояние
+        state['page'] = new_page
+
+        # Загружаем данные
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            exchange_name = link.name
+            exchange_filter = link.exchange or link.name  # Используем exchange для поиска в БД
+            min_apr = link.min_apr
+            page_url = link.page_url
+
+        # Получить стейкинги с дельтами
+        from services.staking_snapshot_service import StakingSnapshotService
+        snapshot_service = StakingSnapshotService()
+
+        stakings_with_deltas = snapshot_service.get_stakings_with_deltas(
+            exchange=exchange_filter,  # Ищем по exchange, а не по name
+            min_apr=min_apr
+        )
+
+        # Пагинация
+        per_page = 5
+        start_idx = (new_page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_stakings = stakings_with_deltas[start_idx:end_idx]
+
+        # Форматировать сообщение
+        from bot.notification_service import NotificationService
+        notif_service = NotificationService(bot=callback.bot)
+
+        message_text = notif_service.format_current_stakings_page(
+            stakings_with_deltas=page_stakings,
+            page=new_page,
+            total_pages=total_pages,
+            exchange_name=exchange_name,
+            min_apr=min_apr,
+            page_url=page_url
+        )
+
+        # Отправить с обновленными кнопками
+        keyboard = get_current_stakings_keyboard(new_page, total_pages)
+
+        await callback.message.edit_text(
+            message_text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+            disable_web_page_preview=True
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка навигации: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "stakings_refresh")
+async def refresh_current_stakings(callback: CallbackQuery):
+    """Обновить данные текущих стейкингов"""
+    logger.info("="*80)
+    logger.info("🔔 CALLBACK ВЫЗВАН: stakings_refresh")
+    logger.info("="*80)
+    try:
+        user_id = callback.from_user.id
+        logger.info(f"👤 User ID: {user_id}")
+
+        state = current_stakings_state.get(user_id)
+        if not state:
+            await callback.answer("❌ Сессия истекла. Откройте раздел заново.", show_alert=True)
+            return
+
+        current_page = state['page']
+        link_id = state['link_id']
+
+        # Получить данные ссылки
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            exchange_name = link.name
+            min_apr = link.min_apr
+            page_url = link.page_url
+            api_url = link.api_url or link.url
+            exchange = link.exchange
+
+        # ПРИНУДИТЕЛЬНО запускаем парсер в фоне (НЕ блокируем callback)
+        from bot.parser_service import ParserService
+        from utils.exchange_detector import detect_exchange_from_url
+        import asyncio
+
+        # Автоопределение биржи если не указана
+        if not exchange or exchange in ['Unknown', 'None', '', 'null']:
+            exchange = detect_exchange_from_url(api_url)
+            logger.info(f"🔍 Автоопределение биржи: {exchange}")
+
+        # Используем exchange для поиска стейкингов (не link.name!)
+        exchange_filter = exchange or exchange_name
+
+        # Закрываем callback
+        await callback.answer()
+
+        # Отправляем сообщение о начале обновления
+        status_msg = await callback.message.answer(
+            f"⏳ <b>Обновление данных {exchange_name}...</b>\n"
+            f"📊 Запуск парсера стейкинг-продуктов",
+            parse_mode="HTML"
+        )
+
+        # Запускаем парсер и ЖДЕМ его завершения
+        parser_service = ParserService()
+        loop = asyncio.get_event_loop()
+
+        try:
+            logger.info(f"{'='*60}")
+            logger.info(f"🔄 ОБНОВЛЕНИЕ СТЕЙКИНГОВ: {exchange_name}")
+            logger.info(f"   link_id={link_id}")
+            logger.info(f"   api_url={api_url}")
+            logger.info(f"   exchange={exchange}")
+            logger.info(f"{'='*60}")
+
+            # СИНХРОННО выполняем парсинг (ждем результата)
+            new_stakings = await loop.run_in_executor(
+                None,
+                parser_service.parse_staking_link,
+                link_id,
+                api_url,
+                exchange,
+                page_url
+            )
+
+            logger.info(f"✅ ПАРСЕР ЗАВЕРШИЛ РАБОТУ")
+            logger.info(f"   Получено новых записей: {len(new_stakings) if new_stakings else 0}")
+            logger.info(f"{'='*60}")
+
+            # Удаляем сообщение о статусе
+            await status_msg.delete()
+
+        except Exception as e:
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при обновлении {exchange_name}: {e}", exc_info=True)
+            await status_msg.edit_text(
+                f"❌ <b>Ошибка при обновлении {exchange_name}</b>\n"
+                f"Показываю данные из кэша",
+                parse_mode="HTML"
+            )
+            await asyncio.sleep(2)
+            await status_msg.delete()
+
+        # Получить стейкинги с дельтами (ПОСЛЕ парсинга)
+        from services.staking_snapshot_service import StakingSnapshotService
+        snapshot_service = StakingSnapshotService()
+
+        stakings_with_deltas = snapshot_service.get_stakings_with_deltas(
+            exchange=exchange_filter,  # Используем правильное название биржи
+            min_apr=min_apr
+        )
+
+        # Обновляем total_pages (могло измениться количество)
+        per_page = 5
+        total_pages = max(1, (len(stakings_with_deltas) + per_page - 1) // per_page)
+
+        # Проверяем, не вышли ли за пределы страниц
+        if current_page > total_pages:
+            current_page = total_pages
+
+        state['page'] = current_page
+        state['total_pages'] = total_pages
+
+        # Пагинация
+        start_idx = (current_page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_stakings = stakings_with_deltas[start_idx:end_idx]
+
+        # Форматировать сообщение
+        from bot.notification_service import NotificationService
+        notif_service = NotificationService(bot=callback.bot)
+
+        message_text = notif_service.format_current_stakings_page(
+            stakings_with_deltas=page_stakings,
+            page=current_page,
+            total_pages=total_pages,
+            exchange_name=exchange_name,
+            min_apr=min_apr,
+            page_url=page_url
+        )
+
+        # Отправляем НОВОЕ сообщение с обновленными данными
+        keyboard = get_current_stakings_keyboard(current_page, total_pages)
+
+        await callback.message.answer(
+            message_text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+            disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка обновления", show_alert=True)
+
+@router.callback_query(F.data == "stakings_configure_apr")
+async def configure_min_apr(callback: CallbackQuery):
+    """Диалог настройки минимального APR"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ошибка: ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            current_apr = link.min_apr or 0
+            exchange_name = link.name
+
+        # Клавиатура с пресетами
+        builder = InlineKeyboardBuilder()
+
+        presets = [1, 5, 10, 20, 50, 100, 200, 500]
+        for apr in presets:
+            builder.add(InlineKeyboardButton(
+                text=f"{apr}%",
+                callback_data=f"set_apr_{link_id}_{apr}"
+            ))
+
+        builder.adjust(4)  # 4 кнопки в ряд
+
+        builder.row(InlineKeyboardButton(
+            text="🗑️ Убрать фильтр",
+            callback_data=f"set_apr_{link_id}_0"
+        ))
+
+        builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="manage_view_current_stakings"))
+
+        await callback.message.edit_text(
+            f"<b>⚙️ НАСТРОЙКА ФИЛЬТРА APR</b>\n\n"
+            f"🏦 <b>Биржа:</b> {exchange_name}\n"
+            f"📌 <b>Текущий минимальный APR:</b> {current_apr}%\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>Выберите новое значение:</b>\n\n"
+            f"💡 <i>Будут показаны только стейкинги с APR ≥ выбранного значения</i>",
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка настройки APR: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data.startswith("set_apr_"))
+async def set_min_apr_preset(callback: CallbackQuery):
+    """Установка APR из пресета"""
+    try:
+        parts = callback.data.split("_")
+        link_id = int(parts[2])
+        new_apr = float(parts[3])
+
+        # Обновить БД
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            link.min_apr = new_apr if new_apr > 0 else None
+            db.commit()
+
+            exchange_name = link.name
+
+        # Вернуться к списку стейкингов
+        if new_apr > 0:
+            await callback.answer(f"✅ APR фильтр установлен: {new_apr}%")
+        else:
+            await callback.answer("✅ APR фильтр убран")
+
+        # Перезагрузить список стейкингов (вызываем view_current_stakings)
+        await view_current_stakings(callback)
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки APR: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
 @router.callback_query(F.data == "manage_delete")
 async def manage_delete(callback: CallbackQuery):
     try:
+        user_id = callback.from_user.id
+
+        # ПРОВЕРЯЕМ: может link_id уже выбран?
+        if user_id in user_selections:
+            link_id = user_selections[user_id]
+
+            # Получаем ссылку из БД
+            with get_db_session() as db:
+                link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+                if link:
+                    # СРАЗУ показываем подтверждение удаления
+                    keyboard = get_confirmation_keyboard(link_id, "delete")
+                    await callback.message.edit_text(
+                        f"⚠️ <b>Вы уверены что хотите удалить ссылку?</b>\n\n"
+                        f"<b>Название:</b> {link.name}\n"
+                        f"<b>URL:</b> <code>{link.url}</code>\n\n"
+                        f"Это действие нельзя отменить!",
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
+                    )
+                    await callback.answer()
+                    return
+
+        # Если link_id не выбран - показываем список (старое поведение)
         # Сохраняем контекст навигации
-        push_navigation(callback.from_user.id, NAV_DELETE)
+        push_navigation(user_id, NAV_DELETE)
 
         with get_db_session() as db:
             links = db.query(ApiLink).all()
@@ -1861,12 +2497,32 @@ async def process_confirmation(callback: CallbackQuery):
 @router.callback_query(F.data.in_(["cancel_action", "manage_cancel"]))
 async def process_cancel(callback: CallbackQuery):
     """Улучшенный обработчик отмены с навигацией"""
-    await callback.message.edit_text(
-        "❌ Действие отменено\n\nЧто вы хотите сделать?",
-        reply_markup=get_cancel_keyboard_with_navigation()
-    )
-    if callback.from_user.id in user_selections:
-        del user_selections[callback.from_user.id]
+    user_id = callback.from_user.id
+
+    # Очищаем выбор пользователя
+    if user_id in user_selections:
+        del user_selections[user_id]
+
+    # Проверяем текущий контекст навигации БЕЗ удаления
+    current_context = get_current_navigation(user_id)
+
+    if current_context and current_context["context"] == NAV_MANAGEMENT:
+        # Возвращаемся к выбору категории для управления ссылками
+        await callback.message.edit_text(
+            "🗂️ <b>Выберите раздел для управления:</b>",
+            reply_markup=get_category_management_menu(),
+            parse_mode="HTML"
+        )
+    else:
+        # Если нет контекста управления - возвращаемся в главное меню
+        clear_navigation(user_id)
+        await callback.message.delete()
+        await callback.message.answer(
+            "🏠 Главное меню\n\n"
+            "Используйте кнопки меню ниже для выбора действия",
+            reply_markup=get_main_menu()
+        )
+
     await callback.answer()
 
 # ОБРАБОТЧИКИ НАВИГАЦИИ
@@ -1903,10 +2559,26 @@ async def nav_back_handler(callback: CallbackQuery):
             return
         else:
             # Если контекст неизвестен, возвращаемся в главное меню
-            await callback.message.edit_text("🏠 Возврат в главное меню", reply_markup=get_cancel_keyboard_with_navigation())
+            clear_navigation(user_id)
+            await callback.message.delete()
+            await callback.message.answer(
+                "🏠 Главное меню\n\n"
+                "Используйте кнопки меню ниже для выбора действия",
+                reply_markup=get_main_menu()
+            )
+            await callback.answer()
+            return
     else:
-        # Если стек пустой, предлагаем вернуться в главное меню
-        await callback.message.edit_text("🏠 Возврат в главное меню", reply_markup=get_cancel_keyboard_with_navigation())
+        # Если стек пустой, возвращаемся в главное меню
+        clear_navigation(user_id)
+        await callback.message.delete()
+        await callback.message.answer(
+            "🏠 Главное меню\n\n"
+            "Используйте кнопки меню ниже для выбора действия",
+            reply_markup=get_main_menu()
+        )
+        await callback.answer()
+        return
 
     await callback.answer()
 
@@ -1929,17 +2601,47 @@ async def back_to_main_menu_handler(callback: CallbackQuery):
     """Возврат в главное меню"""
     clear_navigation(callback.from_user.id)
 
-    await callback.message.edit_text(
+    # Удаляем inline сообщение
+    await callback.message.delete()
+
+    # Отправляем новое сообщение с ReplyKeyboard
+    await callback.message.answer(
         "🏠 Главное меню\n\n"
-        "Используйте кнопки меню ниже для выбора действия"
+        "Используйте кнопки меню ниже для выбора действия",
+        reply_markup=get_main_menu()
     )
     await callback.answer()
 
 @router.callback_query(F.data == "manage_interval")
 async def manage_interval(callback: CallbackQuery):
     try:
+        user_id = callback.from_user.id
+
+        # ПРОВЕРЯЕМ: может link_id уже выбран?
+        if user_id in user_selections:
+            link_id = user_selections[user_id]
+
+            # Получаем ссылку из БД
+            with get_db_session() as db:
+                link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+                if link:
+                    # СРАЗУ показываем выбор интервала
+                    keyboard = get_interval_presets_keyboard(link_id)
+                    await callback.message.edit_text(
+                        f"⏰ <b>Настройка интервала для:</b>\n\n"
+                        f"<b>Название:</b> {link.name}\n"
+                        f"<b>Текущий интервал:</b> {link.check_interval} сек ({link.check_interval // 60} мин)\n\n"
+                        f"Выберите интервал проверки:",
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
+                    )
+                    await callback.answer()
+                    return
+
+        # Если link_id не выбран - показываем список (старое поведение)
         # Сохраняем контекст навигации
-        push_navigation(callback.from_user.id, NAV_INTERVAL)
+        push_navigation(user_id, NAV_INTERVAL)
 
         with get_db_session() as db:
             links = db.query(ApiLink).all()
@@ -1970,8 +2672,32 @@ async def manage_interval(callback: CallbackQuery):
         await callback.answer()
 
 @router.callback_query(F.data == "manage_rename")
-async def manage_rename(callback: CallbackQuery):
+async def manage_rename(callback: CallbackQuery, state: FSMContext):
     try:
+        user_id = callback.from_user.id
+
+        # ПРОВЕРЯЕМ: может link_id уже выбран?
+        if user_id in user_selections:
+            link_id = user_selections[user_id]
+
+            # Получаем ссылку из БД
+            with get_db_session() as db:
+                link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+                if link:
+                    # СРАЗУ запрашиваем новое имя
+                    await state.update_data(link_id=link_id, current_name=link.name)
+                    await callback.message.edit_text(
+                        f"✏️ <b>Переименование ссылки</b>\n\n"
+                        f"<b>Текущее имя:</b> {link.name}\n\n"
+                        f"Введите новое имя для ссылки:",
+                        parse_mode="HTML"
+                    )
+                    await state.set_state(RenameLinkStates.waiting_for_new_name)
+                    await callback.answer()
+                    return
+
+        # Если link_id не выбран - показываем список (старое поведение)
         with get_db_session() as db:
             links = db.query(ApiLink).all()
 
@@ -2246,10 +2972,56 @@ async def process_interval_input(message: Message, state: FSMContext):
 async def manage_pause(callback: CallbackQuery):
     try:
         user_id = callback.from_user.id
-        if user_id not in user_selections:
-            await callback.message.edit_text("❌ Данные устарели, начните заново")
+
+        # ПРОВЕРЯЕМ: может link_id уже выбран?
+        if user_id in user_selections:
+            link_id = user_selections[user_id]
+
+            # СРАЗУ останавливаем парсинг для этой ссылки
+            def pause_link_operation(session):
+                link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+                if not link:
+                    raise ValueError("Ссылка не найдена")
+                link.is_active = False
+                return link.name
+
+            link_name = atomic_operation(pause_link_operation)
+
+            # Показываем обновленный список активных ссылок для продолжения остановки
+            with get_db_session() as db:
+                active_links = db.query(ApiLink).filter(ApiLink.is_active == True).all()
+
+                if active_links:
+                    links_data = []
+                    for link in active_links:
+                        links_data.append(type('Link', (), {
+                            'id': link.id,
+                            'name': link.name,
+                            'is_active': link.is_active,
+                            'check_interval': link.check_interval,
+                            'parsing_type': link.parsing_type or 'combined'
+                        })())
+
+                    keyboard = get_toggle_parsing_keyboard(links_data, "pause")
+                    await callback.message.edit_text(
+                        f"⏸️ <b>Парсинг остановлен для '{link_name}'!</b>\n\n"
+                        f"Выберите следующую ссылку для остановки:",
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
+                    )
+                else:
+                    navigation_keyboard = get_cancel_keyboard_with_navigation()
+                    await callback.message.edit_text(
+                        f"⏸️ <b>Парсинг остановлен для '{link_name}'!</b>\n\n"
+                        f"Все ссылки остановлены.",
+                        parse_mode="HTML",
+                        reply_markup=navigation_keyboard
+                    )
+
+            await callback.answer("⏸️ Парсинг остановлен")
             return
 
+        # Если link_id не выбран - показываем список (старое поведение)
         with get_db_session() as db:
             active_links = db.query(ApiLink).filter(ApiLink.is_active == True).all()
 
@@ -2281,10 +3053,56 @@ async def manage_pause(callback: CallbackQuery):
 async def manage_resume(callback: CallbackQuery):
     try:
         user_id = callback.from_user.id
-        if user_id not in user_selections:
-            await callback.message.edit_text("❌ Данные устарели, начните заново")
+
+        # ПРОВЕРЯЕМ: может link_id уже выбран?
+        if user_id in user_selections:
+            link_id = user_selections[user_id]
+
+            # СРАЗУ возобновляем парсинг для этой ссылки
+            def resume_link_operation(session):
+                link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+                if not link:
+                    raise ValueError("Ссылка не найдена")
+                link.is_active = True
+                return link.name
+
+            link_name = atomic_operation(resume_link_operation)
+
+            # Показываем обновленный список неактивных ссылок для продолжения возобновления
+            with get_db_session() as db:
+                inactive_links = db.query(ApiLink).filter(ApiLink.is_active == False).all()
+
+                if inactive_links:
+                    links_data = []
+                    for link in inactive_links:
+                        links_data.append(type('Link', (), {
+                            'id': link.id,
+                            'name': link.name,
+                            'is_active': link.is_active,
+                            'check_interval': link.check_interval,
+                            'parsing_type': link.parsing_type or 'combined'
+                        })())
+
+                    keyboard = get_toggle_parsing_keyboard(links_data, "resume")
+                    await callback.message.edit_text(
+                        f"▶️ <b>Парсинг возобновлен для '{link_name}'!</b>\n\n"
+                        f"Выберите следующую ссылку для возобновления:",
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
+                    )
+                else:
+                    navigation_keyboard = get_cancel_keyboard_with_navigation()
+                    await callback.message.edit_text(
+                        f"▶️ <b>Парсинг возобновлен для '{link_name}'!</b>\n\n"
+                        f"Все ссылки активны.",
+                        parse_mode="HTML",
+                        reply_markup=navigation_keyboard
+                    )
+
+            await callback.answer("▶️ Парсинг возобновлен")
             return
 
+        # Если link_id не выбран - показываем список (старое поведение)
         with get_db_session() as db:
             inactive_links = db.query(ApiLink).filter(ApiLink.is_active == False).all()
 
@@ -2596,9 +3414,9 @@ async def show_parsing_configuration(callback: CallbackQuery):
         else:
             # Для остальных типов показываем API и HTML URL
             if link_data['api_url']:
-                message_parts.append(f"<b>📡 API URL:</b>\n<code>{link_data['api_url']}</code>\n\n")
+                message_parts.append(f"<b>👾 API URL:</b>\n<code>{link_data['api_url']}</code>\n\n")
             else:
-                message_parts.append(f"<b>📡 API URL:</b> <i>Не указан</i>\n\n")
+                message_parts.append(f"<b>👾 API URL:</b> <i>Не указан</i>\n\n")
 
             if link_data['html_url']:
                 message_parts.append(f"<b>🌐 HTML URL:</b>\n<code>{link_data['html_url']}</code>\n\n")
@@ -3881,10 +4699,19 @@ async def rotation_cleanup(callback: CallbackQuery):
 
 @router.callback_query(F.data.in_(["proxy_cancel", "ua_cancel", "stats_cancel", "rotation_cancel"]))
 async def process_new_systems_cancel(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("❌ Действие отменено")
+    # Очищаем выбор пользователя и состояние
     if callback.from_user.id in user_selections:
         del user_selections[callback.from_user.id]
     await state.clear()
+
+    # Возвращаемся к меню "Обход блокировок"
+    keyboard = get_bypass_keyboard()
+    await callback.message.edit_text(
+        "🛡️ <b>Обход блокировок</b>\n\n"
+        "Выберите нужную функцию:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 # =============================================================================

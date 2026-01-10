@@ -129,7 +129,7 @@ class BaseParser:
         response_time_ms = 0
 
         try:
-            self.logger.debug(f"📡 Отправка запроса...")
+            self.logger.debug(f"👾 Отправка запроса...")
             response = self.session.request(method, url, **kwargs)  # ✅ Используем session для сохранения cookies
             response_time_ms = (time.time() - start_time) * 1000
             response_code = response.status_code

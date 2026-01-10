@@ -154,15 +154,27 @@ class CryptoPromoBot:
                         # СТЕЙКИНГ: используем parse_staking_link()
                         logger.info(f"💰 Проверка стейкинга: {link_data['name']}")
 
+                        # Автоопределение биржи если exchange не указан
+                        from utils.exchange_detector import detect_exchange_from_url
+                        api_url = link_data.get('api_url') or link_data['url']
+                        exchange = link_data.get('exchange')
+                        if not exchange or exchange in ['Unknown', 'None', '']:
+                            exchange = detect_exchange_from_url(api_url)
+                            logger.info(f"🔍 Автоопределение биржи: {exchange}")
+
+                        # Получаем min_apr из настроек
+                        min_apr = link_data.get('min_apr')
+
                         # Синхронный вызов в отдельном потоке
                         loop = asyncio.get_event_loop()
                         new_stakings = await loop.run_in_executor(
                             None,
                             self.parser_service.parse_staking_link,
                             link_data['id'],
-                            link_data.get('api_url') or link_data['url'],
-                            link_data['exchange'],
-                            link_data.get('page_url')
+                            api_url,
+                            exchange,
+                            link_data.get('page_url'),
+                            min_apr
                         )
 
                         new_count = len(new_stakings) if new_stakings else 0
@@ -171,15 +183,31 @@ class CryptoPromoBot:
                             logger.info(f"🎉 Найдено {new_count} новых стейкингов")
 
                             # Отправляем уведомления о новых стейкингах
-                            for staking in new_stakings:
-                                message = self.notification_service.format_new_staking(
-                                    staking,
+                            # Проверяем, это группа пулов OKX или обычные стейкинги
+                            if new_stakings and new_stakings[0].get('_is_okx_group'):
+                                # OKX: все пулы в одном сообщении
+                                pools = new_stakings[0].get('_group_pools', new_stakings)
+                                message = self.notification_service.format_okx_project(
+                                    pools,
                                     page_url=link_data.get('page_url')
                                 )
-                                await self.notification_service.send_message(
+                                await self.bot.send_message(
                                     self.YOUR_CHAT_ID,
-                                    message
+                                    message,
+                                    parse_mode='HTML'
                                 )
+                            else:
+                                # Обычные стейкинги: по одному уведомлению
+                                for staking in new_stakings:
+                                    message = self.notification_service.format_new_staking(
+                                        staking,
+                                        page_url=link_data.get('page_url')
+                                    )
+                                    await self.bot.send_message(
+                                        self.YOUR_CHAT_ID,
+                                        message,
+                                        parse_mode='HTML'
+                                    )
                             total_new_promos += new_count
                         else:
                             logger.info(f"✅ Все стейкинги уже известны")
@@ -288,14 +316,26 @@ class CryptoPromoBot:
 
                     if category == 'staking':
                         # СТЕЙКИНГ
+                        # Автоопределение биржи если exchange не указан
+                        from utils.exchange_detector import detect_exchange_from_url
+                        api_url = link_data.get('api_url') or link_data['url']
+                        exchange = link_data.get('exchange')
+                        if not exchange or exchange in ['Unknown', 'None', '']:
+                            exchange = detect_exchange_from_url(api_url)
+                            logger.info(f"🔍 Автоопределение биржи: {exchange}")
+
+                        # Получаем min_apr из настроек
+                        min_apr = link_data.get('min_apr')
+
                         loop = asyncio.get_event_loop()
                         new_stakings = await loop.run_in_executor(
                             None,
                             self.parser_service.parse_staking_link,
                             link_data['id'],
-                            link_data.get('api_url') or link_data['url'],
-                            link_data['exchange'],
-                            link_data.get('page_url')
+                            api_url,
+                            exchange,
+                            link_data.get('page_url'),
+                            min_apr
                         )
 
                         new_count = len(new_stakings) if new_stakings else 0
@@ -318,12 +358,23 @@ class CryptoPromoBot:
 
                         # Отправляем уведомления о стейкингах
                         if new_stakings:
-                            for staking in new_stakings:
-                                message = self.notification_service.format_new_staking(
-                                    staking,
+                            # Проверяем, это группа пулов OKX или обычные стейкинги
+                            if new_stakings[0].get('_is_okx_group'):
+                                # OKX: все пулы в одном сообщении
+                                pools = new_stakings[0].get('_group_pools', new_stakings)
+                                message = self.notification_service.format_okx_project(
+                                    pools,
                                     page_url=link_data.get('page_url')
                                 )
-                                await self.notification_service.send_message(chat_id, message)
+                                await self.bot.send_message(chat_id, message, parse_mode='HTML')
+                            else:
+                                # Обычные стейкинги: по одному уведомлению
+                                for staking in new_stakings:
+                                    message = self.notification_service.format_new_staking(
+                                        staking,
+                                        page_url=link_data.get('page_url')
+                                    )
+                                    await self.bot.send_message(chat_id, message, parse_mode='HTML')
                             total_new_promos += new_count
 
                     else:
@@ -442,23 +493,70 @@ class CryptoPromoBot:
                     'id': link.id,
                     'name': link.name,
                     'url': link.url,
-                    'exchange': link.exchange or 'Unknown'
+                    'exchange': link.exchange or 'Unknown',
+                    'category': link.category or 'general',
+                    'api_url': link.api_url,
+                    'page_url': link.page_url
                 }
 
             logger.info(f"🔧 Принудительная проверка ссылки {link_data['name']} (ID: {link_id})")
 
-            # Синхронный вызов в отдельном потоке
-            loop = asyncio.get_event_loop()
-            new_promos = await loop.run_in_executor(
-                None, self.parser_service.check_for_new_promos, link_data['id'], link_data['url']
-            )
+            # Проверяем категорию ссылки
+            category = link_data.get('category', 'general')
 
-            # Отправляем уведомления
-            if new_promos:
-                await self.notification_service.send_bulk_notifications(chat_id, new_promos)
-                await self.bot.send_message(chat_id, f"✅ Найдено {len(new_promos)} новых промоакций в ссылке '{link_data['name']}'")
+            if category == 'staking':
+                # СТЕЙКИНГ: используем parse_staking_link()
+                logger.info(f"💰 Принудительная проверка стейкинга: {link_data['name']}")
+
+                # Автоопределение биржи если exchange не указан
+                from utils.exchange_detector import detect_exchange_from_url
+                api_url = link_data.get('api_url') or link_data['url']
+                exchange = link_data.get('exchange')
+                if not exchange or exchange in ['Unknown', 'None', '']:
+                    exchange = detect_exchange_from_url(api_url)
+                    logger.info(f"🔍 Автоопределение биржи: {exchange}")
+
+                # Получаем min_apr из настроек
+                min_apr = link_data.get('min_apr')
+
+                # Синхронный вызов в отдельном потоке
+                loop = asyncio.get_event_loop()
+                new_stakings = await loop.run_in_executor(
+                    None,
+                    self.parser_service.parse_staking_link,
+                    link_data['id'],
+                    api_url,
+                    exchange,
+                    link_data.get('page_url'),
+                    min_apr
+                )
+
+                # Отправляем уведомления о стейкингах
+                if new_stakings:
+                    for staking in new_stakings:
+                        message = self.notification_service.format_new_staking(
+                            staking,
+                            page_url=link_data.get('page_url')
+                        )
+                        await self.bot.send_message(chat_id, message, parse_mode='HTML')
+                    await self.bot.send_message(chat_id, f"✅ Найдено {len(new_stakings)} новых стейкингов в ссылке '{link_data['name']}'")
+                else:
+                    await self.bot.send_message(chat_id, f"ℹ️ В ссылке '{link_data['name']}' новых стейкингов не найдено")
+
             else:
-                await self.bot.send_message(chat_id, f"ℹ️ В ссылке '{link_data['name']}' новых промоакций не найдено")
+                # ОБЫЧНЫЕ ПРОМОАКЦИИ: используем check_for_new_promos()
+                # Синхронный вызов в отдельном потоке
+                loop = asyncio.get_event_loop()
+                new_promos = await loop.run_in_executor(
+                    None, self.parser_service.check_for_new_promos, link_data['id'], link_data['url']
+                )
+
+                # Отправляем уведомления
+                if new_promos:
+                    await self.notification_service.send_bulk_notifications(chat_id, new_promos)
+                    await self.bot.send_message(chat_id, f"✅ Найдено {len(new_promos)} новых промоакций в ссылке '{link_data['name']}'")
+                else:
+                    await self.bot.send_message(chat_id, f"ℹ️ В ссылке '{link_data['name']}' новых промоакций не найдено")
 
             # Обновляем время проверки в новой сессии
             with get_db_session() as db:

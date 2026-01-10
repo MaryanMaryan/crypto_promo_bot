@@ -60,7 +60,7 @@ BYBIT_COIN_MAPPING = {
     417: "TIA",
     422: "PYTH",
     451: "STRK",
-    463: "MANTA",
+    463: "ZKP",
     476: "DYM",
     480: "PIXEL",
     518: "AEVO",
@@ -86,6 +86,7 @@ BYBIT_COIN_MAPPING = {
     733: "BAN",
     744: "ACT",
     746: "PNUT",
+    758: "CRAZY",
     762: "MOVE",
     763: "ME",
     765: "VANA",
@@ -127,5 +128,5 @@ BYBIT_COIN_MAPPING = {
     1086: "SWARMS",
     1087: "NIGHT",
     1090: "ZKP",
-    1092: "AVAAI",
+    1092: "VOOI",
 }

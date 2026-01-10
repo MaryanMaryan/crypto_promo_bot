@@ -3,7 +3,12 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Optional
 from telethon import events
-from telethon.errors import FloodWaitError
+from telethon.errors import (
+    FloodWaitError,
+    PhoneNumberBannedError,
+    AuthKeyUnregisteredError,
+    UserDeactivatedBanError
+)
 from parsers.telegram_parser import TelegramParser
 from data.database import get_db_session
 from data.models import ApiLink, PromoHistory
@@ -58,7 +63,7 @@ class TelegramMonitor:
                             self.handle_new_message,
                             events.NewMessage()
                         )
-                        logger.info(f"📡 Event handler добавлен для аккаунта {client_data['account']['name']}")
+                        logger.info(f"👾 Event handler добавлен для аккаунта {client_data['account']['name']}")
 
                 connected_count = self.parser.get_connected_clients_count()
                 self.is_running = True
@@ -66,6 +71,15 @@ class TelegramMonitor:
 
                 # Ожидаем сигнала завершения
                 await self._shutdown_event.wait()
+
+            except (PhoneNumberBannedError, AuthKeyUnregisteredError, UserDeactivatedBanError) as e:
+                # НОВОЕ: Обработка блокировки аккаунта с fallback
+                logger.error(f"❌ Обнаружена блокировка аккаунта: {type(e).__name__}")
+                # Примечание: в этом контексте мы не знаем конкретный account_id
+                # Блокировка будет обработана при следующем подключении в parser.connect()
+                logger.info(f"🔄 Переподключение через {reconnect_delay} сек...")
+                await asyncio.sleep(reconnect_delay)
+                continue
 
             except ConnectionError as e:
                 logger.error(f"❌ Потеряно соединение с Telegram: {e}")
@@ -320,7 +334,7 @@ class TelegramMonitor:
         # Создаем краткую версию текста (максимум 300 символов)
         summary = message_text[:300] + "..." if len(message_text) > 300 else message_text
 
-        message = "📡 <b>Новая промоакция из Telegram</b>\n\n"
+        message = "👾 <b>Новая промоакция из Telegram</b>\n\n"
         message += f"📢 Канал: @{channel_username}\n"
 
         keywords_str = ", ".join([f"<code>{kw}</code>" for kw in matched_keywords])
