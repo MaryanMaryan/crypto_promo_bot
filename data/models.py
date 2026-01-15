@@ -40,6 +40,25 @@ class ApiLink(Base):
     telegram_keywords = Column(Text, nullable=True, default='[]')  # JSON список ключевых слов
     telegram_account_id = Column(Integer, ForeignKey('telegram_accounts.id'), nullable=True)  # Назначенный аккаунт
 
+    # НАСТРОЙКИ УМНЫХ УВЕДОМЛЕНИЙ (для category='staking'):
+    notify_new_stakings = Column(Boolean, default=True)  # Уведомлять о новых стейкингах
+    notify_apr_changes = Column(Boolean, default=True)  # Уведомлять об изменениях APR
+    notify_fill_changes = Column(Boolean, default=False)  # Уведомлять о заполненности
+    notify_min_apr_change = Column(Float, default=5.0)  # Минимальное изменение APR (абсолютное)
+    flexible_stability_hours = Column(Integer, default=6)  # Часы стабильности для Flexible
+    fixed_notify_immediately = Column(Boolean, default=True)  # Уведомлять о Fixed сразу
+    notify_only_stable_flexible = Column(Boolean, default=True)  # Только стабильные Flexible
+    notify_combined_as_fixed = Column(Boolean, default=True)  # Combined как Fixed (сразу)
+    last_notification_sent = Column(DateTime, nullable=True)  # Последнее уведомление
+
+    # ПОЛЯ ДЛЯ УМНОГО ПАРСИНГА АНОНСОВ (для category='announcement'):
+    announcement_strategy = Column(String, nullable=True)  # Стратегия парсинга: 'any_change', 'element_change', 'any_keyword', 'all_keywords', 'regex'
+    announcement_keywords = Column(Text, nullable=True, default='[]')  # JSON список ключевых слов для поиска
+    announcement_regex = Column(String, nullable=True)  # Регулярное выражение для поиска
+    announcement_css_selector = Column(String, nullable=True)  # CSS селектор для отслеживания конкретного элемента
+    announcement_last_snapshot = Column(Text, nullable=True)  # Последний снимок страницы или элемента (hash или содержимое)
+    announcement_last_check = Column(DateTime, nullable=True)  # Время последней проверки
+
     # Связи
     telegram_account = relationship("TelegramAccount", backref="assigned_links")
 
@@ -120,6 +139,34 @@ class ApiLink(Base):
         keywords = self.get_telegram_keywords()
         keywords = [k for k in keywords if k.lower() != keyword.lower()]
         self.set_telegram_keywords(keywords)
+
+    # Методы для работы с ключевыми словами анонсов
+    def get_announcement_keywords(self):
+        """Получить список ключевых слов для анонсов"""
+        try:
+            keywords = json.loads(self.announcement_keywords) if self.announcement_keywords else []
+            return keywords if keywords else []
+        except:
+            return []
+
+    def set_announcement_keywords(self, keywords):
+        """Установить список ключевых слов для анонсов"""
+        self.announcement_keywords = json.dumps(keywords) if keywords else '[]'
+
+    def add_announcement_keyword(self, keyword):
+        """Добавить ключевое слово для анонсов"""
+        keywords = self.get_announcement_keywords()
+        if keyword.lower() not in [k.lower() for k in keywords]:
+            keywords.append(keyword)
+            self.set_announcement_keywords(keywords)
+            return True
+        return False
+
+    def remove_announcement_keyword(self, keyword):
+        """Удалить ключевое слово для анонсов"""
+        keywords = self.get_announcement_keywords()
+        keywords = [k for k in keywords if k.lower() != keyword.lower()]
+        self.set_announcement_keywords(keywords)
 
 class PromoHistory(Base):
     __tablename__ = 'promo_history'
@@ -272,6 +319,7 @@ class StakingHistory(Base):
     type = Column(String, nullable=True)  # 'Flexible', 'Fixed 30d', 'MULTI_TIME'
     status = Column(String, nullable=True)  # 'Active', 'Sold Out', 'ONGOING', 'INTERESTING'
     category = Column(String, nullable=True)  # 'ACTIVITY', 'DEMAND' (Kucoin)
+    category_text = Column(String, nullable=True)  # Текстовое описание категории (Kucoin)
     term_days = Column(Integer, nullable=True)  # 14, 30, 90
 
     # Лимиты и пулы
@@ -296,6 +344,14 @@ class StakingHistory(Base):
 
     # Флаги
     notification_sent = Column(Boolean, default=False)  # Отправили ли уведомление о новом
+
+    # ПОЛЯ ДЛЯ СИСТЕМЫ УМНЫХ УВЕДОМЛЕНИЙ:
+    lock_type = Column(String, nullable=True)  # 'Fixed', 'Flexible', 'Combined'
+    stable_since = Column(DateTime, nullable=True)  # Когда APR стал стабильным
+    last_apr_change = Column(DateTime, nullable=True)  # Последнее изменение APR
+    previous_apr = Column(Float, nullable=True)  # Предыдущий APR для расчета дельт
+    notification_sent_at = Column(DateTime, nullable=True)  # Когда отправлено уведомление
+    is_notification_pending = Column(Boolean, default=False)  # Ожидает ли уведомление (для Flexible)
 
     # Уникальность по бирже и product_id
     __table_args__ = (
@@ -441,3 +497,30 @@ class TelegramMessage(Base):
     def set_extracted_links(self, links_list):
         """Установить список извлеченных ссылок"""
         self.extracted_links = json.dumps(links_list) if links_list else '[]'
+
+class UserLinkSubscription(Base):
+    """Подписки пользователей на уведомления по конкретным ссылкам"""
+    __tablename__ = 'user_link_subscriptions'
+
+    id = Column(Integer, primary_key=True)
+
+    # Связи
+    user_id = Column(Integer, nullable=False)  # Telegram user ID
+    api_link_id = Column(Integer, ForeignKey('api_links.id'), nullable=False)
+
+    # Настройки уведомлений пользователя
+    notify_new = Column(Boolean, default=True)  # Уведомлять о новых стейкингах
+    notify_apr_changes = Column(Boolean, default=True)  # Уведомлять об изменениях APR
+    notify_fill_changes = Column(Boolean, default=False)  # Уведомлять о заполненности
+
+    # Мета-информация
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Связь
+    api_link = relationship("ApiLink", backref="subscriptions")
+
+    # Уникальность: один пользователь может подписаться на ссылку только раз
+    __table_args__ = (
+        UniqueConstraint('user_id', 'api_link_id', name='_user_link_uc'),
+    )

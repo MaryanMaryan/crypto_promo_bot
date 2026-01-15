@@ -69,6 +69,7 @@ nul
 *.bak
 tmp/
 temp/
+tmpclaude-*
 
 # Playwright
 .playwright/

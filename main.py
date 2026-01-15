@@ -5,6 +5,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from bot.handlers import router
 from bot.telegram_account_handlers import router as telegram_account_router
 from data.database import init_database, get_db_session, ApiLink
+from data.models import StakingHistory, PromoHistory
+from services.stability_tracker_service import StabilityTrackerService
 from bot.parser_service import ParserService
 from bot.notification_service import NotificationService
 from bot.bot_manager import bot_manager
@@ -94,9 +96,6 @@ class CryptoPromoBot:
     def _get_promo_count_for_link(self, link_id: int) -> int:
         """Получить количество промоакций для конкретной ссылки"""
         try:
-            from data.database import get_db_session
-            from data.models import PromoHistory
-
             with get_db_session() as db:
                 count = db.query(PromoHistory).filter(PromoHistory.api_link_id == link_id).count()
                 return count
@@ -128,8 +127,10 @@ class CryptoPromoBot:
                         'last_checked': link.last_checked,
                         'exchange': link.exchange or 'Unknown',
                         'category': link.category or 'general',
+                        'parsing_type': link.parsing_type or '',  # КРИТИЧНО: Для фильтрации Telegram
                         'api_url': link.api_url,
-                        'page_url': link.page_url
+                        'page_url': link.page_url,
+                        'min_apr': link.min_apr  # КРИТИЧНО: Добавлен min_apr для фильтрации
                     })
 
             total_checked = 0
@@ -147,8 +148,14 @@ class CryptoPromoBot:
                 needs_check = time_since_last_check.total_seconds() >= link_data['check_interval']
 
                 if needs_check:
-                    # Проверяем категорию ссылки
+                    # Проверяем категорию и тип парсинга
                     category = link_data.get('category', 'general')
+                    parsing_type = link_data.get('parsing_type', '')
+
+                    # ВАЖНО: Пропускаем Telegram ссылки - они обрабатываются в реальном времени через TelegramMonitor
+                    if parsing_type == 'telegram':
+                        logger.debug(f"⏭️ Пропускаем Telegram ссылку {link_data['name']} - обрабатывается через TelegramMonitor")
+                        continue
 
                     if category == 'staking':
                         # СТЕЙКИНГ: используем parse_staking_link()
@@ -208,9 +215,96 @@ class CryptoPromoBot:
                                         message,
                                         parse_mode='HTML'
                                     )
+
+                                    # КРИТИЧНО: Отмечаем уведомление как отправленное
+                                    staking_db_id = staking.get('_staking_db_id')
+                                    if staking_db_id:
+                                        try:
+                                            with get_db_session() as db:
+                                                staking_record = db.query(StakingHistory).filter(
+                                                    StakingHistory.id == staking_db_id
+                                                ).first()
+
+                                                if staking_record:
+                                                    stability_tracker = StabilityTrackerService(db)
+                                                    stability_tracker.mark_notification_sent(staking_record)
+                                                    db.commit()
+                                                    logger.info(f"✅ Отмечено как отправленное: {staking.get('coin')} (ID: {staking_db_id})")
+                                        except Exception as e:
+                                            logger.error(f"❌ Ошибка mark_notification_sent для {staking.get('coin')}: {e}")
                             total_new_promos += new_count
                         else:
                             logger.info(f"✅ Все стейкинги уже известны")
+
+                    elif category == 'announcement':
+                        # АНОНСЫ: используем check_announcement_link()
+                        logger.info(f"📢 Проверка анонсов: {link_data['name']}")
+
+                        # Синхронный вызов в отдельном потоке
+                        loop = asyncio.get_event_loop()
+                        result = await loop.run_in_executor(
+                            None,
+                            self.parser_service.check_announcement_link,
+                            link_data['id'],
+                            link_data['url']
+                        )
+
+                        if result and result.get('changed'):
+                            logger.info(f"🎉 Обнаружены изменения в анонсах!")
+
+                            # Формируем уведомление
+                            message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
+                            message += f"📝 Ссылка: {link_data['name']}\n"
+                            message += f"🔍 Стратегия: {result.get('strategy')}\n"
+                            message += f"💬 {result.get('message')}\n\n"
+                            if result.get('matched_content'):
+                                message += f"📄 Найдено:\n{result.get('matched_content')[:500]}\n\n"
+                            
+                            # Добавляем найденные ссылки на конкретные анонсы
+                            if result.get('announcement_links'):
+                                announcement_links = result.get('announcement_links')
+                                message += f"🎯 <b>Найдено анонсов: {len(announcement_links)}</b>\n\n"
+                                for i, ann in enumerate(announcement_links[:5], 1):  # Показываем топ-5
+                                    title = ann.get('title', 'Без названия')
+                                    url = ann.get('url', '')
+                                    description = ann.get('description', '')
+                                    keywords = ', '.join(ann.get('matched_keywords', []))
+                                    
+                                    message += f"{i}. <a href=\"{url}\">{title}</a>\n"
+                                    if description:
+                                        # Отображаем первые 150 символов описания
+                                        desc_short = description[:150] + '...' if len(description) > 150 else description
+                                        message += f"   📝 {desc_short}\n"
+                                    if keywords:
+                                        message += f"   🔑 {keywords}\n"
+                                    message += "\n"
+                            else:
+                                # Ссылки не найдены - показываем информационное сообщение
+                                message += "⚠️ <i>Конкретные ссылки на анонсы не извлечены</i>\n"
+                                
+                                # Добавляем отладочную информацию, если она есть
+                                if result.get('debug_info'):
+                                    debug = result['debug_info']
+                                    message += f"<i>📊 Всего ссылок на странице: {debug.get('total_links_on_page', 0)}</i>\n"
+                                    message += f"<i>🌐 Браузерный парсинг: {'✅ включен' if debug.get('browser_parsing_enabled') else '❌ ВЫКЛЮЧЕН'}</i>\n"
+                                    message += f"<i>📄 Размер страницы: {debug.get('page_size', 0):,} байт</i>\n"
+                                    
+                                    if not debug.get('browser_parsing_enabled'):
+                                        message += "\n<b>💡 Рекомендация:</b> <i>Включите браузерный парсинг для этой ссылки</i>\n"
+                                
+                                message += "<i>Откройте страницу ниже для просмотра</i>\n\n"
+                            
+                            message += f"🔗 <a href=\"{result.get('url')}\">Открыть страницу со всеми анонсами</a>"
+
+                            # Отправляем уведомление
+                            await self.bot.send_message(
+                                self.YOUR_CHAT_ID,
+                                message,
+                                parse_mode='HTML'
+                            )
+                            total_new_promos += 1
+                        else:
+                            logger.info(f"✅ Изменений в анонсах не обнаружено")
 
                     else:
                         # ОБЫЧНЫЕ ПРОМОАКЦИИ: используем check_for_new_promos()
@@ -296,7 +390,8 @@ class CryptoPromoBot:
                         'exchange': link.exchange or 'Unknown',
                         'category': link.category or 'general',
                         'api_url': link.api_url,
-                        'page_url': link.page_url
+                        'page_url': link.page_url,
+                        'min_apr': link.min_apr  # КРИТИЧНО: Добавлен min_apr для фильтрации
                     })
 
             # Результаты проверки для таблицы
@@ -375,6 +470,93 @@ class CryptoPromoBot:
                                         page_url=link_data.get('page_url')
                                     )
                                     await self.bot.send_message(chat_id, message, parse_mode='HTML')
+
+                                    # КРИТИЧНО: Отмечаем уведомление как отправленное
+                                    staking_db_id = staking.get('_staking_db_id')
+                                    if staking_db_id:
+                                        try:
+                                            with get_db_session() as db:
+                                                staking_record = db.query(StakingHistory).filter(
+                                                    StakingHistory.id == staking_db_id
+                                                ).first()
+
+                                                if staking_record:
+                                                    stability_tracker = StabilityTrackerService(db)
+                                                    stability_tracker.mark_notification_sent(staking_record)
+                                                    db.commit()
+                                                    logger.info(f"✅ Отмечено как отправленное: {staking.get('coin')} (ID: {staking_db_id})")
+                                        except Exception as e:
+                                            logger.error(f"❌ Ошибка mark_notification_sent для {staking.get('coin')}: {e}")
+                            total_new_promos += new_count
+
+                    elif category == 'announcement':
+                        # АНОНСЫ
+                        loop = asyncio.get_event_loop()
+                        result = await loop.run_in_executor(
+                            None,
+                            self.parser_service.check_announcement_link,
+                            link_data['id'],
+                            link_data['url']
+                        )
+
+                        new_count = 1 if result and result.get('changed') else 0
+
+                        # Определяем статус
+                        if new_count > 0:
+                            status = "📢 Изменения!"
+                        else:
+                            status = "✅ Без изменений"
+
+                        # Сохраняем результат
+                        check_results.append({
+                            'name': link_data['name'],
+                            'before': '-',
+                            'after': '-',
+                            'new': new_count,
+                            'status': status
+                        })
+
+                        # Отправляем уведомление если были изменения
+                        if result and result.get('changed'):
+                            message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
+                            message += f"📝 Ссылка: {link_data['name']}\n"
+                            message += f"🔍 Стратегия: {result.get('strategy')}\n"
+                            message += f"💬 {result.get('message')}\n\n"
+                            if result.get('matched_content'):
+                                message += f"📄 Найдено:\n{result.get('matched_content')[:500]}\n\n"
+                            
+                            # Добавляем найденные ссылки на конкретные анонсы
+                            if result.get('announcement_links'):
+                                announcement_links = result.get('announcement_links')
+                                message += f"🎯 <b>Найдено анонсов: {len(announcement_links)}</b>\n\n"
+                                for i, ann in enumerate(announcement_links[:5], 1):  # Показываем топ-5
+                                    title = ann.get('title', 'Без названия')
+                                    url = ann.get('url', '')
+                                    description = ann.get('description', '')
+                                    keywords = ', '.join(ann.get('matched_keywords', []))
+                                    
+                                    message += f"{i}. <a href=\"{url}\">{title}</a>\n"
+                                    if description:
+                                        desc_short = description[:150] + '...' if len(description) > 150 else description
+                                        message += f"   📝 {desc_short}\n"
+                                    if keywords:
+                                        message += f"   🔑 {keywords}\n"
+                                    message += "\n"
+                            else:
+                                message += "⚠️ <i>Конкретные ссылки на анонсы не извлечены</i>\n"
+                                
+                                if result.get('debug_info'):
+                                    debug = result['debug_info']
+                                    message += f"<i>📊 Всего ссылок: {debug.get('total_links_on_page', 0)}</i>\n"
+                                    message += f"<i>🌐 Браузерный парсинг: {'✅' if debug.get('browser_parsing_enabled') else '❌ ВЫКЛЮЧЕН'}</i>\n"
+                                    if not debug.get('browser_parsing_enabled'):
+                                        message += "<b>💡 Включите браузерный парсинг</b>\n"
+                                
+                                message += "<i>Откройте страницу ниже для просмотра</i>\n\n"
+                            
+                            message += f"🔗 <a href=\"{result.get('url')}\">Открыть страницу со всеми анонсами</a>"
+
+                            await self.bot.send_message(chat_id, message, parse_mode='HTML')
                             total_new_promos += new_count
 
                     else:
@@ -496,7 +678,8 @@ class CryptoPromoBot:
                     'exchange': link.exchange or 'Unknown',
                     'category': link.category or 'general',
                     'api_url': link.api_url,
-                    'page_url': link.page_url
+                    'page_url': link.page_url,
+                    'min_apr': link.min_apr  # КРИТИЧНО: Добавлен min_apr для фильтрации
                 }
 
             logger.info(f"🔧 Принудительная проверка ссылки {link_data['name']} (ID: {link_id})")
@@ -539,9 +722,84 @@ class CryptoPromoBot:
                             page_url=link_data.get('page_url')
                         )
                         await self.bot.send_message(chat_id, message, parse_mode='HTML')
+
+                        # КРИТИЧНО: Отмечаем уведомление как отправленное
+                        staking_db_id = staking.get('_staking_db_id')
+                        if staking_db_id:
+                            try:
+                                with get_db_session() as db:
+                                    staking_record = db.query(StakingHistory).filter(
+                                        StakingHistory.id == staking_db_id
+                                    ).first()
+
+                                    if staking_record:
+                                        stability_tracker = StabilityTrackerService(db)
+                                        stability_tracker.mark_notification_sent(staking_record)
+                                        db.commit()
+                                        logger.info(f"✅ Отмечено как отправленное: {staking.get('coin')} (ID: {staking_db_id})")
+                            except Exception as e:
+                                logger.error(f"❌ Ошибка mark_notification_sent для {staking.get('coin')}: {e}")
                     await self.bot.send_message(chat_id, f"✅ Найдено {len(new_stakings)} новых стейкингов в ссылке '{link_data['name']}'")
                 else:
                     await self.bot.send_message(chat_id, f"ℹ️ В ссылке '{link_data['name']}' новых стейкингов не найдено")
+
+            elif category == 'announcement':
+                # АНОНСЫ: используем check_announcement_link()
+                logger.info(f"📢 Принудительная проверка анонсов: {link_data['name']}")
+
+                # Синхронный вызов в отдельном потоке
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    self.parser_service.check_announcement_link,
+                    link_data['id'],
+                    link_data['url']
+                )
+
+                # Отправляем уведомление если были изменения
+                if result and result.get('changed'):
+                    message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
+                    message += f"📝 Ссылка: {link_data['name']}\n"
+                    message += f"🔍 Стратегия: {result.get('strategy')}\n"
+                    message += f"💬 {result.get('message')}\n\n"
+                    if result.get('matched_content'):
+                        message += f"📄 Найдено:\n{result.get('matched_content')[:500]}\n\n"
+                    
+                    # Добавляем найденные ссылки на конкретные анонсы
+                    if result.get('announcement_links'):
+                        announcement_links = result.get('announcement_links')
+                        message += f"🎯 <b>Найдено анонсов: {len(announcement_links)}</b>\n\n"
+                        for i, ann in enumerate(announcement_links[:5], 1):  # Показываем топ-5
+                            title = ann.get('title', 'Без названия')
+                            url = ann.get('url', '')
+                            description = ann.get('description', '')
+                            keywords = ', '.join(ann.get('matched_keywords', []))
+                            
+                            message += f"{i}. <a href=\"{url}\">{title}</a>\n"
+                            if description:
+                                desc_short = description[:150] + '...' if len(description) > 150 else description
+                                message += f"   📝 {desc_short}\n"
+                            if keywords:
+                                message += f"   🔑 {keywords}\n"
+                            message += "\n"
+                    else:
+                        message += "⚠️ <i>Конкретные ссылки на анонсы не извлечены</i>\n"
+                        
+                        if result.get('debug_info'):
+                            debug = result['debug_info']
+                            message += f"<i>📊 Всего ссылок: {debug.get('total_links_on_page', 0)}</i>\n"
+                            message += f"<i>🌐 Браузерный парсинг: {'✅' if debug.get('browser_parsing_enabled') else '❌ ВЫКЛЮЧЕН'}</i>\n"
+                            if not debug.get('browser_parsing_enabled'):
+                                message += "<b>💡 Включите браузерный парсинг</b>\n"
+                        
+                        message += "<i>Откройте страницу ниже для просмотра</i>\n\n"
+                    
+                    message += f"🔗 <a href=\"{result.get('url')}\">Открыть страницу со всеми анонсами</a>"
+
+                    await self.bot.send_message(chat_id, message, parse_mode='HTML')
+                    await self.bot.send_message(chat_id, f"✅ Найдены изменения в ссылке '{link_data['name']}'")
+                else:
+                    await self.bot.send_message(chat_id, f"ℹ️ В ссылке '{link_data['name']}' изменений не найдено")
 
             else:
                 # ОБЫЧНЫЕ ПРОМОАКЦИИ: используем check_for_new_promos()

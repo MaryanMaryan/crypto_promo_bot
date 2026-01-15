@@ -33,7 +33,8 @@ def init_database():
             'echo': False,
             'connect_args': {
                 'check_same_thread': False,
-                'timeout': 30.0  # Timeout 30 секунд для database locked
+                'timeout': 60.0,  # Увеличиваем timeout до 60 секунд
+                'isolation_level': None  # Autocommit mode для лучшей конкурентности
             }
         }
         
@@ -49,7 +50,16 @@ def init_database():
         create_tables()
         initialize_default_settings()
         
-        logging.info("✅ База данных инициализирована")
+        # Включаем WAL режим для лучшей конкурентности
+        try:
+            with _engine.connect() as conn:
+                conn.execute(text('PRAGMA journal_mode=WAL'))
+                conn.execute(text('PRAGMA busy_timeout=60000'))  # 60 секунд
+                conn.commit()
+            logging.info("✅ База данных инициализирована (WAL режим включен)")
+        except Exception as e:
+            logging.warning(f"⚠️ Не удалось включить WAL режим: {e}")
+            logging.info("✅ База данных инициализирована")
 
 @contextmanager
 def get_db_session():
@@ -104,18 +114,36 @@ def transaction_session():
     retry_count = 0
     
     while retry_count < max_retries:
-        with get_db_session() as session:
-            try:
-                yield session
-                return
-                
-            except Exception as e:
+        session = None
+        try:
+            if _SessionFactory is None:
+                init_database()
+            
+            session = _SessionFactory()
+            yield session
+            session.commit()
+            return
+            
+        except Exception as e:
+            if session:
+                session.rollback()  # ВАЖНО: делаем rollback при ошибке
+            
+            # Проверяем, является ли ошибка "database is locked"
+            if "database is locked" in str(e).lower() and retry_count < max_retries - 1:
                 retry_count += 1
                 logging.warning(f"⚠️ Повтор транзакции {retry_count}/{max_retries}: {e}")
+                import time
+                time.sleep(0.5 * retry_count)  # Экспоненциальная задержка
+                continue
+            else:
+                # Для других ошибок или когда retry исчерпаны
+                if retry_count > 0:
+                    logging.error(f"❌ Транзакция провалена после {retry_count} попыток")
+                raise
                 
-                if retry_count == max_retries:
-                    logging.error(f"❌ Транзакция провалена после {max_retries} попыток")
-                    raise
+        finally:
+            if session:
+                session.close()
 
 def atomic_operation(operation_func, *args, **kwargs):
     """Выполнение операции в транзакции с автоматическим retry"""
@@ -139,8 +167,37 @@ class DatabaseMigration:
             self._migration_006_add_staking_fields,
             self._migration_007_add_telegram_tables,
             self._migration_008_add_telegram_accounts,
-            self._migration_009_add_staking_snapshots
+            self._migration_009_add_staking_snapshots,
+            self._migration_010_add_announcement_fields
         ])
+
+    def _migration_010_add_announcement_fields(self, session):
+        """Добавление полей для умного парсинга анонсов (announcement_*)"""
+        try:
+            result = session.execute(text("PRAGMA table_info(api_links)"))
+            columns = [row[1] for row in result.fetchall()]
+            fields_to_add = {
+                'announcement_strategy': 'TEXT',
+                'announcement_keywords': "TEXT DEFAULT '[]'",
+                'announcement_regex': 'TEXT',
+                'announcement_css_selector': 'TEXT',
+                'announcement_last_snapshot': 'TEXT',
+                'announcement_last_check': 'DATETIME'
+            }
+            added_count = 0
+            for field_name, field_type in fields_to_add.items():
+                if field_name not in columns:
+                    session.execute(text(f"ALTER TABLE api_links ADD COLUMN {field_name} {field_type}"))
+                    logging.info(f"✅ Добавлен столбец {field_name}")
+                    added_count += 1
+            if added_count > 0:
+                session.commit()
+                logging.info(f"✅ Миграция 010: Добавлено {added_count} полей для анонсов")
+            else:
+                logging.info("ℹ️ Все поля анонсов уже существуют")
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 010: {e}")
+            raise
     
     def _migration_001_initial(self, session):
         """Первоначальная миграция"""

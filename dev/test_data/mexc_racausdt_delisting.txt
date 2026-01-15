@@ -1,0 +1,165 @@
+Exchange
+DEX
++
+Buy Crypto
+Markets
+Spot
+Futures
+XAUT
+Earn
+Event Center
+More
+Zero-Fee Gala
+DASH
+ZEC
+SUI
+我踏马来了
+IP
+SILVER
+XAUT
+DASH
+ZEC
+SUI
+我踏马来了
+IP
+SILVER
+XAUT
+DASH
+Log In
+Sign Up
+Announcement Center/
+All
+All
+MX Exclusives
+Latest Events
+New Listings
+Reward Distribution
+Delistings
+VIP Exclusive
+MEXC News
+MEXC Digest
+Maintenance Updates
+API Updates
+Trading Updates
+Product Updates
+Help & FAQ
+Temporary Suspension of Services for Existing Users in India
+about 23 hours ago
+
+As part of our registration process with the Financial Intelligence Unit—India (FIU-IND), MEXC will temporarily suspend services for users in India starting February 28, 2026.From the effective date, access to MEXC products and services from India will be restricted.Event Participation From January 15, 2026, users accessing from India addresses will no longer be eligible to join or continue participating in platform events. However, rewards earned before January 15, 2026 will still be honored, even if the distribution date falls after this deadline.Impact on Products and Services• All account features will remain fully accessible until February 28, 2026. • From February 28, 2026, all trading and deposit services will be suspended.• All user assets remain safe and fully protected at all times.A separate announcement will be released before February 28, 2026, outlining the specific treatment of all affected products and services, along with relevant timelines.Recommended ActionsBefore February 28, 2026, we strongly recommend that you:• Manage or close open positions• Withdraw your assets to avoid inconvenience• Ensure all pending transactions are completedThis temporary suspension has been implemented to ensure full compliance with regulatory requirements as we complete our registration with FIU-IND. Updates will be communicated through official channels. We appreciate your patience and understanding during this transition.
+
+Temporary Suspension of New User Registrations in India
+about 23 hours ago
+
+As part of our ongoing regulatory alignment and registration process with the Financial Intelligence Unit—India (FIU-IND), MEXC will temporarily pause new user registrations from India starting January 15, 2026.This update only affects new account sign-ups. All existing user funds and account security remain unaffected.Thank you for your understanding and interest in MEXC.
+
+Unlock Your 2025 Cryptoverse Voyage: Invite & Share $55,000 in Rewards
+Dec 30, 2025
+
+As 2025 winds down, revisit your year in crypto with MEXC—every bull run you caught, every breakout, every hard‑won gain. Enter your 2025 Cryptoverse Voyage to unlock a finale surprise and claim your share of $55,000.Recap Your Voyage🎁 Dual Arenas: Fleet & SoloEnter your 2025 Cryptoverse Voyage, unlock your annual fleet, and earn points by completing sharing and referral tasks. Compete solo or with your fleet to share $55,000!- Fleet Leaderboard: Rankings are based on the average points of all current members. All members of the top-ranked fleet will share $50,000.- Solo Leaderboard: Users who rank in the top 100 will share an additional $5,000 prize pool.Note: The total points for each fleet are the sum of all individual points within that fleet. Points will be calculated and reviewed after the event ends.✅ How It Works1. Share your 2025 Cryptoverse Voyage: +10 points2. Invite 1 qualified referee*: +20 points (up to 99 times)3. For each qualified referee's Futures trading volume of $10,000 or more: +10 points (up to 99 times)• A qualified referee is a user who signs up for a MEXC account through your referral code or link during the event, accumulates a net deposit of at least $100 within 7 days of sign-up, and reaches at least $100 in Futures trading volume.🔔 Tips: Search "Annual Recap" on MEXC to easily return to the 2025 Cryptoverse Voyage page.Terms and Conditions• All data is for reference only. The statistical period runs from Dec 31, 2024, 16:00:00 (UTC) to Dec 28, 2025, 15:59:59 (UTC).• Only main accounts are eligible to access the annual report.• Fleet Leaderboard: During the event period, share your annual report poster and invite friends to sign up on MEXC, make a net deposit of $100, and trade $100 on Futures to qualify for a share of a 55,000 USDT prize pool. Please refer to the end of the annual report for full rules.• All participating users must strictly abide by the MEXC Terms of Service. MEXC reserves the right to disqualify any participants who engage in dishonest or abusive activities during the event, including bulk-account registrations to farm additional bonuses and any other activities in connection with unlawful, fraudulent or harmful purposes.• MEXC reserves the right to modify the terms of this event without prior notice.• MEXC reserves the right of final interpretation for this event. If you have any questions, please contact the Customer Service team.• This event is sponsored by MEXC. Apple Inc. is not a sponsor of, nor involved in, this event in any way.
+
+MEXC P2P Guardian Program: Report Suspicious Activities and Receive Rewards
+Dec 26, 2025
+#Fiat/P2P
+
+Maintaining a safe and reliable trading environment is a core priority of the MEXC P2P platform. To strengthen platform security and protect users from fraudulent activity, MEXC is launching the P2P Guardian Program, designed to identify malicious actors through verified user reports.As part of this initiative, we invite P2P users to report suspected scammers or fraudulent users they encounter on the platform. Verified reports that lead to enforcement action will help protect the broader MEXC community and maintain a safer trading environment for all users.Reward Details• Reward: A mystery reward will be granted for each successfully verified report.• Successful Identification: A report is considered successful only after the MEXC P2P team confirms fraudulent behavior and takes appropriate action, including but not limited to account suspension or permanent ban.How to Report and Claim RewardsTo submit a report, please join the official Telegram group below and follow the instructions provided:• Group Name: MEXC P2P Guardian Group• Official Link: https://t.me/+uKCOzfVQwuQxOTQ1 When submitting a report, please include all relevant supporting materials, such as:• P2P order screenshots• Chat history• Transaction or payment records• The reported user's MEXC UID Incomplete submissions may not be eligible for review.Important Security ReminderPlease note the following to avoid potential fraud:• MEXC customer service will never request users to complete or cancel P2P orders.• MEXC does not verify bank transfers. Buyers and sellers are solely responsible for confirming the receipt or refund of funds in their own bank accounts or fiat wallets.• Users should only complete or cancel P2P orders after personally confirming that funds have been received or refunded.• Do not trust emails, Telegram accounts, or individuals impersonating MEXC customer support. • MEXC will never ask users to share their email address, phone number, or verification codes. Thank you for supporting a safer trading environment on the MEXC P2P platform.Reward Distribution and Program Rules• Rewards for confirmed cases will be distributed every Monday.• If multiple users report the same case, rewards will be granted on a first-come, first-served basis. Only one reward will be issued per confirmed case.• This program is open only to eligible users as determined by MEXC.• Any abuse, manipulation, or misuse of the program will result in disqualification, and related rewards will be revoked.• The program takes effect on December 12, 2025, at 12:00 UTC.• MEXC reserves the right of final interpretation for this program.
+
+Adjustment to GMTUSDT Funding Rate Settlement Frequency [Jan 14, 2026, 16:10 (UTC)]
+about 9 hours ago
+#Futures
+
+Effective from on Jan 14, 2026, 16:10 (UTC), MEXC has adjusted the funding rate settlement frequency for the GMTUSDT Perpetual Futures pair. The new settlement frequency is now once every 4 hours. Details are as follows: Time (UTC)Max. Funding RateJan 14, 2026, 20:00 (UTC)+3.00% / -3.00%Jan 15, 2026, 00:00 (UTC)+3.00% / -3.00%Jan 15, 2026, 04:00 (UTC)+3.00% / -3.00%Jan 15, 2026, 08:00 (UTC)+3.00% / -3.00%……+3.00% / -3.00%For the latest funding rate details, please visit:Web: Navigate to Information → Funding Rate HistoryApp: Go to Futures → ... → Futures InfoNotes:The settlement frequency mentioned above may be further adjusted. Please stay tuned to the latest announcements.Users are advised to refer to the updated funding rate before placing orders. For existing orders, please adjust your position and margin accordingly to prevent potential asset loss.Thank you for your continued support.
+
+Maximum Leverage Adjusted for BERAUSDC Futures [Jan 14, 2026, 14:25 (UTC)]
+about 10 hours ago
+#Futures
+
+To enhance your trading experience, MEXC Futures has reduced the maximum leverage for the BERAUSDC Futures trading pair on Jan 14, 2026, 14:25 (UTC). Maximum Leverage Multiplier Trading TypeBefore AdjustmentAfter AdjustmentFutures Trade125x 50x Please promptly adjust your positions and unfilled orders to avoid unnecessary losses. The closing PNL is related to the closing quantity, the average position price, and the closing price. Adjusting the leverage multiplier will not affect your closing PNL. Important Notes• Position Adjustments: After the adjustment, you can close positions that exceed the new maximum leverage limit, but can no longer increase them. To resume normal trading, please adjust your positions to comply with the new supported leverage range. • Limit Orders: Your existing limit orders that exceed the new maximum leverage limit can still be filled, but you cannot place new ones. We recommend canceling these orders and adjusting them to meet the new leverage range to continue trading. • Trigger and Trailing Stop Orders: Any trigger or trailing stop orders that exceed the new maximum leverage limit will not execute when triggered. We recommend canceling these orders and setting new ones that comply with the required leverage range. • Copy Trades: If you have set a fixed leverage multiplier for copy trades that exceeds the new maximum limit, your orders will not be filled. Please manually modify the leverage multiplier in Copy Trade settings to comply with the new supported leverage range.Thank you for trading on MEXC Futures!
+
+Maximum Leverage Adjusted for BERAUSDT Futures [Jan 14, 2026, 14:25 (UTC)]
+about 10 hours ago
+#Futures
+
+To enhance your trading experience, MEXC Futures has reduced the maximum leverage for the BERAUSDT Futures trading pair on Jan 14, 2026, 14:25 (UTC). Maximum Leverage Multiplier Trading TypeBefore AdjustmentAfter AdjustmentFutures Trade100x 50x Please promptly adjust your positions and unfilled orders to avoid unnecessary losses. The closing PNL is related to the closing quantity, the average position price, and the closing price. Adjusting the leverage multiplier will not affect your closing PNL. Important Notes• Position Adjustments: After the adjustment, you can close positions that exceed the new maximum leverage limit, but can no longer increase them. To resume normal trading, please adjust your positions to comply with the new supported leverage range. • Limit Orders: Your existing limit orders that exceed the new maximum leverage limit can still be filled, but you cannot place new ones. We recommend canceling these orders and adjusting them to meet the new leverage range to continue trading. • Trigger and Trailing Stop Orders: Any trigger or trailing stop orders that exceed the new maximum leverage limit will not execute when triggered. We recommend canceling these orders and setting new ones that comply with the required leverage range. • Copy Trades: If you have set a fixed leverage multiplier for copy trades that exceeds the new maximum limit, your orders will not be filled. Please manually modify the leverage multiplier in Copy Trade settings to comply with the new supported leverage range.Thank you for trading on MEXC Futures!
+
+Maximum Leverage Adjusted for BLURUSDT Futures [Jan 14, 2026, 14:25 (UTC)]
+about 11 hours ago
+#Grid Trading
+#Copy Trade
+#Futures
+
+To enhance your trading experience, MEXC Futures has reduced the maximum leverage for the BLURUSDT Futures trading pair on Jan 14, 2026, 14:25 (UTC). Maximum Leverage Multiplier Trading TypeBefore AdjustmentAfter AdjustmentFutures Trade125x 20x Copy Trade75x 20x Futures Grid Bot50x20xPlease promptly adjust your positions and unfilled orders to avoid potential losses. The closing PNL is related to the closing quantity, the average position price, and the closing price. Adjusting the leverage multiplier will not affect your closing PNL.Important NotesPosition Adjustments: After the adjustment, you can close positions that exceed the new maximum leverage limit, but can no longer increase them. To resume normal trading, please adjust your positions to comply with the new supported leverage range. Limit Orders: Your existing limit orders that exceed the new maximum leverage limit can still be filled, but you cannot place new ones. We recommend canceling these orders and adjusting them to meet the new leverage range to continue trading. Trigger and Trailing Stop Orders: Any trigger or trailing stop orders that exceed the new maximum leverage limit will not execute when triggered. We recommend canceling these orders and setting new ones that comply with the required leverage range. Copy Trades: If you have set a fixed leverage multiplier for copy trades that exceeds the new maximum limit, your orders will not be filled. Please manually modify the leverage multiplier in Copy Trade settings to comply with the new supported leverage range. Grid Trading: If your active trading bot is set with a fixed leverage that exceeds the new maximum limit, it will no longer be able to place new orders. Please stop the bot manually.Thank you for trading on MEXC Futures!
+
+Important Update: Futures Trading Adjustments for Users in Select Regions
+about 12 hours ago
+#Futures
+
+As part of our ongoing commitment to maintaining a sustainable trading environment and adapting to evolving market conditions, we are making necessary adjustments to our Futures trading offerings in Russia, Ukraine, Armenia, and Belarus.Key UpdatesEffective Jan 16, 2026, at 04:00 UTC, users in Russia, Ukraine, Armenia, and Belarus will no longer be able to open new positions in select Futures trading pairs.Please note that:New positions cannot be opened using limit or market orders after the adjustment takes effect.Pending trigger and trailing stop orders set to open new positions will not be triggered.These changes apply only to the specific trading pairs listed below.Affected Trading PairsREPPOUSDTLITUSDTZKPUSDTBROCCOLIUSDTYEEUSDTSENTUSDTDOGUSDTRAVEUSDTELXUSDTRUSSELLUSDTMAGMAUSDTSENTISUSDTDGBUSDTWETUSDTVOOIUSDTA2ZUSDTCRCLUSDTADBEUSDTPLTRUSDTOBTUSDTBESTUSDTAVGOUSDTMCDUSDTWhat Remains UnaffectedUsers can still:Fill limit orders placed before 04:00 UTC on Jan 16, 2026 as usual.Manage and close existing positions in affected trading pairs, including closing through limit, market, take-profit/stop-loss (TP/SL), trigger, and trailing stop orders.Adjust leverage and margin, including using the Auto Margin Addition function.Trade all other Futures pairs.Use copy trading and demo trading.We will provide updates through subsequent announcements when these adjustments are revised. Thank you for your understanding and continued support.
+
+Delisting of RACAUSDT Perpetual Futures Pair [Jan 21, 2026, 07:00 (UTC)]
+about 12 hours ago
+#Futures
+
+MEXC will be delisting the RACAUSDT Perpetual Futures pair on Jan 21, 2026, 07:00 (UTC). Please note: MEXC will close all positions for the abovementioned trading pair at the fair price at the time of delisting.All open orders of the abovementioned trading pair will be canceled upon delisting.Users are encouraged to search the affected trading pair using the search bar and close any open positions before delisting to minimize risk and prevent potential loss.The abovementioned trading pair will also be simultaneously delisted from Demo Trading, if applicable.The abovementioned trading pair will also be simultaneously delisted from Futures Grid Trading, if applicable. Please disable the grid bot for the affected pair in time and consider trading other pairs. Thank you for your continued support.
+
+1
+2
+3
+4
+5
+•••
+2421
+Community
+Download App
+Scan to Download App
+About
+About MEXC
+Why MEXC
+Proof of Trust
+MEXC Verify
+MEXC Transparency Hub
+MEXC Community
+MEXC Event Map
+MEXC Ventures
+MEXC Foundation
+Contact Us
+Products
+MEXC 0 Fees
+Spot
+Futures
+DEX+
+Buy Crypto
+P2P
+Convert
+Pre-Market
+Copy Trade
+Demo Trading
+Earn
+Loans
+Trading Fees
+MEXC AI
+Partnerships
+Affiliate Program
+Referral Program
+P2P Merchant Program
+Listing Application
+Institutional Services
+API Services
+Partner Links
+Resources
+Help Center
+Get Help
+Announcement Center
+Learn
+Blog & Updates
+All Crypto Prices
+How to Buy
+Crypto Knowledge Hub
+Crypto Converter
+Sitemap
+Legal & Compliance
+User Agreement
+Privacy Policy
+Risk Disclosure
+Report Abnormal Funds
+Judicial Assistance

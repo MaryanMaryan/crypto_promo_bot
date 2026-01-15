@@ -118,6 +118,16 @@ class NotificationService:
             # Название
             if promo.get('title'):
                 message += f"<b>📌 Название:</b> {self.escape_html(promo['title'])}\n"
+            
+            # НОВОЕ: Найденные ключевые слова (для Telegram парсера)
+            # Определяем Telegram сообщения по promo_id (начинается с 'telegram_')
+            is_telegram_message = promo.get('promo_id', '').startswith('telegram_')
+            
+            if is_telegram_message and promo.get('total_prize_pool'):
+                # Для Telegram сообщений total_prize_pool содержит ключевые слова
+                keywords = str(promo['total_prize_pool']).split(', ')
+                keywords_formatted = ', '.join([f"<code>{self.escape_html(kw)}</code>" for kw in keywords])
+                message += f"<b>🔑 Найденные ключевые слова:</b> {keywords_formatted}\n"
 
             # Описание (обрезаем если слишком длинное)
             if promo.get('description'):
@@ -126,8 +136,8 @@ class NotificationService:
                     desc = desc[:200] + "..."
                 message += f"<b>📝 Описание:</b> {self.escape_html(desc)}\n"
 
-            # Призовой фонд с парсингом токенов и ценами
-            if promo.get('total_prize_pool'):
+            # Призовой фонд с парсингом токенов и ценами (ТОЛЬКО если это НЕ Telegram сообщение)
+            if promo.get('total_prize_pool') and not is_telegram_message:
                 prize_pool_text = str(promo['total_prize_pool'])
                 tokens = self.parse_token_amounts(prize_pool_text)
 
@@ -546,13 +556,18 @@ class NotificationService:
 
             # Заполненность (если доступна)
             if fill_percentage is not None:
-                message += f"\n<b>📈 Заполненность:</b> {fill_percentage:.2f}%\n"
-
-                # Прогресс бар
-                filled_blocks = int(fill_percentage / 5)  # 20 блоков = 100%
+                # Прогресс бар (20 блоков = 100%)
+                filled_blocks = int(fill_percentage / 5)
                 empty_blocks = 20 - filled_blocks
                 progress_bar = "▓" * filled_blocks + "░" * empty_blocks
-                message += f"{progress_bar}\n"
+
+                # Динамика изменений (если доступна)
+                fill_change = staking.get('_fill_change')  # Изменение за последний час
+                if fill_change is not None and fill_change != 0:
+                    change_sign = "↑" if fill_change > 0 else "↓"
+                    message += f"\n<b>📈 Заполненность:</b>\n{progress_bar} {fill_percentage:.2f}% ({change_sign} {abs(fill_change):.2f}% за час)\n"
+                else:
+                    message += f"\n<b>📈 Заполненность:</b>\n{progress_bar} {fill_percentage:.2f}%\n"
 
             # Лимиты
             if user_limit_tokens or user_limit_usd or total_places:
@@ -582,9 +597,37 @@ class NotificationService:
                 if end_time:
                     message += f"<b>🕐 Конец:</b> {self.escape_html(end_time)}\n"
 
+            # УМНЫЕ УВЕДОМЛЕНИЯ: Информация о типе уведомления
+            notification_type = staking.get('_notification_type', 'new')
+            lock_type = staking.get('_lock_type', staking.get('lock_type', 'Unknown'))
+            notification_reason = staking.get('_notification_reason', '')
+
+            if notification_type == 'new':
+                # Новый стейкинг
+                if lock_type == 'Fixed':
+                    message += f"\n\n⏱️ <b>Уведомление:</b> Новый Fixed стейкинг (отправлено сразу)"
+                elif lock_type == 'Combined':
+                    message += f"\n\n⏱️ <b>Уведомление:</b> Новый Combined стейкинг (содержит Fixed+Flexible, отправлено сразу)"
+                elif lock_type == 'Flexible':
+                    # Flexible стейкинг стабилизировался
+                    stability_hours = staking.get('_stability_hours', 6)
+                    message += f"\n\n⏱️ <b>Уведомление:</b> Flexible стейкинг стабилизирован ({stability_hours} часов без изменений APR)"
+            elif notification_type == 'apr_change':
+                # Изменение APR
+                old_apr = staking.get('_previous_apr', 0)
+                new_apr = staking.get('apr', 0)
+                change = new_apr - old_apr
+                change_percent = (change / old_apr * 100) if old_apr > 0 else 0
+
+                message += f"\n\n📈 <b>ИЗМЕНЕНИЕ APR!</b>\n"
+                message += f"📊 <b>Старый APR:</b> {old_apr}%\n"
+                message += f"📊 <b>Новый APR:</b> {new_apr}%\n"
+                message += f"🔺 <b>Изменение:</b> {'+' if change > 0 else ''}{change:.1f}% (↑ {abs(change_percent):.1f}%)\n\n"
+                message += f"⏱️ <b>Уведомление:</b> Изменение APR ≥ {staking.get('_apr_threshold', 5)}% ({lock_type} стейкинг)"
+
             # Ссылка
             if page_url:
-                message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+                message += f"\n\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
 
             # ВАЖНО: Telegram имеет лимит 4096 символов
             # Если сообщение слишком длинное, обрезаем его безопасно на границе строки
@@ -773,20 +816,32 @@ class NotificationService:
                 coin = self.escape_html(staking['coin'] or 'N/A')
                 apr = staking['apr'] or 0
                 term_days = staking.get('term_days', 0)
+                product_type = staking.get('type', '')
 
-                # Форматируем срок
-                if term_days == 0:
-                    term_text = "Flexible"
-                elif term_days == 1:
-                    term_text = "1 день"
-                elif term_days < 5:
-                    term_text = f"{term_days} дня"
-                elif term_days < 21:
-                    term_text = f"{term_days} дней"
+                # Проверяем, это объединенный продукт Fixed/Flexible?
+                if product_type == 'Fixed/Flexible':
+                    # Для объединенного продукта показываем оба APR
+                    category_text = staking.get('category_text', '')
+                    if category_text:
+                        # category_text уже содержит "Fixed: X% | Flexible: Y%"
+                        message += f"💰 <b>{coin}</b> | {apr:.1f}% APR max\n"
+                        message += f"   📊 {self.escape_html(category_text)}\n"
+                    else:
+                        message += f"💰 <b>{coin}</b> | {apr:.1f}% APR | {product_type}\n"
                 else:
-                    term_text = f"{term_days} дней"
+                    # Обычный продукт - форматируем срок
+                    if term_days == 0:
+                        term_text = "Flexible"
+                    elif term_days == 1:
+                        term_text = "1 день"
+                    elif term_days < 5:
+                        term_text = f"{term_days} дня"
+                    elif term_days < 21:
+                        term_text = f"{term_days} дней"
+                    else:
+                        term_text = f"{term_days} дней"
 
-                message += f"💰 <b>{coin}</b> | {apr:.1f}% APR | {term_text}\n"
+                    message += f"💰 <b>{coin}</b> | {apr:.1f}% APR | {term_text}\n"
 
                 # СТАТУС
                 status = staking.get('status')
@@ -795,9 +850,43 @@ class NotificationService:
                         status_emoji = "✅"
                     elif status.lower() in ['sold out', 'soldout']:
                         status_emoji = "🔴"
+                    elif status.lower() == 'interesting':
+                        status_emoji = "⭐"
                     else:
                         status_emoji = "⚪"
                     message += f"📊 <b>Статус:</b> {status_emoji} {self.escape_html(status)}\n"
+
+                # КАТЕГОРИЯ И ТИП (для KuCoin и других бирж)
+                category = staking.get('category')
+                product_type_raw = staking.get('type')
+                category_text = staking.get('category_text')
+
+                # Формируем текст категории
+                if category or category_text or product_type_raw:
+                    category_parts = []
+
+                    # Категория (ACTIVITY = Акция, DEMAND = Сбережения)
+                    if category:
+                        if category == 'ACTIVITY':
+                            category_parts.append('🎯 Акция')
+                        elif category == 'DEMAND':
+                            category_parts.append('💰 Сбережения')
+                        elif category_text:
+                            category_parts.append(f'📂 {self.escape_html(category_text)}')
+                        else:
+                            category_parts.append(f'📂 {self.escape_html(category)}')
+
+                    # Тип продукта (MULTI_TIME = Срочный, SAVING = Гибкий)
+                    if product_type_raw:
+                        if product_type_raw == 'MULTI_TIME':
+                            category_parts.append('⏱ Срочный')
+                        elif product_type_raw == 'SAVING':
+                            category_parts.append('🔄 Гибкий')
+                        else:
+                            category_parts.append(f'🔖 {self.escape_html(product_type_raw)}')
+
+                    if category_parts:
+                        message += f"🏷 <b>Тип:</b> {' | '.join(category_parts)}\n"
 
                 # ВИЗУАЛЬНАЯ ШКАЛА ЗАПОЛНЕННОСТИ
                 fill_percentage = staking.get('fill_percentage')
@@ -970,3 +1059,199 @@ class NotificationService:
 
         except Exception as e:
             logger.error(f"❌ Ошибка отправки уведомления о блокировке: {e}")
+
+    def format_new_staking_notification(
+        self,
+        staking: Dict[str, Any],
+        lock_type: str = 'Unknown',
+        page_url: str = None
+    ) -> str:
+        """
+        Форматирование умного уведомления о новом стейкинге
+
+        Args:
+            staking: Данные стейкинга из парсера
+            lock_type: Тип блокировки ('Fixed', 'Flexible', 'Combined', 'Unknown')
+            page_url: Ссылка на страницу стейкингов
+
+        Returns:
+            Отформатированное HTML сообщение
+        """
+        try:
+            # Базовая информация
+            coin = self.escape_html(staking.get('coin', 'N/A'))
+            reward_coin = self.escape_html(staking.get('reward_coin')) if staking.get('reward_coin') else None
+            exchange = self.escape_html(staking.get('exchange', 'N/A'))
+            apr = staking.get('apr', 0)
+            term_days = staking.get('term_days', 0)
+            term_type = self.escape_html(staking.get('type', 'N/A'))
+            token_price = staking.get('token_price_usd')
+            status = self.escape_html(staking.get('status', 'N/A'))
+
+            # Заголовок в зависимости от типа
+            if lock_type == 'Fixed':
+                message = "🔒 <b>НОВЫЙ FIXED СТЕЙКИНГ!</b>\n\n"
+            elif lock_type == 'Flexible':
+                message = "🌊 <b>НОВЫЙ FLEXIBLE СТЕЙКИНГ</b> (стабилизирован)\n\n"
+            elif lock_type == 'Combined':
+                message = "💎 <b>НОВЫЙ COMBINED СТЕЙКИНГ!</b>\n\n"
+            else:
+                message = "🆕 <b>НОВЫЙ СТЕЙКИНГ!</b>\n\n"
+
+            # Основная информация
+            if reward_coin and reward_coin != coin:
+                message += f"<b>💎 Стейкай:</b> {coin}\n"
+                message += f"<b>🎁 Награда:</b> {reward_coin}\n"
+            else:
+                message += f"<b>💎 Монета:</b> {coin}\n"
+
+            message += f"<b>🏦 Биржа:</b> {exchange}\n"
+            message += f"<b>💰 APR:</b> {apr}%\n"
+
+            # Период
+            if term_days == 0:
+                message += f"<b>📅 Период:</b> Flexible (бессрочно)\n"
+            else:
+                message += f"<b>📅 Период:</b> {term_days} дней\n"
+
+            # Тип
+            if term_type:
+                message += f"<b>🔧 Тип:</b> {term_type}\n"
+            if status:
+                message += f"<b>📊 Статус:</b> {status}\n"
+
+            # Заполненность (если есть)
+            fill_percentage = staking.get('fill_percentage')
+            if fill_percentage is not None:
+                message += f"\n<b>📊 Заполненность:</b> "
+                if fill_percentage < 30:
+                    message += "🟢 "
+                elif fill_percentage < 70:
+                    message += "🟡 "
+                else:
+                    message += "🔴 "
+                message += f"{fill_percentage:.1f}%\n"
+
+            # Лимиты
+            user_limit_tokens = staking.get('user_limit_tokens')
+            user_limit_usd = staking.get('user_limit_usd')
+
+            if user_limit_tokens:
+                message += f"\n<b>👤 Лимит на пользователя:</b> {user_limit_tokens:,.2f} {coin}"
+                if user_limit_usd:
+                    message += f" (~${user_limit_usd:,.2f})"
+                message += "\n"
+
+            # Цена токена
+            if token_price:
+                message += f"<b>💵 Цена токена:</b> ${token_price:,.4f}\n"
+
+            # Даты
+            start_time = staking.get('start_time')
+            end_time = staking.get('end_time')
+
+            if start_time or end_time:
+                message += "\n"
+            if start_time:
+                message += f"<b>⏰ Старт:</b> {self.escape_html(str(start_time))}\n"
+            if end_time:
+                message += f"<b>🕐 Конец:</b> {self.escape_html(str(end_time))}\n"
+
+            # Ссылка
+            if page_url:
+                message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования нового стейкинга: {e}", exc_info=True)
+            return f"🆕 <b>Новый стейкинг!</b>\n\n<b>Монета:</b> {self.escape_html(staking.get('coin', 'Unknown'))}\n<b>APR:</b> {staking.get('apr', 0)}%"
+
+    def format_apr_change_notification(
+        self,
+        staking: Dict[str, Any],
+        old_apr: float,
+        new_apr: float,
+        lock_type: str = 'Unknown',
+        page_url: str = None
+    ) -> str:
+        """
+        Форматирование уведомления об изменении APR
+
+        Args:
+            staking: Данные стейкинга из парсера
+            old_apr: Предыдущий APR
+            new_apr: Новый APR
+            lock_type: Тип блокировки ('Fixed', 'Flexible', 'Combined', 'Unknown')
+            page_url: Ссылка на страницу стейкингов
+
+        Returns:
+            Отформатированное HTML сообщение
+        """
+        try:
+            # Базовая информация
+            coin = self.escape_html(staking.get('coin', 'N/A'))
+            exchange = self.escape_html(staking.get('exchange', 'N/A'))
+            apr_change = new_apr - old_apr
+
+            # Определяем направление изменения
+            if apr_change > 0:
+                change_emoji = "📈"
+                change_text = "УВЕЛИЧЕНИЕ APR"
+                change_symbol = "↑"
+            else:
+                change_emoji = "📉"
+                change_text = "СНИЖЕНИЕ APR"
+                change_symbol = "↓"
+
+            # Заголовок
+            message = f"{change_emoji} <b>{change_text}!</b>\n\n"
+            message += f"<b>💎 Монета:</b> {coin}\n"
+            message += f"<b>🏦 Биржа:</b> {exchange}\n\n"
+
+            # Изменение APR
+            message += f"<b>💰 APR:</b>\n"
+            message += f"   Было: {old_apr}%\n"
+            message += f"   Стало: <b>{new_apr}%</b> {change_symbol} {abs(apr_change):.2f}%\n"
+
+            # Тип стейкинга
+            if lock_type != 'Unknown':
+                message += f"\n<b>🔧 Тип:</b> {lock_type}\n"
+
+            # Для Flexible указываем, что APR стабилизирован
+            if lock_type == 'Flexible':
+                message += "<i>✓ APR стабилизирован в течение 6 часов</i>\n"
+
+            # Период
+            term_days = staking.get('term_days', 0)
+            if term_days == 0:
+                message += f"<b>📅 Период:</b> Flexible (бессрочно)\n"
+            else:
+                message += f"<b>📅 Период:</b> {term_days} дней\n"
+
+            # Статус
+            status = staking.get('status')
+            if status:
+                message += f"<b>📊 Статус:</b> {self.escape_html(status)}\n"
+
+            # Заполненность (если есть)
+            fill_percentage = staking.get('fill_percentage')
+            if fill_percentage is not None:
+                message += f"\n<b>📊 Заполненность:</b> "
+                if fill_percentage < 30:
+                    message += "🟢 "
+                elif fill_percentage < 70:
+                    message += "🟡 "
+                else:
+                    message += "🔴 "
+                message += f"{fill_percentage:.1f}%\n"
+
+            # Ссылка
+            if page_url:
+                message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования изменения APR: {e}", exc_info=True)
+            return f"📈 <b>Изменение APR!</b>\n\n<b>Монета:</b> {self.escape_html(staking.get('coin', 'Unknown'))}\n<b>APR:</b> {old_apr}% → {new_apr}%"

@@ -1,4 +1,9 @@
 from aiogram import Router, F
+
+# Константы для навигации
+NAV_MANAGEMENT = "NAV_MANAGEMENT"
+NAV_DELETE = "NAV_DELETE"
+NAV_INTERVAL = "NAV_INTERVAL"
 from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
@@ -20,6 +25,13 @@ from utils.user_agent_manager import get_user_agent_manager
 from utils.statistics_manager import get_statistics_manager
 from utils.rotation_manager import get_rotation_manager
 from utils.url_template_builder import URLTemplateAnalyzer, get_url_builder
+
+
+navigation_stack = {}
+# Глобальный словарь для новых систем выбора
+user_selections = {}
+# Глобальный словарь для хранения состояния просмотра стейкингов
+current_stakings_state = {}
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -46,31 +58,9 @@ async def safe_answer_callback(callback: CallbackQuery, text: str = None, show_a
             logger.debug(f"Callback timeout игнорируется: {e}")
         else:
             raise
-    except Exception as e:
-        logger.error(f"Ошибка при ответе на callback: {e}")
 
-# Хранилище для временных данных
-user_selections = {}
-
-# Система контекстной навигации - хранит историю навигации пользователя
-navigation_stack = {}
-
-# Состояние пагинации для текущих стейкингов
-current_stakings_state = {}  # {user_id: {'page': 1, 'link_id': 5, 'total_pages': 3}}
-
-# Контексты навигации
-NAV_MAIN = "main"
-NAV_LINKS_LIST = "links_list"
-NAV_MANAGEMENT = "management"
-NAV_DELETE = "delete"
-NAV_INTERVAL = "interval"
-NAV_RENAME = "rename"
-NAV_PARSING = "parsing"
-NAV_PROXY = "proxy"
-NAV_USER_AGENT = "user_agent"
-
-def push_navigation(user_id: int, context: str, data: dict = None):
-    """Добавить контекст в стек навигации пользователя"""
+def push_navigation(user_id: int, context, data=None):
+    """Добавить новый контекст в стек навигации пользователя"""
     if user_id not in navigation_stack:
         navigation_stack[user_id] = []
     navigation_stack[user_id].append({"context": context, "data": data or {}})
@@ -108,6 +98,12 @@ class AddLinkStates(StatesGroup):
     # Для Telegram:
     waiting_for_telegram_channel = State()  # НОВОЕ: Ввод канала Telegram
     waiting_for_telegram_keywords = State()  # НОВОЕ: Ввод ключевых слов Telegram
+    waiting_for_telegram_account = State()  # НОВОЕ: Выбор Telegram аккаунта для ссылки
+    # Для анонсов:
+    waiting_for_announcement_strategy = State()  # НОВОЕ: Выбор стратегии парсинга анонсов
+    waiting_for_announcement_keywords = State()  # НОВОЕ: Ввод ключевых слов для анонсов
+    waiting_for_announcement_regex = State()  # НОВОЕ: Ввод regex для анонсов
+    waiting_for_announcement_selector = State()  # НОВОЕ: Ввод CSS селектора для анонсов
 
 class IntervalStates(StatesGroup):
     waiting_for_interval = State()
@@ -122,6 +118,11 @@ class ConfigureParsingStates(StatesGroup):
     waiting_for_html_url_edit = State()  # Изменение HTML URL
     waiting_for_telegram_channel_edit = State()  # Изменение Telegram канала
     waiting_for_telegram_keywords_edit = State()  # Изменение Telegram ключевых слов
+    # Для редактирования анонсов:
+    waiting_for_announcement_strategy_edit = State()  # Изменение стратегии анонсов
+    waiting_for_announcement_keywords_edit = State()  # Изменение ключевых слов анонсов
+    waiting_for_announcement_regex_edit = State()  # Изменение regex анонсов
+    waiting_for_announcement_css_edit = State()  # Изменение CSS селектора анонсов
 
 # НОВЫЕ FSM СОСТОЯНИЯ
 class ProxyManagementStates(StatesGroup):
@@ -133,6 +134,8 @@ class UserAgentStates(StatesGroup):
 
 class RotationSettingsStates(StatesGroup):
     waiting_for_rotation_interval = State()
+    waiting_for_stats_retention = State()
+    waiting_for_archive_inactive = State()
 
 # СТАРЫЕ СОСТОЯНИЯ TelegramAPIStates УДАЛЕНЫ - используется TelegramAccountStates из bot/states.py
 
@@ -163,7 +166,7 @@ def get_management_keyboard(link=None):
     builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
     builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
     builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="manage_cancel"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_link_list"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -190,7 +193,7 @@ def get_staking_management_keyboard():
     builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
     builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
     builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="manage_cancel"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_link_list"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -214,9 +217,85 @@ def get_current_stakings_keyboard(current_page: int, total_pages: int) -> Inline
         InlineKeyboardButton(text="⚙️ Настройки APR", callback_data="stakings_configure_apr")
     )
 
+    # Настройки уведомлений (НОВАЯ КНОПКА)
+    builder.row(
+        InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="notification_settings_show")
+    )
+
     # Закрыть
     builder.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="manage_cancel"))
 
+    return builder.as_markup()
+
+def get_notification_settings_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура настроек умных уведомлений"""
+    builder = InlineKeyboardBuilder()
+
+    builder.add(InlineKeyboardButton(
+        text="⏱️ Изменить время стабилизации",
+        callback_data="notification_settings_change_stability"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="📊 Изменить порог изменения APR",
+        callback_data="notification_settings_change_apr_threshold"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🔔 Новые стейкинги (вкл/выкл)",
+        callback_data="notification_toggle_new_stakings"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="📈 Изменения APR (вкл/выкл)",
+        callback_data="notification_toggle_apr_changes"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="⚡ Fixed сразу (вкл/выкл)",
+        callback_data="notification_toggle_fixed_immediately"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🔄 Combined как Fixed (вкл/выкл)",
+        callback_data="notification_toggle_combined_as_fixed"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="📋 Только стабильные Flexible (вкл/выкл)",
+        callback_data="notification_toggle_only_stable"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="❌ Назад",
+        callback_data="manage_view_current_stakings"
+    ))
+
+    builder.adjust(1)  # По одной кнопке в ряд
+    return builder.as_markup()
+
+def get_stability_hours_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора времени стабилизации"""
+    builder = InlineKeyboardBuilder()
+
+    hours = [1, 2, 3, 4, 6, 8, 12, 24, 48]
+    for hour in hours:
+        text = f"{hour} час" if hour == 1 else f"{hour} часа" if hour < 5 else f"{hour} часов"
+        builder.add(InlineKeyboardButton(
+            text=text,
+            callback_data=f"set_stability_{hour}"
+        ))
+
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="notification_settings_show"))
+    builder.adjust(3)  # По 3 кнопки в ряд
+    return builder.as_markup()
+
+def get_apr_threshold_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора порога изменения APR"""
+    builder = InlineKeyboardBuilder()
+
+    thresholds = [1, 2, 3, 5, 10, 15, 20, 50]
+    for threshold in thresholds:
+        builder.add(InlineKeyboardButton(
+            text=f"{threshold}%",
+            callback_data=f"set_apr_threshold_{threshold}"
+        ))
+
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="notification_settings_show"))
+    builder.adjust(4)  # По 4 кнопки в ряд
     return builder.as_markup()
 
 def get_links_keyboard(links, action_type="delete"):
@@ -300,15 +379,22 @@ def get_toggle_parsing_keyboard(links, action_type="pause"):
     builder.adjust(1)
     return builder.as_markup()
 
-def get_configure_parsing_submenu(link_id, parsing_type='combined'):
+def get_configure_parsing_submenu(link_id, parsing_type='combined', category=None):
     """Подменю для настройки парсинга конкретной ссылки"""
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="🎯 Изменить тип парсинга", callback_data=f"edit_parsing_type_{link_id}"))
 
-    # Разные кнопки в зависимости от типа парсинга
+    # Разные кнопки в зависимости от типа парсинга и категории
     if parsing_type == 'telegram':
         builder.add(InlineKeyboardButton(text="📱 Изменить Telegram канал", callback_data=f"edit_telegram_channel_{link_id}"))
         builder.add(InlineKeyboardButton(text="🔑 Изменить ключевые слова", callback_data=f"edit_telegram_keywords_{link_id}"))
+    elif category == 'announcement':
+        # Специальные кнопки для анонсов
+        builder.add(InlineKeyboardButton(text="📋 Изменить стратегию парсинга", callback_data=f"edit_announcement_strategy_{link_id}"))
+        builder.add(InlineKeyboardButton(text="🌐 Изменить HTML URL", callback_data=f"edit_html_url_{link_id}"))
+        builder.add(InlineKeyboardButton(text="🔑 Изменить ключевые слова", callback_data=f"edit_announcement_keywords_{link_id}"))
+        builder.add(InlineKeyboardButton(text="🎯 Изменить CSS селектор", callback_data=f"edit_announcement_css_{link_id}"))
+        builder.add(InlineKeyboardButton(text="⚡ Изменить регулярное выражение", callback_data=f"edit_announcement_regex_{link_id}"))
     else:
         builder.add(InlineKeyboardButton(text="📡 Изменить API URL", callback_data=f"edit_api_url_{link_id}"))
         builder.add(InlineKeyboardButton(text="🌐 Изменить HTML URL", callback_data=f"edit_html_url_{link_id}"))
@@ -338,7 +424,9 @@ def get_proxy_management_keyboard():
     builder.add(InlineKeyboardButton(text="➕ Добавить прокси", callback_data="proxy_add"))
     builder.add(InlineKeyboardButton(text="🧪 Тестировать все", callback_data="proxy_test_all"))
     builder.add(InlineKeyboardButton(text="🗑️ Удалить прокси", callback_data="proxy_delete"))
+    builder.add(InlineKeyboardButton(text="🗑️ Удалить нерабочие", callback_data="proxy_delete_dead"))
     builder.add(InlineKeyboardButton(text="📊 Статистика прокси", callback_data="proxy_stats"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_bypass"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="proxy_cancel"))
     builder.adjust(2)
     return builder.as_markup()
@@ -349,7 +437,7 @@ def get_user_agent_management_keyboard():
     builder.add(InlineKeyboardButton(text="➕ Добавить User-Agent", callback_data="ua_add"))
     builder.add(InlineKeyboardButton(text="🔄 Сгенерировать новые", callback_data="ua_generate"))
     builder.add(InlineKeyboardButton(text="📊 Статистика UA", callback_data="ua_stats"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="ua_cancel"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_bypass"))
     builder.adjust(2)
     return builder.as_markup()
 
@@ -372,6 +460,73 @@ def get_rotation_settings_keyboard():
     builder.add(InlineKeyboardButton(text="📊 Текущие настройки", callback_data="rotation_current"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="rotation_cancel"))
     builder.adjust(2)
+    return builder.as_markup()
+
+def get_rotation_interval_keyboard():
+    """Клавиатура для выбора интервала ротации с предустановленными значениями"""
+    builder = InlineKeyboardBuilder()
+    
+    # Минуты
+    builder.add(InlineKeyboardButton(text="⏱ 10 мин", callback_data="set_rotation_interval_600"))
+    builder.add(InlineKeyboardButton(text="⏱ 20 мин", callback_data="set_rotation_interval_1200"))
+    builder.add(InlineKeyboardButton(text="⏱ 30 мин", callback_data="set_rotation_interval_1800"))
+    builder.add(InlineKeyboardButton(text="⏱ 60 мин", callback_data="set_rotation_interval_3600"))
+    
+    # Часы
+    builder.add(InlineKeyboardButton(text="🕐 3 часа", callback_data="set_rotation_interval_10800"))
+    builder.add(InlineKeyboardButton(text="🕐 6 часов", callback_data="set_rotation_interval_21600"))
+    builder.add(InlineKeyboardButton(text="🕐 12 часов", callback_data="set_rotation_interval_43200"))
+    builder.add(InlineKeyboardButton(text="🕐 24 часа", callback_data="set_rotation_interval_86400"))
+    
+    # Дополнительные опции
+    builder.add(InlineKeyboardButton(text="✏️ Ввести свое значение", callback_data="rotation_interval_custom"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="rotation_cancel"))
+    
+    builder.adjust(2, 2, 2, 2, 1, 1)
+    return builder.as_markup()
+
+def get_rotation_management_keyboard():
+    """Клавиатура управления настройками ротации из экрана текущих настроек"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(text="⏰ Интервал ротации", callback_data="rotation_interval"))
+    builder.add(InlineKeyboardButton(text="🔧 Автооптимизация", callback_data="rotation_auto_optimize"))
+    builder.add(InlineKeyboardButton(text="📊 Хранение статистики", callback_data="rotation_stats_retention"))
+    builder.add(InlineKeyboardButton(text="📦 Архивация неактивных", callback_data="rotation_archive_inactive"))
+    builder.add(InlineKeyboardButton(text="🗑️ Очистить статистику", callback_data="rotation_cleanup"))
+    builder.add(InlineKeyboardButton(text="🔄 Принудительная ротация", callback_data="rotation_force"))
+    builder.add(InlineKeyboardButton(text="❌ Назад", callback_data="bypass_rotation"))
+    
+    builder.adjust(2, 2, 1, 1, 1)
+    return builder.as_markup()
+
+def get_stats_retention_keyboard():
+    """Клавиатура для выбора срока хранения статистики"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(text="7 дней", callback_data="set_stats_retention_7"))
+    builder.add(InlineKeyboardButton(text="14 дней", callback_data="set_stats_retention_14"))
+    builder.add(InlineKeyboardButton(text="30 дней", callback_data="set_stats_retention_30"))
+    builder.add(InlineKeyboardButton(text="60 дней", callback_data="set_stats_retention_60"))
+    builder.add(InlineKeyboardButton(text="90 дней", callback_data="set_stats_retention_90"))
+    builder.add(InlineKeyboardButton(text="✏️ Ввести свое значение", callback_data="stats_retention_custom"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="rotation_current"))
+    
+    builder.adjust(2, 2, 1, 1, 1)
+    return builder.as_markup()
+
+def get_archive_inactive_keyboard():
+    """Клавиатура для выбора срока архивации неактивных записей"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(text="3 дня", callback_data="set_archive_inactive_3"))
+    builder.add(InlineKeyboardButton(text="7 дней", callback_data="set_archive_inactive_7"))
+    builder.add(InlineKeyboardButton(text="14 дней", callback_data="set_archive_inactive_14"))
+    builder.add(InlineKeyboardButton(text="30 дней", callback_data="set_archive_inactive_30"))
+    builder.add(InlineKeyboardButton(text="✏️ Ввести свое значение", callback_data="archive_inactive_custom"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="rotation_current"))
+    
+    builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
 def get_bypass_keyboard():
@@ -629,17 +784,47 @@ async def process_parsing_type_selection(callback: CallbackQuery, state: FSMCont
         await state.set_state(AddLinkStates.waiting_for_api_url)
 
     elif parsing_type == 'html':
-        # Для HTML парсинга нужен только HTML URL
-        await callback.message.edit_text(
-            f"✅ Выбран тип: <b>Только HTML</b>\n\n"
-            f"🌐 <b>Шаг 3/5:</b> Введите HTML ссылку\n\n"
-            f"Пример:\n"
-            f"<code>https://www.bybit.com/en/trade/spot/token-splash</code>\n\n"
-            f"HTML ссылка используется для парсинга статических страниц.",
-            reply_markup=cancel_builder.as_markup(),
-            parse_mode="HTML"
-        )
-        await state.set_state(AddLinkStates.waiting_for_html_url)
+        # Проверяем категорию - для announcement нужно выбрать стратегию
+        category = data.get('category', 'general')
+
+        if category == 'announcement':
+            # Для анонсов предлагаем выбрать стратегию парсинга
+            strategy_builder = InlineKeyboardBuilder()
+            strategy_builder.add(InlineKeyboardButton(text="🔍 Любые изменения", callback_data="strategy_any_change"))
+            strategy_builder.add(InlineKeyboardButton(text="🎯 Изменения в элементе", callback_data="strategy_element_change"))
+            strategy_builder.add(InlineKeyboardButton(text="📝 Любое ключевое слово", callback_data="strategy_any_keyword"))
+            strategy_builder.add(InlineKeyboardButton(text="📚 Все ключевые слова", callback_data="strategy_all_keywords"))
+            strategy_builder.add(InlineKeyboardButton(text="⚡ Регулярное выражение", callback_data="strategy_regex"))
+            strategy_builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
+            strategy_builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+            strategy_builder.adjust(1, 1, 1, 1, 1, 2)
+
+            await callback.message.edit_text(
+                f"✅ Выбран тип: <b>Только HTML</b>\n\n"
+                f"🎯 <b>Шаг 3/6:</b> Выберите стратегию парсинга анонсов\n\n"
+                f"<b>Стратегии:</b>\n\n"
+                f"🔍 <b>Любые изменения</b> - отслеживание любых изменений на странице\n"
+                f"🎯 <b>Изменения в элементе</b> - отслеживание конкретного элемента (CSS Selector)\n"
+                f"📝 <b>Любое ключевое слово</b> - поиск любого из заданных слов\n"
+                f"📚 <b>Все ключевые слова</b> - все слова должны присутствовать\n"
+                f"⚡ <b>Регулярное выражение</b> - поиск по regex паттерну\n\n"
+                f"Выберите подходящую стратегию:",
+                reply_markup=strategy_builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await state.set_state(AddLinkStates.waiting_for_announcement_strategy)
+        else:
+            # Для обычных категорий - просто запрашиваем HTML URL
+            await callback.message.edit_text(
+                f"✅ Выбран тип: <b>Только HTML</b>\n\n"
+                f"🌐 <b>Шаг 3/5:</b> Введите HTML ссылку\n\n"
+                f"Пример:\n"
+                f"<code>https://www.bybit.com/en/trade/spot/token-splash</code>\n\n"
+                f"HTML ссылка используется для парсинга статических страниц.",
+                reply_markup=cancel_builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await state.set_state(AddLinkStates.waiting_for_html_url)
 
     elif parsing_type == 'browser':
         # Для Browser парсинга нужен HTML URL (браузер открывает страницу)
@@ -684,6 +869,212 @@ async def process_parsing_type_selection(callback: CallbackQuery, state: FSMCont
         await state.set_state(AddLinkStates.waiting_for_api_url)
 
     await callback.answer()
+
+# ОБРАБОТЧИКИ ДЛЯ СТРАТЕГИЙ АНОНСОВ
+@router.callback_query(AddLinkStates.waiting_for_announcement_strategy, F.data.startswith("strategy_"))
+async def process_announcement_strategy_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора стратегии парсинга анонсов"""
+    strategy = callback.data.replace("strategy_", "")
+
+    # Сохраняем стратегию
+    await state.update_data(announcement_strategy=strategy)
+
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+
+    cancel_builder = InlineKeyboardBuilder()
+    cancel_builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
+    cancel_builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    cancel_builder.adjust(2)
+
+    # В зависимости от стратегии запрашиваем разные данные
+    if strategy == 'any_change':
+        # Для стратегии "любые изменения" сразу запрашиваем HTML URL
+        await callback.message.edit_text(
+            f"✅ Стратегия: <b>Отслеживание любых изменений</b>\n\n"
+            f"🌐 <b>Шаг 4/6:</b> Введите HTML ссылку на страницу анонсов\n\n"
+            f"Пример:\n"
+            f"<code>https://www.mexc.com/ru-RU/announcements/</code>\n\n"
+            f"Бот будет отслеживать любые изменения на этой странице.",
+            reply_markup=cancel_builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_html_url)
+
+    elif strategy == 'element_change':
+        # Для стратегии "изменения в элементе" запрашиваем CSS селектор
+        await callback.message.edit_text(
+            f"✅ Стратегия: <b>Отслеживание изменений в элементе</b>\n\n"
+            f"🎯 <b>Шаг 4/6:</b> Введите CSS селектор элемента\n\n"
+            f"Примеры:\n"
+            f"<code>.announcement-list</code>\n"
+            f"<code>#news-container</code>\n"
+            f"<code>div.news-item:first-child</code>\n\n"
+            f"Бот будет отслеживать изменения только в этом элементе.",
+            reply_markup=cancel_builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_announcement_selector)
+
+    elif strategy == 'any_keyword':
+        # Для стратегии "любое ключевое слово" запрашиваем ключевые слова
+        await callback.message.edit_text(
+            f"✅ Стратегия: <b>Поиск любого ключевого слова</b>\n\n"
+            f"📝 <b>Шаг 4/6:</b> Введите ключевые слова через запятую\n\n"
+            f"Примеры:\n"
+            f"<code>airdrop, промо, campaign, listing</code>\n"
+            f"<code>новый токен, листинг, бонус</code>\n\n"
+            f"Бот уведомит вас, если найдет хотя бы одно из этих слов.",
+            reply_markup=cancel_builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_announcement_keywords)
+
+    elif strategy == 'all_keywords':
+        # Для стратегии "все ключевые слова" запрашиваем ключевые слова
+        await callback.message.edit_text(
+            f"✅ Стратегия: <b>Поиск всех ключевых слов</b>\n\n"
+            f"📚 <b>Шаг 4/6:</b> Введите ключевые слова через запятую\n\n"
+            f"Примеры:\n"
+            f"<code>airdrop, BTC, trading</code>\n"
+            f"<code>новый, листинг, reward</code>\n\n"
+            f"Бот уведомит вас только если найдет ВСЕ эти слова одновременно.",
+            reply_markup=cancel_builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_announcement_keywords)
+
+    elif strategy == 'regex':
+        # Для стратегии "регулярное выражение" запрашиваем regex
+        await callback.message.edit_text(
+            f"✅ Стратегия: <b>Поиск по регулярному выражению</b>\n\n"
+            f"⚡ <b>Шаг 4/6:</b> Введите регулярное выражение\n\n"
+            f"Примеры:\n"
+            f"<code>(airdrop|промо|campaign)</code>\n"
+            f"<code>\\d+\\s*(USDT|BTC)</code>\n"
+            f"<code>новый\\s+листинг</code>\n\n"
+            f"Бот будет искать совпадения с вашим regex паттерном.",
+            reply_markup=cancel_builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_announcement_regex)
+
+    await callback.answer()
+
+@router.message(AddLinkStates.waiting_for_announcement_selector)
+async def process_announcement_selector_input(message: Message, state: FSMContext):
+    """Обработка ввода CSS селектора"""
+    css_selector = message.text.strip()
+
+    if not css_selector:
+        await message.answer("❌ CSS селектор не может быть пустым. Попробуйте снова:")
+        return
+
+    # Сохраняем CSS селектор
+    await state.update_data(announcement_css_selector=css_selector)
+
+    # Теперь запрашиваем HTML URL
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2)
+
+    await message.answer(
+        f"✅ CSS селектор сохранен: <code>{css_selector}</code>\n\n"
+        f"🌐 <b>Шаг 5/6:</b> Введите HTML ссылку на страницу анонсов\n\n"
+        f"Пример:\n"
+        f"<code>https://www.mexc.com/ru-RU/announcements/</code>\n\n"
+        f"Бот будет отслеживать изменения в указанном элементе.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_html_url)
+
+@router.message(AddLinkStates.waiting_for_announcement_keywords)
+async def process_announcement_keywords_input(message: Message, state: FSMContext):
+    """Обработка ввода ключевых слов для анонсов"""
+    keywords_text = message.text.strip()
+
+    if not keywords_text:
+        await message.answer("❌ Ключевые слова не могут быть пустыми. Попробуйте снова:")
+        return
+
+    # Разбиваем по запятой и очищаем
+    keywords = [kw.strip() for kw in keywords_text.split(',') if kw.strip()]
+
+    if not keywords:
+        await message.answer("❌ Не удалось распознать ключевые слова. Введите их через запятую:")
+        return
+
+    # Сохраняем ключевые слова
+    await state.update_data(announcement_keywords=keywords)
+
+    # Теперь запрашиваем HTML URL
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2)
+
+    keywords_display = ', '.join(keywords[:5])
+    if len(keywords) > 5:
+        keywords_display += f' (+{len(keywords) - 5} еще)'
+
+    await message.answer(
+        f"✅ Ключевые слова сохранены ({len(keywords)} шт.)\n"
+        f"<code>{keywords_display}</code>\n\n"
+        f"🌐 <b>Шаг 5/6:</b> Введите HTML ссылку на страницу анонсов\n\n"
+        f"Пример:\n"
+        f"<code>https://www.mexc.com/ru-RU/announcements/</code>\n\n"
+        f"Бот будет искать эти слова на странице.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_html_url)
+
+@router.message(AddLinkStates.waiting_for_announcement_regex)
+async def process_announcement_regex_input(message: Message, state: FSMContext):
+    """Обработка ввода регулярного выражения для анонсов"""
+    import re
+
+    regex_pattern = message.text.strip()
+
+    if not regex_pattern:
+        await message.answer("❌ Регулярное выражение не может быть пустым. Попробуйте снова:")
+        return
+
+    # Проверяем валидность regex
+    try:
+        re.compile(regex_pattern)
+    except re.error as e:
+        await message.answer(
+            f"❌ Ошибка в регулярном выражении: {str(e)}\n\n"
+            f"Проверьте синтаксис и попробуйте снова:"
+        )
+        return
+
+    # Сохраняем regex
+    await state.update_data(announcement_regex=regex_pattern)
+
+    # Теперь запрашиваем HTML URL
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2)
+
+    # Обрезаем regex если слишком длинный
+    regex_display = regex_pattern if len(regex_pattern) <= 50 else regex_pattern[:47] + "..."
+
+    await message.answer(
+        f"✅ Регулярное выражение сохранено\n"
+        f"<code>{regex_display}</code>\n\n"
+        f"🌐 <b>Шаг 5/6:</b> Введите HTML ссылку на страницу анонсов\n\n"
+        f"Пример:\n"
+        f"<code>https://www.mexc.com/ru-RU/announcements/</code>\n\n"
+        f"Бот будет искать совпадения с вашим regex.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_html_url)
 
 @router.message(AddLinkStates.waiting_for_api_url)
 async def process_api_url_input(message: Message, state: FSMContext):
@@ -904,31 +1295,183 @@ async def process_telegram_keywords_input(message: Message, state: FSMContext):
 
     keywords_str = ", ".join([f"<code>{kw}</code>" for kw in keywords])
 
-    # Создаем кнопки выбора интервала
-    builder = InlineKeyboardBuilder()
-    presets = [
-        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
-        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
-        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
-    ]
+    # Теперь показываем выбор Telegram аккаунта
+    from data.models import TelegramAccount
 
-    for text, seconds in presets:
-        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
-    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_telegram_channel"))
-    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
-    builder.adjust(2, 2, 2, 2, 1, 2)
+    with get_db_session() as db:
+        accounts = db.query(TelegramAccount).filter(
+            TelegramAccount.is_active == True,
+            TelegramAccount.is_authorized == True,
+            TelegramAccount.is_blocked == False
+        ).all()
 
-    await message.answer(
-        f"✅ Ключевые слова сохранены!\n\n"
-        f"⏰ <b>Шаг 5/5: Выберите интервал проверки</b>\n\n"
-        f"<b>Имя:</b> {custom_name}\n"
-        f"<b>Канал:</b> {telegram_channel}\n"
-        f"<b>Ключевые слова:</b> {keywords_str}\n\n"
-        f"Как часто проверять этот канал на новые промоакции?",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-    await state.set_state(AddLinkStates.waiting_for_interval)
+        if not accounts:
+            await message.answer(
+                "❌ <b>Нет доступных Telegram аккаунтов</b>\n\n"
+                "Добавьте аккаунт через:\n"
+                "🛡️ Обход блокировок → 📱 Telegram API",
+                parse_mode="HTML"
+            )
+            await state.clear()
+            return
+
+        # Создаем кнопки выбора аккаунта
+        builder = InlineKeyboardBuilder()
+        
+        for acc in accounts:
+            # Статистика нагрузки
+            from sqlalchemy import func
+            load_count = db.query(func.count(ApiLink.id)).filter(
+                ApiLink.telegram_account_id == acc.id,
+                ApiLink.is_active == True,
+                ApiLink.parsing_type == 'telegram'
+            ).scalar()
+
+            button_text = f"{acc.name} (+{acc.phone_number}) [{load_count} ссылок]"
+            builder.add(InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"select_tg_acc_{acc.id}"
+            ))
+
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_telegram_channel"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(1, 2)
+
+        await message.answer(
+            f"✅ Ключевые слова сохранены!\n\n"
+            f"📱 <b>Шаг 5/6: Выберите Telegram аккаунт</b>\n\n"
+            f"<b>Имя:</b> {custom_name}\n"
+            f"<b>Канал:</b> {telegram_channel}\n"
+            f"<b>Ключевые слова:</b> {keywords_str}\n\n"
+            f"Выберите аккаунт для парсинга этого канала:\n"
+            f"<i>[N ссылок] - количество уже назначенных ссылок на аккаунт</i>",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_telegram_account)
+
+# Обработчик выбора Telegram аккаунта
+@router.callback_query(AddLinkStates.waiting_for_telegram_account, F.data.startswith("select_tg_acc_"))
+async def process_telegram_account_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора Telegram аккаунта для новой ссылки"""
+    try:
+        account_id = int(callback.data.split("_")[-1])
+        
+        # Сохраняем выбранный аккаунт
+        await state.update_data(telegram_account_id=account_id)
+        
+        data = await state.get_data()
+        custom_name = data.get('custom_name')
+        telegram_channel = data.get('telegram_channel')
+        telegram_keywords = data.get('telegram_keywords', [])
+        
+        # Получаем информацию об аккаунте
+        from data.models import TelegramAccount
+        with get_db_session() as db:
+            account = db.query(TelegramAccount).filter(TelegramAccount.id == account_id).first()
+            if not account:
+                await callback.answer("❌ Аккаунт не найден", show_alert=True)
+                return
+            
+            account_name = f"{account.name} (+{account.phone_number})"
+        
+        keywords_str = ", ".join([f"<code>{kw}</code>" for kw in telegram_keywords])
+        
+        # Создаем кнопки выбора интервала
+        builder = InlineKeyboardBuilder()
+        presets = [
+            ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+            ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+            ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+        ]
+
+        for text, seconds in presets:
+            builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_telegram_keywords"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2, 2, 2, 2, 1, 2)
+
+        await callback.message.edit_text(
+            f"✅ Аккаунт выбран: <b>{account_name}</b>\n\n"
+            f"⏰ <b>Шаг 6/6: Выберите интервал проверки</b>\n\n"
+            f"<b>Имя:</b> {custom_name}\n"
+            f"<b>Канал:</b> {telegram_channel}\n"
+            f"<b>Ключевые слова:</b> {keywords_str}\n"
+            f"<b>Аккаунт парсера:</b> {account_name}\n\n"
+            f"Как часто проверять этот канал на новые промоакции?",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_interval)
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при выборе Telegram аккаунта: {e}")
+        await callback.answer("❌ Ошибка при выборе аккаунта", show_alert=True)
+
+# Обработчик для кнопки "Назад" к выбору аккаунта
+@router.callback_query(F.data == "back_to_telegram_keywords")
+async def back_to_telegram_keywords(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору Telegram аккаунта"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    telegram_channel = data.get('telegram_channel')
+    telegram_keywords = data.get('telegram_keywords', [])
+    
+    keywords_str = ", ".join([f"<code>{kw}</code>" for kw in telegram_keywords])
+    
+    from data.models import TelegramAccount
+    with get_db_session() as db:
+        accounts = db.query(TelegramAccount).filter(
+            TelegramAccount.is_active == True,
+            TelegramAccount.is_authorized == True,
+            TelegramAccount.is_blocked == False
+        ).all()
+
+        if not accounts:
+            await callback.message.edit_text(
+                "❌ <b>Нет доступных Telegram аккаунтов</b>\n\n"
+                "Добавьте аккаунт через:\n"
+                "🛡️ Обход блокировок → 📱 Telegram API",
+                parse_mode="HTML"
+            )
+            await state.clear()
+            await callback.answer()
+            return
+
+        # Создаем кнопки выбора аккаунта
+        builder = InlineKeyboardBuilder()
+        
+        for acc in accounts:
+            from sqlalchemy import func
+            load_count = db.query(func.count(ApiLink.id)).filter(
+                ApiLink.telegram_account_id == acc.id,
+                ApiLink.is_active == True,
+                ApiLink.parsing_type == 'telegram'
+            ).scalar()
+
+            button_text = f"{acc.name} (+{acc.phone_number}) [{load_count} ссылок]"
+            builder.add(InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"select_tg_acc_{acc.id}"
+            ))
+
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_telegram_channel"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(1, 2)
+
+        await callback.message.edit_text(
+            f"📱 <b>Шаг 5/6: Выберите Telegram аккаунт</b>\n\n"
+            f"<b>Имя:</b> {custom_name}\n"
+            f"<b>Канал:</b> {telegram_channel}\n"
+            f"<b>Ключевые слова:</b> {keywords_str}\n\n"
+            f"Выберите аккаунт для парсинга этого канала:\n"
+            f"<i>[N ссылок] - количество уже назначенных ссылок на аккаунт</i>",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_telegram_account)
+        await callback.answer()
 
 # Обработчик для кнопки "Назад" от ввода ключевых слов
 @router.callback_query(F.data == "back_to_telegram_channel")
@@ -1363,8 +1906,25 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         # ПОЛЯ ДЛЯ TELEGRAM:
         telegram_channel = data.get('telegram_channel')
         telegram_keywords = data.get('telegram_keywords', [])
+        telegram_account_id = data.get('telegram_account_id')  # НОВОЕ: ID выбранного аккаунта
+
+        # ПОЛЯ ДЛЯ АНОНСОВ:
+        announcement_strategy = data.get('announcement_strategy')
+        announcement_keywords = data.get('announcement_keywords', [])
+        announcement_regex = data.get('announcement_regex')
+        announcement_css_selector = data.get('announcement_css_selector')
 
         def add_link_operation(session):
+            # Проверяем дубликаты по URL
+            url_to_check = api_url or html_url or telegram_channel
+            existing_link = session.query(ApiLink).filter(
+                ApiLink.url == url_to_check
+            ).first()
+            
+            if existing_link:
+                # Ссылка уже существует
+                raise ValueError(f"Ссылка с URL '{url_to_check}' уже существует (ID: {existing_link.id}, Имя: '{existing_link.name}')")
+            
             new_link = ApiLink(
                 name=custom_name,
                 url=api_url or html_url or telegram_channel,  # Для совместимости
@@ -1379,11 +1939,19 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
                 min_apr=min_apr,
                 statuses_filter=statuses_filter,
                 # ПОЛЯ ДЛЯ TELEGRAM:
-                telegram_channel=telegram_channel
+                telegram_channel=telegram_channel,
+                telegram_account_id=telegram_account_id,  # НОВОЕ: Назначаем аккаунт
+                # ПОЛЯ ДЛЯ АНОНСОВ:
+                announcement_strategy=announcement_strategy,
+                announcement_regex=announcement_regex,
+                announcement_css_selector=announcement_css_selector
             )
             # Устанавливаем ключевые слова для Telegram
             if telegram_keywords:
                 new_link.set_telegram_keywords(telegram_keywords)
+            # Устанавливаем ключевые слова для анонсов
+            if announcement_keywords:
+                new_link.set_announcement_keywords(announcement_keywords)
             session.add(new_link)
             session.flush()
             return new_link
@@ -1391,18 +1959,41 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         new_link = atomic_operation(add_link_operation)
 
         # Для Telegram - автоматическая подписка на канал (в фоновом режиме)
-        subscription_status = ""
-        if parsing_type == 'telegram' and telegram_channel:
-            subscription_status = "🔄 Подписка на канал выполняется в фоновом режиме...\n"
+        subscription_info = ""
+        telegram_account_info = ""
+        
+        if parsing_type == 'telegram' and telegram_channel and telegram_account_id:
+            # Получаем информацию об аккаунте
+            from data.models import TelegramAccount
+            with get_db_session() as db:
+                account = db.query(TelegramAccount).filter(TelegramAccount.id == telegram_account_id).first()
+                if account:
+                    telegram_account_info = f"<b>📱 Аккаунт парсера:</b> {account.name} (+{account.phone_number})\n"
+
+            subscription_info = "🔄 Подписка на канал выполняется...\n"
 
             # Запускаем подписку в фоновом режиме, чтобы не блокировать БД
             async def subscribe_to_channel():
                 """Фоновая задача подписки на канал"""
+                subscription_success = False
+                account_info_str = ""
+                
                 try:
                     # Небольшая задержка для завершения транзакции БД
                     await asyncio.sleep(1)
 
                     from parsers.telegram_parser import TelegramParser
+                    from data.models import TelegramAccount
+                    
+                    # Получаем аккаунт для подписки
+                    with get_db_session() as db:
+                        account = db.query(TelegramAccount).filter(TelegramAccount.id == telegram_account_id).first()
+                        if not account:
+                            logger.error(f"❌ Telegram аккаунт {telegram_account_id} не найден")
+                            return
+                        
+                        account_info_str = f"{account.name} (+{account.phone_number})"
+                    
                     parser = TelegramParser()
 
                     # Подключаемся к Telegram
@@ -1413,7 +2004,8 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
                         joined = await parser.join_channel(telegram_channel)
 
                         if joined:
-                            logger.info(f"✅ Успешно подписан на канал {telegram_channel}")
+                            subscription_success = True
+                            logger.info(f"✅ Успешно подписан на канал {telegram_channel} через аккаунт {account_info_str}")
                         else:
                             logger.warning(f"⚠️ Не удалось подписаться на канал {telegram_channel}")
 
@@ -1424,6 +2016,31 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
 
                 except Exception as e:
                     logger.error(f"❌ Ошибка фоновой подписки на Telegram канал: {e}")
+                
+                # Отправляем уведомление о результате подписки
+                try:
+                    if subscription_success:
+                        await callback.message.answer(
+                            f"✅ <b>Подписка выполнена успешно!</b>\n\n"
+                            f"<b>Канал:</b> {telegram_channel}\n"
+                            f"<b>Аккаунт:</b> {account_info_str}\n\n"
+                            f"Парсинг канала начнется автоматически согласно установленному интервалу.",
+                            parse_mode="HTML"
+                        )
+                    else:
+                        await callback.message.answer(
+                            f"⚠️ <b>Ошибка подписки на канал</b>\n\n"
+                            f"<b>Канал:</b> {telegram_channel}\n"
+                            f"<b>Аккаунт:</b> {account_info_str}\n\n"
+                            f"Возможные причины:\n"
+                            f"• Канал приватный\n"
+                            f"• Требуется подтверждение администратора\n"
+                            f"• Проблемы с Telegram аккаунтом\n\n"
+                            f"Проверьте настройки канала и попробуйте снова.",
+                            parse_mode="HTML"
+                        )
+                except Exception as e:
+                    logger.error(f"Ошибка отправки уведомления о подписке: {e}")
 
             # Запускаем в фоновом режиме
             asyncio.create_task(subscribe_to_channel())
@@ -1471,8 +2088,10 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
             message_parts.append(f"\n<b>📱 Telegram канал:</b> {telegram_channel}\n")
             keywords_display = ", ".join([f"<code>{kw}</code>" for kw in telegram_keywords])
             message_parts.append(f"<b>🔑 Ключевые слова:</b> {keywords_display}\n")
-            if subscription_status:
-                message_parts.append(f"\n{subscription_status}")
+            if telegram_account_info:
+                message_parts.append(telegram_account_info)
+            if subscription_info:
+                message_parts.append(f"\n{subscription_info}")
 
         if min_apr:
             message_parts.append(f"\n<b>📊 Минимальный APR:</b> {min_apr}%\n")
@@ -1485,9 +2104,30 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         await state.clear()
         await callback.answer()
 
+    except ValueError as e:
+        # Обработка ошибки дубликата
+        error_msg = str(e)
+        logger.warning(f"⚠️ Попытка добавить дубликат ссылки: {error_msg}")
+        await callback.message.edit_text(
+            f"⚠️ <b>Ссылка уже существует!</b>\n\n"
+            f"{error_msg}\n\n"
+            f"Используйте другой URL или отредактируйте существующую ссылку.",
+            parse_mode="HTML"
+        )
+        await state.clear()
+        await callback.answer()
+        
     except Exception as e:
         logger.error(f"❌ Ошибка при сохранении ссылки: {e}")
-        await callback.message.edit_text("❌ Ошибка при сохранении ссылки")
+        
+        # Определяем тип ошибки для более понятного сообщения
+        error_msg = "❌ Ошибка при сохранении ссылки"
+        if "UNIQUE constraint failed" in str(e):
+            error_msg = "⚠️ Ссылка с таким URL уже существует"
+        elif "database is locked" in str(e).lower():
+            error_msg = "⚠️ База данных заблокирована, попробуйте ещё раз"
+        
+        await callback.message.edit_text(error_msg)
         await state.clear()
         await callback.answer()
 
@@ -1513,6 +2153,12 @@ async def handle_category_selection(callback: CallbackQuery):
     """Обработка выбора категории - показ ссылок этой категории"""
     try:
         category = callback.data.replace("category_", "")  # 'staking', 'airdrop', 'all' и т.д.
+        user_id = callback.from_user.id
+
+        # Сохраняем категорию в navigation_stack
+        current_nav = get_current_navigation(user_id)
+        if current_nav:
+            current_nav["data"]["category"] = category
 
         # Словарь названий категорий
         category_names = {
@@ -1590,6 +2236,34 @@ async def back_to_categories(callback: CallbackQuery):
         await callback.answer()
     except Exception as e:
         logger.error(f"❌ Ошибка при возврате к категориям: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "back_to_link_list")
+async def back_to_link_list(callback: CallbackQuery):
+    """Возврат к списку ссылок в категории"""
+    try:
+        user_id = callback.from_user.id
+        
+        # Получаем сохраненную категорию
+        current_nav = get_current_navigation(user_id)
+        category = current_nav.get("data", {}).get("category", "all") if current_nav else "all"
+        
+        # Очищаем выбор ссылки
+        if user_id in user_selections:
+            del user_selections[user_id]
+        
+        # Создаем mock callback для повторного вызова handle_category_selection
+        from unittest.mock import Mock
+        category_callback = Mock()
+        category_callback.data = f"category_{category}"
+        category_callback.message = callback.message
+        category_callback.answer = callback.answer
+        category_callback.from_user = callback.from_user
+        
+        await handle_category_selection(category_callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при возврате к списку ссылок: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
 
 @router.callback_query(F.data.startswith("manage_link_"))
@@ -1968,16 +2642,20 @@ async def view_current_stakings(callback: CallbackQuery):
                 return
 
             exchange_name = link.name
-            exchange_filter = link.exchange or link.name  # Используем exchange для поиска в БД
             min_apr = link.min_apr
             page_url = link.page_url
+            api_url = link.api_url or link.url
+
+        # Нормализуем exchange для правильного поиска в БД
+        from utils.exchange_detector import detect_exchange_from_url
+        exchange_filter = detect_exchange_from_url(api_url) if api_url else (link.exchange or link.name)
 
         # Получить стейкинги с дельтами
         from services.staking_snapshot_service import StakingSnapshotService
         snapshot_service = StakingSnapshotService()
 
         stakings_with_deltas = snapshot_service.get_stakings_with_deltas(
-            exchange=exchange_filter,  # Ищем по exchange, а не по name
+            exchange=exchange_filter,  # Используем нормализованное имя биржи
             min_apr=min_apr
         )
 
@@ -1989,11 +2667,15 @@ async def view_current_stakings(callback: CallbackQuery):
         end_idx = start_idx + per_page
         page_stakings = stakings_with_deltas[start_idx:end_idx]
 
-        # Сохранить состояние
+        # Сохранить состояние (включая стейкинги чтобы не запрашивать заново)
         current_stakings_state[user_id] = {
             'page': page,
             'link_id': link_id,
-            'total_pages': total_pages
+            'total_pages': total_pages,
+            'stakings': stakings_with_deltas,  # Сохраняем все стейкинги
+            'exchange_name': exchange_name,
+            'min_apr': min_apr,
+            'page_url': page_url
         }
         logger.info(f"   💾 Состояние сохранено: page={page}, link_id={link_id}, total_pages={total_pages}")
         logger.info(f"   🔑 Текущее состояние в памяти: {current_stakings_state}")
@@ -2057,26 +2739,15 @@ async def navigate_stakings_page(callback: CallbackQuery):
         # Обновляем состояние
         state['page'] = new_page
 
-        # Загружаем данные
-        with get_db_session() as db:
-            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
-            if not link:
-                await callback.answer("❌ Ссылка не найдена", show_alert=True)
-                return
+        # Используем сохраненные данные вместо повторного запроса к БД
+        stakings_with_deltas = state.get('stakings', [])
+        exchange_name = state.get('exchange_name', 'Unknown')
+        min_apr = state.get('min_apr')
+        page_url = state.get('page_url')
 
-            exchange_name = link.name
-            exchange_filter = link.exchange or link.name  # Используем exchange для поиска в БД
-            min_apr = link.min_apr
-            page_url = link.page_url
-
-        # Получить стейкинги с дельтами
-        from services.staking_snapshot_service import StakingSnapshotService
-        snapshot_service = StakingSnapshotService()
-
-        stakings_with_deltas = snapshot_service.get_stakings_with_deltas(
-            exchange=exchange_filter,  # Ищем по exchange, а не по name
-            min_apr=min_apr
-        )
+        if not stakings_with_deltas:
+            await callback.answer("❌ Данные потеряны. Откройте раздел заново.", show_alert=True)
+            return
 
         # Пагинация
         per_page = 5
@@ -2223,8 +2894,13 @@ async def refresh_current_stakings(callback: CallbackQuery):
         if current_page > total_pages:
             current_page = total_pages
 
+        # Обновляем state с новыми данными
         state['page'] = current_page
         state['total_pages'] = total_pages
+        state['stakings'] = stakings_with_deltas  # Обновляем стейкинги
+        state['exchange_name'] = exchange_name
+        state['min_apr'] = min_apr
+        state['page_url'] = page_url
 
         # Пагинация
         start_idx = (current_page - 1) * per_page
@@ -2312,6 +2988,378 @@ async def configure_min_apr(callback: CallbackQuery):
 
     except Exception as e:
         logger.error(f"❌ Ошибка настройки APR: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "notification_settings_show")
+async def notification_settings_show(callback: CallbackQuery):
+    """Показать настройки умных уведомлений"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            # Форматирование настроек
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+            await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка показа настроек: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "notification_settings_change_stability")
+async def change_stability_hours(callback: CallbackQuery):
+    """Показать пресеты времени стабилизации"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            current_hours = link.flexible_stability_hours
+            link_name = link.name  # Сохранить перед закрытием сессии
+
+        keyboard = get_stability_hours_keyboard()
+
+        await callback.message.edit_text(
+            f"⏱️ <b>НАСТРОЙКА ВРЕМЕНИ СТАБИЛИЗАЦИИ</b>\n\n"
+            f"🏦 <b>Биржа:</b> {link_name}\n"
+            f"📌 <b>Текущее значение:</b> {current_hours} часов\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💡 <i>Flexible стейкинги будут уведомлять\n"
+            f"только после X часов стабильного APR</i>\n\n"
+            f"<b>Выберите новое значение:</b>",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка изменения времени стабилизации: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data.startswith("set_stability_"))
+async def set_stability_hours(callback: CallbackQuery):
+    """Установить время стабилизации из пресета"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        # Извлечь hours из callback.data
+        hours = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            link.flexible_stability_hours = hours
+            db.commit()
+
+            # Показать обновленные настройки
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+            await callback.answer(f"✅ Время стабилизации изменено на {hours} часов")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки времени стабилизации: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "notification_settings_change_apr_threshold")
+async def change_apr_threshold(callback: CallbackQuery):
+    """Показать пресеты порога APR"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            current_threshold = link.notify_min_apr_change
+            link_name = link.name  # Сохранить перед закрытием сессии
+
+        keyboard = get_apr_threshold_keyboard()
+
+        await callback.message.edit_text(
+            f"📊 <b>НАСТРОЙКА ПОРОГА ИЗМЕНЕНИЯ APR</b>\n\n"
+            f"🏦 <b>Биржа:</b> {link_name}\n"
+            f"📌 <b>Текущее значение:</b> {current_threshold}%\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💡 <i>Уведомлять только если APR изменился\n"
+            f"на X% или больше (абсолютное изменение)</i>\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• 20% → 25% = изменение 5%\n"
+            f"• 100% → 110% = изменение 10%\n\n"
+            f"<b>Выберите новое значение:</b>",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка изменения порога APR: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data.startswith("set_apr_threshold_"))
+async def set_apr_threshold(callback: CallbackQuery):
+    """Установить порог APR из пресета"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        # Извлечь threshold из callback.data
+        threshold = float(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            link.notify_min_apr_change = threshold
+            db.commit()
+
+            # Показать обновленные настройки
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+            await callback.answer(f"✅ Порог изменения APR установлен на {threshold}%")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки порога APR: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "notification_toggle_new_stakings")
+async def toggle_new_stakings(callback: CallbackQuery):
+    """Переключить уведомления о новых стейкингах"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            # Инвертировать значение
+            link.notify_new_stakings = not link.notify_new_stakings
+            db.commit()
+
+            # Показать обновленные настройки
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+            status = "✅ Включены" if link.notify_new_stakings else "❌ Выключены"
+            await callback.answer(f"Уведомления о новых стейкингах: {status}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка переключения новых стейкингов: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "notification_toggle_apr_changes")
+async def toggle_apr_changes(callback: CallbackQuery):
+    """Переключить уведомления об изменениях APR"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            link.notify_apr_changes = not link.notify_apr_changes
+            db.commit()
+
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+            status = "✅ Включены" if link.notify_apr_changes else "❌ Выключены"
+            await callback.answer(f"Уведомления об изменениях APR: {status}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка переключения изменений APR: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "notification_toggle_fixed_immediately")
+async def toggle_fixed_immediately(callback: CallbackQuery):
+    """Переключить уведомления Fixed сразу"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            link.fixed_notify_immediately = not link.fixed_notify_immediately
+            db.commit()
+
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+            status = "✅ Включено" if link.fixed_notify_immediately else "❌ Выключено"
+            await callback.answer(f"Fixed стейкинги сразу: {status}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка переключения Fixed сразу: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "notification_toggle_combined_as_fixed")
+async def toggle_combined_as_fixed(callback: CallbackQuery):
+    """Переключить Combined как Fixed"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            link.notify_combined_as_fixed = not link.notify_combined_as_fixed
+            db.commit()
+
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+            status = "✅ Включено" if link.notify_combined_as_fixed else "❌ Выключено"
+            await callback.answer(f"Combined как Fixed: {status}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка переключения Combined как Fixed: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+@router.callback_query(F.data == "notification_toggle_only_stable")
+async def toggle_only_stable(callback: CallbackQuery):
+    """Переключить только стабильные Flexible"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            link.notify_only_stable_flexible = not link.notify_only_stable_flexible
+            db.commit()
+
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+            status = "✅ Включено" if link.notify_only_stable_flexible else "❌ Выключено"
+            await callback.answer(f"Только стабильные Flexible: {status}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка переключения стабильных Flexible: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
 
 @router.callback_query(F.data.startswith("set_apr_"))
@@ -3237,28 +4285,34 @@ async def process_resume_link(callback: CallbackQuery):
 @router.callback_query(F.data == "manage_force_check")
 async def manage_force_check(callback: CallbackQuery):
     try:
-        with get_db_session() as db:
-            links = db.query(ApiLink).all()
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
 
-            if not links:
-                await callback.message.edit_text("❌ У вас нет ссылок для принудительной проверки")
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                await callback.answer()
                 return
 
-            # Детач данных
-            links_data = []
-            for link in links:
-                links_data.append(type('Link', (), {
-                    'id': link.id,
-                    'name': link.name,
-                    'is_active': link.is_active,
-                    'check_interval': link.check_interval,
-                    'parsing_type': link.parsing_type or 'combined'
-                })())
+            link_data = {
+                'id': link.id,
+                'name': link.name
+            }
 
-            keyboard = get_links_keyboard(links_data, "force_check")
-            await callback.message.edit_text("🔧 <b>Выберите ссылку для принудительной проверки:</b>", reply_markup=keyboard, parse_mode="HTML")
-
+        await callback.message.edit_text(f"🔧 Запускаю принудительную проверку для <b>{link_data['name']}</b>...", parse_mode="HTML")
         await callback.answer()
+
+        bot_instance = bot_manager.get_instance()
+        if bot_instance:
+            await bot_instance.force_check_specific_link(callback.from_user.id, link_data['id'])
+        else:
+            await callback.message.edit_text("❌ Бот не инициализирован")
 
     except Exception as e:
         logger.error(f"❌ Ошибка при принудительной проверке: {e}")
@@ -3306,35 +4360,25 @@ async def process_force_check_link(callback: CallbackQuery):
 
 @router.callback_query(F.data == "manage_configure_parsing")
 async def manage_configure_parsing(callback: CallbackQuery):
-    """Показывает список ссылок для настройки парсинга"""
+    """Показывает настройки парсинга для уже выбранной ссылки"""
     try:
-        with get_db_session() as db:
-            links = db.query(ApiLink).all()
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
 
-            if not links:
-                await callback.message.edit_text("❌ У вас нет ссылок для настройки")
-                return
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
 
-            # Детач данных
-            links_data = []
-            for link in links:
-                links_data.append(type('Link', (), {
-                    'id': link.id,
-                    'name': link.name,
-                    'is_active': link.is_active,
-                    'check_interval': link.check_interval,
-                    'parsing_type': link.parsing_type or 'combined'
-                })())
-
-            keyboard = get_links_keyboard(links_data, "configure_parsing")
-            await callback.message.edit_text(
-                "🎯 <b>Настройка парсинга:</b>\n\n"
-                "Выберите ссылку для настройки:",
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
-
-        await callback.answer()
+        # Используем существующую функцию для показа конфигурации
+        # Создаем mock callback с правильными данными
+        from unittest.mock import Mock
+        config_callback = Mock()
+        config_callback.data = f"configure_parsing_link_{link_id}"
+        config_callback.message = callback.message
+        config_callback.answer = callback.answer
+        config_callback.from_user = callback.from_user
+        
+        await show_parsing_configuration(config_callback)
 
     except Exception as e:
         logger.error(f"❌ Ошибка при настройке парсинга: {e}")
@@ -3358,11 +4402,16 @@ async def show_parsing_configuration(callback: CallbackQuery):
             link_data = {
                 'id': link.id,
                 'name': link.name,
+                'category': link.category,
                 'parsing_type': link.parsing_type or 'combined',
                 'api_url': link.api_url,
                 'html_url': link.html_url,
                 'telegram_channel': link.telegram_channel,
-                'telegram_keywords': link.get_telegram_keywords()
+                'telegram_keywords': link.get_telegram_keywords(),
+                'announcement_strategy': link.announcement_strategy,
+                'announcement_keywords': link.get_announcement_keywords(),
+                'announcement_regex': link.announcement_regex,
+                'announcement_css_selector': link.announcement_css_selector
             }
 
         # Словарь для отображения типа парсинга с описанием
@@ -3411,6 +4460,36 @@ async def show_parsing_configuration(callback: CallbackQuery):
                 message_parts.append(f"<b>🔑 Ключевые слова:</b>\n{keywords_str}\n\n")
             else:
                 message_parts.append(f"<b>🔑 Ключевые слова:</b> <i>Не указаны</i>\n\n")
+        elif link_data['category'] == 'announcement':
+            # Для анонсов показываем специальные параметры
+            if link_data['html_url']:
+                message_parts.append(f"<b>🌐 HTML URL:</b>\n<code>{link_data['html_url']}</code>\n\n")
+            else:
+                message_parts.append(f"<b>🌐 HTML URL:</b> <i>Не указан</i>\n\n")
+            
+            # Стратегия парсинга
+            strategy_names = {
+                'any_change': '🔄 Любые изменения',
+                'element_change': '🎯 Изменения в элементе',
+                'any_keyword': '🔑 Любое ключевое слово',
+                'all_keywords': '📚 Все ключевые слова',
+                'regex': '⚡ Регулярное выражение'
+            }
+            strategy_name = strategy_names.get(link_data['announcement_strategy'], 'Не указана')
+            message_parts.append(f"<b>📋 Стратегия парсинга:</b> {strategy_name}\n\n")
+            
+            # Ключевые слова (если есть)
+            if link_data['announcement_keywords'] and link_data['announcement_strategy'] in ['any_keyword', 'all_keywords']:
+                keywords_str = ", ".join([f"<code>{kw}</code>" for kw in link_data['announcement_keywords']])
+                message_parts.append(f"<b>🔑 Ключевые слова:</b>\n{keywords_str}\n\n")
+            
+            # CSS селектор (если есть)
+            if link_data['announcement_css_selector'] and link_data['announcement_strategy'] == 'element_change':
+                message_parts.append(f"<b>🎯 CSS селектор:</b>\n<code>{link_data['announcement_css_selector']}</code>\n\n")
+            
+            # Регулярное выражение (если есть)
+            if link_data['announcement_regex'] and link_data['announcement_strategy'] == 'regex':
+                message_parts.append(f"<b>⚡ Регулярное выражение:</b>\n<code>{link_data['announcement_regex']}</code>\n\n")
         else:
             # Для остальных типов показываем API и HTML URL
             if link_data['api_url']:
@@ -3425,7 +4504,7 @@ async def show_parsing_configuration(callback: CallbackQuery):
 
         message_parts.append("Выберите параметр для изменения:")
 
-        keyboard = get_configure_parsing_submenu(link_id, current_type)
+        keyboard = get_configure_parsing_submenu(link_id, current_type, link_data['category'])
         await callback.message.edit_text(
             "".join(message_parts),
             reply_markup=keyboard,
@@ -3885,6 +4964,367 @@ async def process_telegram_keywords_edit(message: Message, state: FSMContext):
         await message.answer("❌ Ошибка при сохранении ключевых слов")
         await state.clear()
 
+# ========================================
+# ОБРАБОТЧИКИ РЕДАКТИРОВАНИЯ АНОНСОВ
+# ========================================
+
+@router.callback_query(F.data.startswith("edit_announcement_strategy_"))
+async def edit_announcement_strategy(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс изменения стратегии парсинга анонсов"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            current_strategy = link.announcement_strategy
+            link_name = link.name
+
+        strategy_names = {
+            'any_change': '🔄 Любые изменения',
+            'element_change': '🎯 Изменения в элементе',
+            'any_keyword': '🔑 Любое ключевое слово',
+            'all_keywords': '📚 Все ключевые слова',
+            'regex': '⚡ Регулярное выражение'
+        }
+        current_strategy_name = strategy_names.get(current_strategy, 'Не указана')
+
+        # Создаем клавиатуру с выбором стратегии
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🔄 Любые изменения", callback_data=f"set_ann_strategy_{link_id}_any_change"))
+        builder.add(InlineKeyboardButton(text="🎯 Изменения в элементе", callback_data=f"set_ann_strategy_{link_id}_element_change"))
+        builder.add(InlineKeyboardButton(text="🔑 Любое ключевое слово", callback_data=f"set_ann_strategy_{link_id}_any_keyword"))
+        builder.add(InlineKeyboardButton(text="📚 Все ключевые слова", callback_data=f"set_ann_strategy_{link_id}_all_keywords"))
+        builder.add(InlineKeyboardButton(text="⚡ Регулярное выражение", callback_data=f"set_ann_strategy_{link_id}_regex"))
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"configure_parsing_link_{link_id}"))
+        builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
+        builder.adjust(1)
+
+        await callback.message.edit_text(
+            f"📋 <b>Изменение стратегии парсинга анонсов</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Текущая стратегия:</b> {current_strategy_name}\n\n"
+            f"<b>Стратегии:</b>\n\n"
+            f"🔄 <b>Любые изменения</b> - отслеживание любых изменений на странице\n"
+            f"🎯 <b>Изменения в элементе</b> - отслеживание конкретного элемента (CSS Selector)\n"
+            f"🔑 <b>Любое ключевое слово</b> - поиск любого из заданных слов\n"
+            f"📚 <b>Все ключевые слова</b> - все слова должны присутствовать\n"
+            f"⚡ <b>Регулярное выражение</b> - поиск по regex паттерну\n\n"
+            f"Выберите подходящую стратегию:",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании стратегии анонсов: {e}")
+        await callback.message.edit_text("❌ Ошибка при редактировании стратегии")
+        await callback.answer()
+
+@router.callback_query(F.data.startswith("set_ann_strategy_"))
+async def set_announcement_strategy(callback: CallbackQuery):
+    """Сохраняет выбранную стратегию анонсов"""
+    try:
+        parts = callback.data.split("_")
+        link_id = int(parts[3])
+        strategy = "_".join(parts[4:])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            link.announcement_strategy = strategy
+            db.commit()
+            link_name = link.name
+
+        strategy_names = {
+            'any_change': '🔄 Любые изменения',
+            'element_change': '🎯 Изменения в элементе',
+            'any_keyword': '🔑 Любое ключевое слово',
+            'all_keywords': '📚 Все ключевые слова',
+            'regex': '⚡ Регулярное выражение'
+        }
+        strategy_name = strategy_names.get(strategy, strategy)
+
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ К настройкам ссылки", callback_data=f"configure_parsing_link_{link_id}"))
+        builder.add(InlineKeyboardButton(text="❌ Закрыть", callback_data="cancel_action"))
+        builder.adjust(1)
+
+        await callback.message.edit_text(
+            f"✅ <b>Стратегия успешно изменена!</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Новая стратегия:</b> {strategy_name}",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении стратегии: {e}")
+        await callback.message.edit_text("❌ Ошибка при сохранении стратегии")
+        await callback.answer()
+
+@router.callback_query(F.data.startswith("edit_announcement_keywords_"))
+async def edit_announcement_keywords(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс изменения ключевых слов анонсов"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            current_keywords = link.get_announcement_keywords()
+            link_name = link.name
+
+        await state.update_data(link_id=link_id, link_name=link_name)
+        await state.set_state(ConfigureParsingStates.waiting_for_announcement_keywords_edit)
+
+        keywords_text = ", ".join([f"<code>{kw}</code>" for kw in current_keywords]) if current_keywords else "<i>Не указаны</i>"
+
+        await callback.message.edit_text(
+            f"🔑 <b>Изменение ключевых слов анонсов</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Текущие ключевые слова:</b> {keywords_text}\n\n"
+            f"📝 Введите новые ключевые слова через запятую:\n\n"
+            f"<b>Примеры:</b>\n"
+            f"<code>airdrop, промо, campaign, listing</code>\n"
+            f"<code>новый токен, листинг, бонус</code>\n"
+            f"<code>staking, earn, 0% fee</code>",
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании ключевых слов: {e}")
+        await callback.message.edit_text("❌ Ошибка при редактировании ключевых слов")
+        await callback.answer()
+
+@router.message(ConfigureParsingStates.waiting_for_announcement_keywords_edit)
+async def process_announcement_keywords_edit(message: Message, state: FSMContext):
+    """Обрабатывает изменение ключевых слов анонсов"""
+    try:
+        data = await state.get_data()
+        link_id = data['link_id']
+        link_name = data['link_name']
+
+        keywords_input = message.text.strip()
+
+        if not keywords_input:
+            await message.answer("❌ Ключевые слова не могут быть пустыми. Попробуйте снова:")
+            return
+
+        # Разбиваем по запятой и очищаем
+        keywords = [kw.strip() for kw in keywords_input.split(',') if kw.strip()]
+
+        if not keywords:
+            await message.answer("❌ Не удалось распознать ключевые слова. Введите их через запятую:")
+            return
+
+        # Сохраняем ключевые слова в базу данных
+        def update_announcement_keywords(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+
+            link.set_announcement_keywords(keywords)
+
+        atomic_operation(update_announcement_keywords)
+
+        keywords_str = ", ".join([f"<code>{kw}</code>" for kw in keywords])
+
+        await message.answer(
+            f"✅ <b>Ключевые слова успешно обновлены!</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Ключевые слова:</b> {keywords_str}",
+            parse_mode="HTML"
+        )
+
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении ключевых слов: {e}")
+        await message.answer("❌ Ошибка при сохранении ключевых слов")
+        await state.clear()
+
+@router.callback_query(F.data.startswith("edit_announcement_css_"))
+async def edit_announcement_css(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс изменения CSS селектора анонсов"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            current_css = link.announcement_css_selector
+            link_name = link.name
+
+        await state.update_data(link_id=link_id, link_name=link_name)
+        await state.set_state(ConfigureParsingStates.waiting_for_announcement_css_edit)
+
+        css_text = f"<code>{current_css}</code>" if current_css else "<i>Не указан</i>"
+
+        await callback.message.edit_text(
+            f"🎯 <b>Изменение CSS селектора</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Текущий селектор:</b> {css_text}\n\n"
+            f"📝 Введите новый CSS селектор:\n\n"
+            f"<b>Примеры:</b>\n"
+            f"<code>div.announcement-item</code>\n"
+            f"<code>#latest-news</code>\n"
+            f"<code>.news-container > article</code>",
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании CSS селектора: {e}")
+        await callback.message.edit_text("❌ Ошибка при редактировании CSS селектора")
+        await callback.answer()
+
+@router.message(ConfigureParsingStates.waiting_for_announcement_css_edit)
+async def process_announcement_css_edit(message: Message, state: FSMContext):
+    """Обрабатывает изменение CSS селектора анонсов"""
+    try:
+        data = await state.get_data()
+        link_id = data['link_id']
+        link_name = data['link_name']
+
+        css_selector = message.text.strip()
+
+        if not css_selector:
+            await message.answer("❌ CSS селектор не может быть пустым. Попробуйте снова:")
+            return
+
+        # Сохраняем CSS селектор в базу данных
+        def update_announcement_css(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+
+            link.announcement_css_selector = css_selector
+
+        atomic_operation(update_announcement_css)
+
+        await message.answer(
+            f"✅ <b>CSS селектор успешно обновлён!</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>CSS селектор:</b> <code>{css_selector}</code>",
+            parse_mode="HTML"
+        )
+
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении CSS селектора: {e}")
+        await message.answer("❌ Ошибка при сохранении CSS селектора")
+        await state.clear()
+
+@router.callback_query(F.data.startswith("edit_announcement_regex_"))
+async def edit_announcement_regex(callback: CallbackQuery, state: FSMContext):
+    """Начинает процесс изменения регулярного выражения анонсов"""
+    try:
+        link_id = int(callback.data.split("_")[-1])
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                return
+
+            current_regex = link.announcement_regex
+            link_name = link.name
+
+        await state.update_data(link_id=link_id, link_name=link_name)
+        await state.set_state(ConfigureParsingStates.waiting_for_announcement_regex_edit)
+
+        regex_text = f"<code>{current_regex}</code>" if current_regex else "<i>Не указано</i>"
+
+        await callback.message.edit_text(
+            f"⚡ <b>Изменение регулярного выражения</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Текущее выражение:</b> {regex_text}\n\n"
+            f"📝 Введите новое регулярное выражение:\n\n"
+            f"<b>Примеры:</b>\n"
+            f"<code>airdrop.*listing</code>\n"
+            f"<code>\\d+% (APR|APY)</code>\n"
+            f"<code>new.*token.*launch</code>",
+            parse_mode="HTML"
+        )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании regex: {e}")
+        await callback.message.edit_text("❌ Ошибка при редактировании regex")
+        await callback.answer()
+
+@router.message(ConfigureParsingStates.waiting_for_announcement_regex_edit)
+async def process_announcement_regex_edit(message: Message, state: FSMContext):
+    """Обрабатывает изменение регулярного выражения анонсов"""
+    try:
+        data = await state.get_data()
+        link_id = data['link_id']
+        link_name = data['link_name']
+
+        regex_pattern = message.text.strip()
+
+        if not regex_pattern:
+            await message.answer("❌ Регулярное выражение не может быть пустым. Попробуйте снова:")
+            return
+
+        # Проверяем валидность regex
+        try:
+            import re
+            re.compile(regex_pattern)
+        except re.error as e:
+            await message.answer(f"❌ Некорректное регулярное выражение: {e}\n\nПопробуйте снова:")
+            return
+
+        # Сохраняем regex в базу данных
+        def update_announcement_regex(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+
+            link.announcement_regex = regex_pattern
+
+        atomic_operation(update_announcement_regex)
+
+        await message.answer(
+            f"✅ <b>Регулярное выражение успешно обновлено!</b>\n\n"
+            f"<b>Ссылка:</b> {link_name}\n"
+            f"<b>Regex:</b> <code>{regex_pattern}</code>",
+            parse_mode="HTML"
+        )
+
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении regex: {e}")
+        await message.answer("❌ Ошибка при сохранении regex")
+        await state.clear()
+
 @router.message(F.text == "🔄 Проверить всё")
 async def menu_check_all(message: Message):
     await message.answer("🔄 Начинаю проверку АКТИВНЫХ ссылок...")
@@ -4007,7 +5447,9 @@ async def proxy_list(callback: CallbackQuery):
 
         if not proxies:
             logger.warning("⚠️ Нет добавленных прокси-серверов")
-            await callback.message.edit_text("❌ Нет добавленных прокси-серверов")
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
+            await callback.message.edit_text("❌ Нет добавленных прокси-серверов", reply_markup=builder.as_markup())
             return
 
         # Детачим данные из объектов SQLAlchemy в словари
@@ -4038,7 +5480,9 @@ async def proxy_list(callback: CallbackQuery):
             response += f"   Приоритет: {proxy_data['priority']}\n\n"
 
         logger.info(f"✅ Отображено {len(proxy_data_list)} прокси-серверов")
-        await callback.message.edit_text(response, parse_mode="HTML")
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
+        await callback.message.edit_text(response, parse_mode="HTML", reply_markup=builder.as_markup())
 
     except Exception as e:
         logger.error(f"❌ Ошибка при получении списка прокси: {e}", exc_info=True)
@@ -4046,6 +5490,10 @@ async def proxy_list(callback: CallbackQuery):
 
 @router.callback_query(F.data == "proxy_add")
 async def proxy_add_start(callback: CallbackQuery, state: FSMContext):
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="proxy_cancel"))
+    builder.adjust(2)
     await callback.message.edit_text(
         "➕ <b>Добавление нового прокси</b>\n\n"
         "Введите адрес прокси в формате:\n"
@@ -4053,7 +5501,8 @@ async def proxy_add_start(callback: CallbackQuery, state: FSMContext):
         "Примеры:\n"
         "• <code>192.168.1.1:8080</code>\n"
         "• <code>user:password@proxy.example.com:3128</code>",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
     )
     await state.set_state(ProxyManagementStates.waiting_for_proxy_address)
     await callback.answer()
@@ -4072,9 +5521,9 @@ async def process_proxy_address(message: Message, state: FSMContext):
     protocols = ["http", "https", "socks4", "socks5"]
     for protocol in protocols:
         builder.add(InlineKeyboardButton(text=protocol.upper(), callback_data=f"proxy_protocol_{protocol}"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="proxy_add"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="proxy_cancel"))
     builder.adjust(2)
-    
     await message.answer(
         f"🔌 <b>Выберите протокол для прокси:</b>\n\n"
         f"Адрес: <code>{proxy_address}</code>",
@@ -4135,11 +5584,14 @@ async def proxy_test_all(callback: CallbackQuery):
         proxies = proxy_manager.get_all_proxies(active_only=False)
         active_proxies = [p for p in proxies if p.status == "active"]
         
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
         await callback.message.edit_text(
             f"✅ <b>Тестирование завершено!</b>\n\n"
             f"Активных прокси: {len(active_proxies)}/{len(proxies)}\n"
             f"Используйте <b>\"📋 Список прокси\"</b> для просмотра детальной информации.",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
         )
         
     except Exception as e:
@@ -4175,7 +5627,9 @@ async def proxy_stats(callback: CallbackQuery):
             f"<i>Детальная статистика по каждому прокси в списке</i>"
         )
         
-        await callback.message.edit_text(response, parse_mode="HTML")
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
+        await callback.message.edit_text(response, parse_mode="HTML", reply_markup=builder.as_markup())
         
     except Exception as e:
         logger.error(f"Ошибка при получении статистики прокси: {e}")
@@ -4183,6 +5637,7 @@ async def proxy_stats(callback: CallbackQuery):
 
 @router.callback_query(F.data == "proxy_delete")
 async def proxy_delete_start(callback: CallbackQuery):
+    await safe_answer_callback(callback)
     try:
         proxy_manager = get_proxy_manager()
         proxies = proxy_manager.get_all_proxies()
@@ -4198,9 +5653,9 @@ async def proxy_delete_start(callback: CallbackQuery):
                 text=f"{status_icon} {proxy.address}",
                 callback_data=f"proxy_delete_{proxy.id}"
             ))
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
         builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="proxy_cancel"))
         builder.adjust(1)
-        
         await callback.message.edit_text(
             "🗑️ <b>Выберите прокси для удаления:</b>",
             reply_markup=builder.as_markup(),
@@ -4213,8 +5668,17 @@ async def proxy_delete_start(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("proxy_delete_"))
 async def process_proxy_delete(callback: CallbackQuery):
+    await safe_answer_callback(callback)
     try:
-        proxy_id = int(callback.data.split("_")[2])
+        # Игнорируем proxy_delete_dead
+        if callback.data == "proxy_delete_dead":
+            return
+            
+        proxy_id_str = callback.data.split("_")[2]
+        if not proxy_id_str.isdigit():
+            await callback.message.edit_text("❌ Некорректный идентификатор прокси")
+            return
+        proxy_id = int(proxy_id_str)
         proxy_manager = get_proxy_manager()
         proxy = proxy_manager.get_proxy_by_id(proxy_id)
         
@@ -4243,24 +5707,77 @@ async def process_proxy_delete(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("proxy_confirm_delete_"))
 async def process_proxy_confirm_delete(callback: CallbackQuery):
+    await safe_answer_callback(callback)
     try:
         proxy_id = int(callback.data.split("_")[3])
         proxy_manager = get_proxy_manager()
         
         success = proxy_manager.delete_proxy(proxy_id)
         
+        proxy_manager = get_proxy_manager()
+        proxies_left = proxy_manager.get_all_proxies()
         if success:
-            await callback.message.edit_text(
-                "✅ <b>Прокси успешно удален!</b>\n\n"
-                "Прокси-сервер больше не будет использоваться в ротации.",
-                parse_mode="HTML"
-            )
+            if proxies_left:
+                # Показываем обновленный список для повторного удаления
+                builder = InlineKeyboardBuilder()
+                for proxy in proxies_left:
+                    status_icon = "🟢" if proxy.status == "active" else "🔴"
+                    builder.add(InlineKeyboardButton(
+                        text=f"{status_icon} {proxy.address}",
+                        callback_data=f"proxy_delete_{proxy.id}"
+                    ))
+                builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
+                builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="proxy_cancel"))
+                builder.adjust(1)
+                await callback.message.edit_text(
+                    "✅ <b>Прокси успешно удален!</b>\n\n"
+                    "Выберите следующий прокси для удаления:",
+                    parse_mode="HTML",
+                    reply_markup=builder.as_markup()
+                )
+            else:
+                builder = InlineKeyboardBuilder()
+                builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
+                await callback.message.edit_text(
+                    "✅ <b>Прокси успешно удален!</b>\n\n"
+                    "Прокси-сервер больше не будет использоваться в ротации.",
+                    parse_mode="HTML",
+                    reply_markup=builder.as_markup()
+                )
         else:
             await callback.message.edit_text("❌ Не удалось удалить прокси")
-            
     except Exception as e:
-        logger.error(f"Ошибка при удалении прокси: {e}")
-        await callback.message.edit_text("❌ Ошибка при удалении прокси")
+        logger.error(f"Ошибка при подтверждении удаления прокси: {e}")
+        await callback.message.edit_text("❌ Ошибка при подтверждении удаления прокси")
+
+# =============================================================================
+# УДАЛЕНИЕ НЕРАБОЧИХ ПРОКСИ
+# =============================================================================
+
+@router.callback_query(F.data == "proxy_delete_dead")
+async def proxy_delete_dead(callback: CallbackQuery):
+    try:
+        proxy_manager = get_proxy_manager()
+        proxies = proxy_manager.get_all_proxies(active_only=False)
+        dead_proxies = [p for p in proxies if p.status != "active"]
+        if not dead_proxies:
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
+            await callback.message.edit_text("❌ Нет нерабочих прокси для удаления.", reply_markup=builder.as_markup())
+            return
+        deleted = 0
+        for proxy in dead_proxies:
+            if proxy_manager.delete_proxy(proxy.id):
+                deleted += 1
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_proxy"))
+        await callback.message.edit_text(
+            f"✅ Удалено нерабочих прокси: {deleted}",
+            reply_markup=builder.as_markup()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при удалении нерабочих прокси: {e}")
+        await callback.message.edit_text("❌ Ошибка при удалении нерабочих прокси")
 
 # =============================================================================
 # УПРАВЛЕНИЕ USER-AGENT
@@ -4303,7 +5820,9 @@ async def ua_list(callback: CallbackQuery):
             response += f"<i>... и еще {len(user_agents) - 10} User-Agent</i>"
 
         logger.info(f"✅ Отображено {len(ua_data_list)} User-Agent")
-        await callback.message.edit_text(response, parse_mode="HTML")
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_ua"))
+        await callback.message.edit_text(response, parse_mode="HTML", reply_markup=builder.as_markup())
 
     except Exception as e:
         logger.error(f"❌ Ошибка при получении списка User-Agent: {e}", exc_info=True)
@@ -4327,7 +5846,9 @@ async def ua_stats(callback: CallbackQuery):
         )
 
         logger.info(f"✅ Статистика User-Agent получена: {stats['total']} всего, {stats['active']} активных")
-        await callback.message.edit_text(response, parse_mode="HTML")
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_ua"))
+        await callback.message.edit_text(response, parse_mode="HTML", reply_markup=builder.as_markup())
 
     except Exception as e:
         logger.error(f"❌ Ошибка при получении статистики User-Agent: {e}", exc_info=True)
@@ -4335,12 +5856,15 @@ async def ua_stats(callback: CallbackQuery):
 
 @router.callback_query(F.data == "ua_add")
 async def ua_add_start(callback: CallbackQuery, state: FSMContext):
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_ua"))
     await callback.message.edit_text(
         "➕ <b>Добавление нового User-Agent</b>\n\n"
         "Введите User-Agent строку:\n\n"
         "Пример:\n"
         "<code>Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36</code>",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
     )
     await state.set_state(UserAgentStates.waiting_for_user_agent)
     await callback.answer()
@@ -4350,8 +5874,11 @@ async def process_user_agent_input(message: Message, state: FSMContext):
     user_agent_string = message.text.strip()
     
     if not user_agent_string:
-        await message.answer("❌ User-Agent не может быть пустым. Попробуйте снова:")
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_ua"))
+        await message.answer("❌ User-Agent не может быть пустым. Попробуйте снова:", reply_markup=builder.as_markup())
         return
+    # === Обработчики отмены и возврата для User-Agent ===
     
     try:
         ua_manager = get_user_agent_manager()
@@ -4461,7 +5988,9 @@ async def stats_overall(callback: CallbackQuery):
             f"<i>Статистика обновляется в реальном времени</i>"
         )
         
-        await callback.message.edit_text(response, parse_mode="HTML")
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_stats"))
+        await callback.message.edit_text(response, parse_mode="HTML", reply_markup=builder.as_markup())
         
     except Exception as e:
         logger.error(f"Ошибка при получении общей статистики: {e}")
@@ -4474,7 +6003,9 @@ async def stats_by_exchange(callback: CallbackQuery):
             links = db.query(ApiLink).all()
             
             if not links:
-                await callback.message.edit_text("❌ Нет добавленных бирж для статистики")
+                builder = InlineKeyboardBuilder()
+                builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_stats"))
+                await callback.message.edit_text("❌ Нет добавленных бирж для статистики", reply_markup=builder.as_markup())
                 return
             
             exchanges = list(set(link.exchange for link in links))
@@ -4490,7 +6021,9 @@ async def stats_by_exchange(callback: CallbackQuery):
                     response += f"• Успешность: {stats['success_rate']}%\n"
                     response += f"• Среднее время: {stats['average_response_time']}мс\n\n"
             
-            await callback.message.edit_text(response, parse_mode="HTML")
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_stats"))
+            await callback.message.edit_text(response, parse_mode="HTML", reply_markup=builder.as_markup())
             
     except Exception as e:
         logger.error(f"Ошибка при получении статистики по биржам: {e}")
@@ -4503,7 +6036,9 @@ async def stats_best_combinations(callback: CallbackQuery):
             links = db.query(ApiLink).all()
             
             if not links:
-                await callback.message.edit_text("❌ Нет добавленных бирж")
+                builder = InlineKeyboardBuilder()
+                builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_stats"))
+                await callback.message.edit_text("❌ Нет добавленных бирж", reply_markup=builder.as_markup())
                 return
             
             exchanges = list(set(link.exchange for link in links))
@@ -4520,7 +6055,9 @@ async def stats_best_combinations(callback: CallbackQuery):
                         response += f"   Успешность: {combo['success_rate']}% | Время: {combo['avg_response_time']}мс\n"
                     response += "\n"
             
-            await callback.message.edit_text(response, parse_mode="HTML")
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_stats"))
+            await callback.message.edit_text(response, parse_mode="HTML", reply_markup=builder.as_markup())
             
     except Exception as e:
         logger.error(f"Ошибка при получении лучших комбинаций: {e}")
@@ -4549,7 +6086,9 @@ async def stats_rotation_status(callback: CallbackQuery):
             for exchange, combo in list(status['combinations'].items())[:5]:
                 response += f"• {exchange}: proxy#{combo['proxy_id']} + ua#{combo['user_agent_id']} (score: {combo['score']})\n"
         
-        await callback.message.edit_text(response, parse_mode="HTML")
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="bypass_stats"))
+        await callback.message.edit_text(response, parse_mode="HTML", reply_markup=builder.as_markup())
         
     except Exception as e:
         logger.error(f"Ошибка при получении статуса ротации: {e}")
@@ -4586,7 +6125,8 @@ async def rotation_current(callback: CallbackQuery):
             f"<i>Используйте кнопки ниже для изменения настроек</i>"
         )
         
-        await callback.message.edit_text(response, parse_mode="HTML")
+        keyboard = get_rotation_management_keyboard()
+        await callback.message.edit_text(response, parse_mode="HTML", reply_markup=keyboard)
         
     except Exception as e:
         logger.error(f"Ошибка при получении настроек ротации: {e}")
@@ -4594,16 +6134,17 @@ async def rotation_current(callback: CallbackQuery):
 
 @router.callback_query(F.data == "rotation_interval")
 async def rotation_interval_start(callback: CallbackQuery, state: FSMContext):
+    keyboard = get_rotation_interval_keyboard()
     await callback.message.edit_text(
         "⏰ <b>Настройка интервала ротации</b>\n\n"
-        "Введите интервал в секундах:\n"
-        "• Рекомендуется: 900-3600 сек (15-60 минут)\n"
-        "• Минимальный: 300 сек (5 минут)\n"
-        "• Максимальный: 86400 сек (24 часа)\n\n"
-        "Текущее значение: 900 сек",
-        parse_mode="HTML"
+        "Выберите интервал из предложенных вариантов или введите свое значение:\n\n"
+        "• Рекомендуется: 15-60 минут\n"
+        "• Минимальный: 10 минут (600 сек)\n"
+        "• Максимальный: 24 часа (86400 сек)\n\n"
+        "<i>Выберите подходящий вариант:</i>",
+        parse_mode="HTML",
+        reply_markup=keyboard
     )
-    await state.set_state(RotationSettingsStates.waiting_for_rotation_interval)
     await callback.answer()
 
 @router.message(RotationSettingsStates.waiting_for_rotation_interval)
@@ -4633,6 +6174,218 @@ async def process_rotation_interval(message: Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка при установке интервала ротации: {e}")
         await message.answer("❌ Ошибка при установке интервала ротации")
+        await state.clear()
+
+# Обработчики preset кнопок для интервала ротации
+@router.callback_query(F.data.startswith("set_rotation_interval_"))
+async def set_rotation_interval_preset(callback: CallbackQuery):
+    try:
+        interval_seconds = int(callback.data.split("_")[-1])
+        
+        rotation_manager = get_rotation_manager()
+        rotation_manager.update_settings(rotation_interval=interval_seconds)
+        
+        # Форматируем время в читаемый вид
+        if interval_seconds < 3600:
+            time_str = f"{interval_seconds // 60} минут"
+        else:
+            hours = interval_seconds // 3600
+            time_str = f"{hours} час{'а' if hours < 5 else 'ов'}"
+        
+        await callback.message.edit_text(
+            f"✅ <b>Интервал ротации обновлен!</b>\n\n"
+            f"Новый интервал: {time_str} ({interval_seconds} сек)\n"
+            f"Ротация будет выполняться с заданным интервалом.",
+            parse_mode="HTML"
+        )
+        await callback.answer("✅ Интервал установлен!")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при установке интервала ротации: {e}")
+        await callback.message.edit_text("❌ Ошибка при установке интервала ротации")
+        await callback.answer("❌ Ошибка!")
+
+@router.callback_query(F.data == "rotation_interval_custom")
+async def rotation_interval_custom(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "⏰ <b>Ввод своего значения интервала</b>\n\n"
+        "Введите интервал в секундах:\n"
+        "• Минимальный: 300 сек (5 минут)\n"
+        "• Максимальный: 86400 сек (24 часа)\n\n"
+        "<i>Например: 1800 (для 30 минут)</i>",
+        parse_mode="HTML"
+    )
+    await state.set_state(RotationSettingsStates.waiting_for_rotation_interval)
+    await callback.answer()
+
+# =============================================================================
+# НАСТРОЙКА ХРАНЕНИЯ СТАТИСТИКИ
+# =============================================================================
+
+@router.callback_query(F.data == "rotation_stats_retention")
+async def rotation_stats_retention_start(callback: CallbackQuery):
+    keyboard = get_stats_retention_keyboard()
+    rotation_manager = get_rotation_manager()
+    current_days = rotation_manager.settings.stats_retention_days
+    
+    await callback.message.edit_text(
+        "📊 <b>Настройка срока хранения статистики</b>\n\n"
+        f"Текущее значение: {current_days} дней\n\n"
+        "Выберите новый срок хранения статистики или введите свое значение:\n\n"
+        "• Рекомендуется: 30-90 дней\n"
+        "• Минимальный: 1 день\n"
+        "• Максимальный: 365 дней\n\n"
+        "<i>Старые записи будут автоматически удаляться</i>",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("set_stats_retention_"))
+async def set_stats_retention_preset(callback: CallbackQuery):
+    try:
+        days = int(callback.data.split("_")[-1])
+        
+        rotation_manager = get_rotation_manager()
+        rotation_manager.update_settings(stats_retention_days=days)
+        
+        await callback.message.edit_text(
+            f"✅ <b>Срок хранения статистики обновлен!</b>\n\n"
+            f"Новое значение: {days} дней\n"
+            f"Записи старше {days} дней будут автоматически удаляться.",
+            parse_mode="HTML"
+        )
+        await callback.answer("✅ Настройка сохранена!")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при установке срока хранения статистики: {e}")
+        await callback.message.edit_text("❌ Ошибка при установке срока хранения")
+        await callback.answer("❌ Ошибка!")
+
+@router.callback_query(F.data == "stats_retention_custom")
+async def stats_retention_custom(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "📊 <b>Ввод своего значения</b>\n\n"
+        "Введите количество дней для хранения статистики:\n"
+        "• Минимальный: 1 день\n"
+        "• Максимальный: 365 дней\n\n"
+        "<i>Например: 45 (для 45 дней)</i>",
+        parse_mode="HTML"
+    )
+    await state.set_state(RotationSettingsStates.waiting_for_stats_retention)
+    await callback.answer()
+
+@router.message(RotationSettingsStates.waiting_for_stats_retention)
+async def process_stats_retention(message: Message, state: FSMContext):
+    try:
+        days = int(message.text.strip())
+        
+        if days < 1 or days > 365:
+            await message.answer("❌ Срок должен быть от 1 до 365 дней. Попробуйте снова:")
+            return
+        
+        rotation_manager = get_rotation_manager()
+        rotation_manager.update_settings(stats_retention_days=days)
+        
+        await message.answer(
+            f"✅ <b>Срок хранения статистики обновлен!</b>\n\n"
+            f"Новое значение: {days} дней\n"
+            f"Записи старше {days} дней будут автоматически удаляться.",
+            parse_mode="HTML"
+        )
+        
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("❌ Введите корректное число (только цифры):")
+    except Exception as e:
+        logger.error(f"Ошибка при установке срока хранения статистики: {e}")
+        await message.answer("❌ Ошибка при установке срока хранения")
+        await state.clear()
+
+# =============================================================================
+# НАСТРОЙКА АРХИВАЦИИ НЕАКТИВНЫХ
+# =============================================================================
+
+@router.callback_query(F.data == "rotation_archive_inactive")
+async def rotation_archive_inactive_start(callback: CallbackQuery):
+    keyboard = get_archive_inactive_keyboard()
+    rotation_manager = get_rotation_manager()
+    current_days = rotation_manager.settings.archive_inactive_days
+    
+    await callback.message.edit_text(
+        "📦 <b>Настройка срока архивации неактивных записей</b>\n\n"
+        f"Текущее значение: {current_days} дней\n\n"
+        "Выберите новый срок архивации или введите свое значение:\n\n"
+        "• Рекомендуется: 7-30 дней\n"
+        "• Минимальный: 1 день\n"
+        "• Максимальный: 90 дней\n\n"
+        "<i>Неактивные записи будут архивироваться через указанный период</i>",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("set_archive_inactive_"))
+async def set_archive_inactive_preset(callback: CallbackQuery):
+    try:
+        days = int(callback.data.split("_")[-1])
+        
+        rotation_manager = get_rotation_manager()
+        rotation_manager.update_settings(archive_inactive_days=days)
+        
+        await callback.message.edit_text(
+            f"✅ <b>Срок архивации обновлен!</b>\n\n"
+            f"Новое значение: {days} дней\n"
+            f"Неактивные записи будут архивироваться через {days} дней.",
+            parse_mode="HTML"
+        )
+        await callback.answer("✅ Настройка сохранена!")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при установке срока архивации: {e}")
+        await callback.message.edit_text("❌ Ошибка при установке срока архивации")
+        await callback.answer("❌ Ошибка!")
+
+@router.callback_query(F.data == "archive_inactive_custom")
+async def archive_inactive_custom(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "📦 <b>Ввод своего значения</b>\n\n"
+        "Введите количество дней для архивации неактивных записей:\n"
+        "• Минимальный: 1 день\n"
+        "• Максимальный: 90 дней\n\n"
+        "<i>Например: 14 (для 14 дней)</i>",
+        parse_mode="HTML"
+    )
+    await state.set_state(RotationSettingsStates.waiting_for_archive_inactive)
+    await callback.answer()
+
+@router.message(RotationSettingsStates.waiting_for_archive_inactive)
+async def process_archive_inactive(message: Message, state: FSMContext):
+    try:
+        days = int(message.text.strip())
+        
+        if days < 1 or days > 90:
+            await message.answer("❌ Срок должен быть от 1 до 90 дней. Попробуйте снова:")
+            return
+        
+        rotation_manager = get_rotation_manager()
+        rotation_manager.update_settings(archive_inactive_days=days)
+        
+        await message.answer(
+            f"✅ <b>Срок архивации обновлен!</b>\n\n"
+            f"Новое значение: {days} дней\n"
+            f"Неактивные записи будут архивироваться через {days} дней.",
+            parse_mode="HTML"
+        )
+        
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("❌ Введите корректное число (только цифры):")
+    except Exception as e:
+        logger.error(f"Ошибка при установке срока архивации: {e}")
+        await message.answer("❌ Ошибка при установке срока архивации")
         await state.clear()
 
 @router.callback_query(F.data == "rotation_auto_optimize")
@@ -4697,9 +6450,10 @@ async def rotation_cleanup(callback: CallbackQuery):
 # ОБРАБОТЧИКИ ОТМЕНЫ ДЛЯ НОВЫХ СИСТЕМ
 # =============================================================================
 
-@router.callback_query(F.data.in_(["proxy_cancel", "ua_cancel", "stats_cancel", "rotation_cancel"]))
+@router.callback_query(F.data.in_(["proxy_cancel", "stats_cancel", "rotation_cancel"]))
 async def process_new_systems_cancel(callback: CallbackQuery, state: FSMContext):
     # Очищаем выбор пользователя и состояние
+    global user_selections
     if callback.from_user.id in user_selections:
         del user_selections[callback.from_user.id]
     await state.clear()
@@ -4717,6 +6471,39 @@ async def process_new_systems_cancel(callback: CallbackQuery, state: FSMContext)
 # =============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =============================================================================
+
+def format_notification_settings_message(link) -> str:
+    """Форматирует сообщение с настройками умных уведомлений"""
+
+    # Преобразование bool в эмодзи
+    def bool_emoji(value):
+        return "✅ Включено" if value else "❌ Выключено"
+
+    message = (
+        f"⚙️ <b>НАСТРОЙКИ УМНЫХ УВЕДОМЛЕНИЙ</b>\n\n"
+        f"🏦 <b>Биржа:</b> {link.name}\n"
+        f"📌 <b>Категория:</b> Стейкинг\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 <b>ТЕКУЩИЕ НАСТРОЙКИ:</b>\n\n"
+        f"🔔 <b>Новые стейкинги:</b> {bool_emoji(link.notify_new_stakings)}\n"
+        f"📈 <b>Изменения APR:</b> {bool_emoji(link.notify_apr_changes)}\n"
+        f"📊 <b>Заполненность:</b> {bool_emoji(link.notify_fill_changes)}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⏱️ <b>FLEXIBLE СТЕЙКИНГИ:</b>\n"
+        f"├─ <b>Время стабилизации:</b> {link.flexible_stability_hours} часов\n"
+        f"└─ <b>Только стабильные:</b> {bool_emoji(link.notify_only_stable_flexible)}\n\n"
+        f"⚡ <b>FIXED СТЕЙКИНГИ:</b>\n"
+        f"├─ <b>Уведомлять сразу:</b> {bool_emoji(link.fixed_notify_immediately)}\n"
+        f"└─ <b>Combined как Fixed:</b> {bool_emoji(link.notify_combined_as_fixed)}\n\n"
+        f"📊 <b>ИЗМЕНЕНИЯ APR:</b>\n"
+        f"└─ <b>Минимальное изменение:</b> {link.notify_min_apr_change}%\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💡 <i>Combined стейкинги содержат Fixed И Flexible опции.\n"
+        f"При включенной настройке \"Combined как Fixed\" они уведомляют сразу.</i>\n\n"
+        f"Выберите действие:"
+    )
+
+    return message
 
 def _format_timestamp(timestamp: float) -> str:
     if timestamp == 0:

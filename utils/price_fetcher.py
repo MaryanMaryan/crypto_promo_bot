@@ -23,6 +23,11 @@ class PriceFetcher:
         self.cmc_api_key = cmc_api_key or os.getenv('COINMARKETCAP_API_KEY')
         self.use_cmc = bool(self.cmc_api_key)  # Использовать CMC если есть ключ
 
+        # Circuit breaker для rate limiting
+        self._rate_limit_hits = 0  # Счетчик 429 ошибок
+        self._circuit_open = False  # Флаг блокировки запросов
+        self.rate_limit_threshold = 5  # После 5 ошибок 429 - останавливаем запросы
+
     def get_token_price(self, symbol: str) -> Optional[float]:
         """
         Получить цену токена в USD
@@ -35,6 +40,11 @@ class PriceFetcher:
             Цена в USD или None если не найдена
         """
         symbol = symbol.upper()
+
+        # Проверяем circuit breaker
+        if self._circuit_open:
+            logger.debug(f"⚡ Circuit breaker активен - пропускаем запрос цены для {symbol}")
+            return None
 
         # Проверяем кэш
         if symbol in self._cache:
@@ -53,6 +63,31 @@ class PriceFetcher:
 
         # Пробуем CoinGecko
         return self._get_price_from_coingecko(symbol)
+
+    def _handle_rate_limit(self, source: str):
+        """
+        Обработка rate limit (429 ошибка)
+        После 5 ошибок активирует circuit breaker
+        """
+        self._rate_limit_hits += 1
+        logger.warning(f"⚠️ Rate limit hit #{self._rate_limit_hits} from {source}")
+
+        if self._rate_limit_hits >= self.rate_limit_threshold:
+            self._circuit_open = True
+            logger.error(
+                f"🚨 CIRCUIT BREAKER АКТИВИРОВАН! "
+                f"Получено {self._rate_limit_hits} ошибок 429. "
+                f"Запросы цен остановлены до конца парсинга."
+            )
+
+    def reset_circuit_breaker(self):
+        """
+        Сбросить circuit breaker (для использования при следующем парсинге)
+        """
+        if self._circuit_open:
+            logger.info("🔄 Circuit breaker сброшен")
+        self._rate_limit_hits = 0
+        self._circuit_open = False
 
     def _get_price_from_cmc(self, symbol: str) -> Optional[float]:
         """Получить цену с CoinMarketCap"""
@@ -103,6 +138,12 @@ class PriceFetcher:
             logger.warning(f"⚠️ Монета {symbol} не найдена на CoinMarketCap")
             return None
 
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                self._handle_rate_limit("CoinMarketCap")
+            else:
+                logger.error(f"❌ Ошибка запроса CMC для {symbol}: {e}")
+            return None
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Ошибка запроса CMC для {symbol}: {e}")
             return None
@@ -155,6 +196,12 @@ class PriceFetcher:
                 logger.warning(f"⚠️ Цена {symbol} не найдена в ответе CoinGecko")
                 return None
 
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                self._handle_rate_limit("CoinGecko")
+            else:
+                logger.error(f"❌ Ошибка запроса CoinGecko для {symbol}: {e}")
+            return None
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Ошибка запроса CoinGecko для {symbol}: {e}")
             return None

@@ -181,6 +181,16 @@ class StakingSnapshotService:
                     StakingHistory.status != 'Sold Out'  # Исключаем распроданные
                 )
 
+                # ФИЛЬТР: Исключаем 100% заполненные стейкинги
+                # Используем OR для случаев когда fill_percentage = None (нет данных о заполненности)
+                from sqlalchemy import or_
+                query = query.filter(
+                    or_(
+                        StakingHistory.fill_percentage == None,
+                        StakingHistory.fill_percentage < 100.0
+                    )
+                )
+
                 # Фильтр по APR
                 if min_apr is not None:
                     query = query.filter(StakingHistory.apr >= min_apr)
@@ -191,6 +201,7 @@ class StakingSnapshotService:
                 logger.info(f"📊 Найдено {len(stakings)} стейкингов для {exchange} (min_apr={min_apr})")
 
                 result = []
+
                 for staking in stakings:
                     # Получаем последний снимок В ТОЙ ЖЕ СЕССИИ
                     previous_snapshot = session.query(StakingSnapshot).filter(
@@ -234,6 +245,8 @@ class StakingSnapshotService:
                         'deltas': deltas,
                         'alerts': alerts
                     })
+
+                logger.info(f"✅ Возвращено {len(result)} стейкингов для отображения")
 
                 return result
 

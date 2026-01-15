@@ -290,6 +290,7 @@ class UniversalFallbackParser(BaseParser):
             # Получаем информацию о канале из БД
             telegram_channel = None
             keywords = []
+            link_id = None
 
             # Пытаемся извлечь канал из URL
             if '@' in self.url:
@@ -300,26 +301,42 @@ class UniversalFallbackParser(BaseParser):
                     channel_part = self.url.split('t.me/')[-1].split('/')[0]
                     telegram_channel = f"@{channel_part}" if not channel_part.startswith('@') else channel_part
 
-            # Если не удалось извлечь из URL, ищем в БД
-            if not telegram_channel:
-                try:
-                    with get_db_session() as db:
+            # ВСЕГДА загружаем ключевые слова из БД (важно для фильтрации!)
+            try:
+                with get_db_session() as db:
+                    # Ищем ссылку по URL или по telegram_channel
+                    link = db.query(ApiLink).filter(
+                        ApiLink.url == self.url
+                    ).first()
+                    
+                    # Если не нашли по URL, пробуем найти по каналу
+                    if not link and telegram_channel:
+                        channel_search = telegram_channel.lstrip('@')
                         link = db.query(ApiLink).filter(
-                            ApiLink.url == self.url
+                            ApiLink.telegram_channel.ilike(f"%{channel_search}%")
                         ).first()
 
-                        if link and link.telegram_channel:
+                    if link:
+                        link_id = link.id
+                        # Загружаем ключевые слова
+                        keywords = link.get_telegram_keywords()
+                        # Если канал не был найден в URL, берём из БД
+                        if not telegram_channel and link.telegram_channel:
                             telegram_channel = link.telegram_channel
-                            keywords = link.get_telegram_keywords()
-                except Exception as e:
-                    logger.warning(f"⚠️ Не удалось получить данные из БД: {e}")
+                        logger.info(f"✅ Загружено из БД: канал={telegram_channel}, ключевых слов={len(keywords)}")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось получить данные из БД: {e}")
 
             if not telegram_channel:
                 logger.warning("⚠️ Telegram канал не указан. Укажите канал в формате @channelname или настройте в БД")
                 return []
 
             logger.info(f"👾 Канал: {telegram_channel}")
-            logger.info(f"🔑 Ключевые слова: {keywords if keywords else 'Нет (будут возвращены все сообщения)'}")
+            if keywords:
+                logger.info(f"🔑 Ключевые слова ({len(keywords)} шт.): {', '.join(keywords[:5])}{'...' if len(keywords) > 5 else ''}")
+            else:
+                logger.warning(f"⚠️ ВНИМАНИЕ: Ключевые слова НЕ заданы! Сообщения без фильтрации отправляться НЕ будут.")
+                logger.warning(f"   Настройте ключевые слова в разделе 'Telegram API' для ссылки.")
 
             # Загружаем настройки Telegram из БД ДО создания потока
             # Это важно, чтобы избежать "database is locked" в многопоточной среде
@@ -385,22 +402,35 @@ class UniversalFallbackParser(BaseParser):
 
                     logger.info(f"📬 Получено {len(messages)} сообщений")
 
-                    # Обрабатываем сообщения
+                    # КРИТИЧНО: Проверяем наличие ключевых слов ПЕРЕД обработкой
+                    if not keywords:
+                        # Если ключевые слова НЕ заданы - пропускаем ВСЕ сообщения
+                        # Это защита от спама - пользователь ДОЛЖЕН настроить фильтрацию
+                        logger.warning(f"⚠️ Ключевые слова не заданы для канала! Пропускаем все сообщения.")
+                        logger.warning(f"   Настройте ключевые слова в разделе 'Telegram API' для этой ссылки.")
+                        return []
+                    
+                    # Обрабатываем сообщения с фильтрацией по ключевым словам
                     promotions = []
+                    messages_checked = 0
+                    messages_matched = 0
+                    
                     for msg in messages:
-                        # Если есть ключевые слова, фильтруем
-                        if keywords:
-                            result = await parser.process_message(msg['text'], keywords)
-                            if not result:
-                                continue
-                        else:
-                            result = {
-                                'matched_keywords': [],
-                                'links': parser.extract_links(msg['text']),
-                                'dates': parser.extract_dates(msg['text'])
-                            }
+                        messages_checked += 1
+                        
+                        # Проверяем сообщение на ключевые слова
+                        result = await parser.process_message(msg['text'], keywords)
+                        
+                        if not result or not result.get('matched_keywords'):
+                            # Нет совпадений - пропускаем сообщение
+                            logger.debug(f"⏭️ Сообщение {msg['id']}: нет совпадений с ключевыми словами")
+                            continue
+                        
+                        messages_matched += 1
+                        matched_kw = result['matched_keywords']
+                        logger.info(f"✅ Сообщение {msg['id']}: найдены ключевые слова: {', '.join(matched_kw)}")
 
-                        # Формируем промоакцию
+                        # Формируем промоакцию ТОЛЬКО если найдены ключевые слова
                         promo = {
                             'promo_id': f"telegram_{telegram_channel.replace('@', '')}_{msg['id']}",
                             'exchange': telegram_channel,
@@ -414,6 +444,8 @@ class UniversalFallbackParser(BaseParser):
                         }
 
                         promotions.append(promo)
+                    
+                    logger.info(f"📊 Статистика фильтрации: проверено {messages_checked}, совпало {messages_matched}")
 
                     return promotions
 

@@ -65,7 +65,10 @@
       "Bash(more:*)",
       "Bash(timeout /t 1)",
       "Bash(timeout /t 3)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "WebFetch(domain:www.gate.com)",
+      "Bash(tree:*)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []

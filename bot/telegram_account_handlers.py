@@ -441,6 +441,9 @@ async def tg_manage_account(callback: CallbackQuery):
 
         # Получаем данные аккаунта
         with get_db_session() as db:
+            from data.models import ApiLink
+            from sqlalchemy import func
+            
             account = db.query(TelegramAccount).filter_by(
                 id=account_id,
                 added_by=callback.from_user.id
@@ -449,6 +452,19 @@ async def tg_manage_account(callback: CallbackQuery):
             if not account:
                 await callback.answer("❌ Аккаунт не найден", show_alert=True)
                 return
+
+            # Подсчет назначенных ссылок
+            assigned_links_count = db.query(func.count(ApiLink.id)).filter(
+                ApiLink.telegram_account_id == account_id,
+                ApiLink.parsing_type == 'telegram'
+            ).scalar() or 0
+            
+            # Подсчет активных ссылок
+            active_links_count = db.query(func.count(ApiLink.id)).filter(
+                ApiLink.telegram_account_id == account_id,
+                ApiLink.parsing_type == 'telegram',
+                ApiLink.is_active == True
+            ).scalar() or 0
 
             status = "✅ Активен" if account.is_active else "❌ Неактивен"
             auth = "🔓 Авторизован" if account.is_authorized else "🔒 Не авторизован"
@@ -463,8 +479,8 @@ async def tg_manage_account(callback: CallbackQuery):
                 f"<b>Статус:</b> {status}\n"
                 f"<b>Авторизация:</b> {auth}\n\n"
                 f"<b>Статистика:</b>\n"
+                f"• Назначено ссылок: {assigned_links_count} (активных: {active_links_count})\n"
                 f"• Сообщений обработано: {account.messages_parsed}\n"
-                f"• Каналов отслеживается: {account.channels_monitored}\n"
                 f"• Последнее использование: {last_used}\n"
                 f"• Создан: {account.created_at.strftime('%d.%m.%Y %H:%M')}"
                 f"{error}",

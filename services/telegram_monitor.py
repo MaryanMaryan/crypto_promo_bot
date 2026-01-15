@@ -149,7 +149,14 @@ class TelegramMonitor:
                 if self.monitored_channels:
                     for username, data in self.monitored_channels.items():
                         keywords_count = len(data['keywords'])
+                        keywords_preview = ', '.join(data['keywords'][:3])  # Показываем первые 3 ключевых слова
+                        if keywords_count > 3:
+                            keywords_preview += f" (+{keywords_count - 3} еще)"
+                        
                         logger.info(f"   • @{username} ({data['name']}) - {keywords_count} ключевых слов")
+                        logger.info(f"     Ключевые слова: {keywords_preview}")
+                else:
+                    logger.info("   Нет активных каналов для мониторинга")
 
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки Telegram-каналов: {e}")
@@ -169,15 +176,24 @@ class TelegramMonitor:
             channel_data = self.monitored_channels[channel_username]
             keywords = channel_data['keywords']
 
-            if not message.text or not keywords:
+            # Пропускаем сообщения без текста
+            if not message.text:
+                return
+
+            # ВАЖНО: Если keywords пустой, это ошибка конфигурации - логируем и пропускаем
+            if not keywords:
+                logger.warning(f"⚠️ Канал @{channel_username} ({channel_data['name']}) не имеет ключевых слов! Пропускаем сообщение.")
                 return
 
             # Обрабатываем сообщение
+            logger.debug(f"🔍 Проверка сообщения из @{channel_username} на ключевые слова: {', '.join(keywords)}")
             result = await self.parser.process_message(message.text, keywords)
 
-            if result:
-                logger.info(f"🔔 Найдено совпадение в канале @{channel_username}")
-                logger.info(f"   Ключевые слова: {', '.join(result['matched_keywords'])}")
+            if result and result.get('matched_keywords'):
+                # СТРОГАЯ ПРОВЕРКА: result существует И matched_keywords не пустой
+                logger.info(f"✅ НАЙДЕНО СОВПАДЕНИЕ в канале @{channel_username}!")
+                logger.info(f"   🔑 Найденные ключевые слова: {', '.join(result['matched_keywords'])}")
+                logger.info(f"   📝 Текст сообщения: {message.text[:100]}...")
 
                 # Сохраняем в БД
                 await self.save_message(
@@ -190,11 +206,16 @@ class TelegramMonitor:
                 )
 
                 # Отправляем уведомление (пересылаем оригинальное сообщение)
+                # ВАЖНО: Уведомление отправляется СРАЗУ, не через send_bulk_notifications из main.py
                 await self.send_notification(
                     channel_username,
                     message,  # Передаем весь message объект для пересылки
                     result
                 )
+            else:
+                # Сообщение не содержит ключевые слова - НЕ отправляем уведомление
+                logger.debug(f"⏭️ Сообщение из @{channel_username} не содержит ключевые слова - пропускаем")
+                return
 
         except Exception as e:
             logger.error(f"❌ Ошибка обработки сообщения: {e}")
@@ -203,6 +224,11 @@ class TelegramMonitor:
                           date: datetime, result: Dict, channel_username: str):
         """Сохранение найденного сообщения в БД (PromoHistory)"""
         try:
+            # КРИТИЧЕСКАЯ ПРОВЕРКА: Ключевые слова должны быть найдены!
+            if not result or not result.get('matched_keywords'):
+                logger.error(f"❌ ОШИБКА: save_message вызван БЕЗ ключевых слов! Пропускаем.")
+                return
+
             with get_db_session() as db:
                 # Генерируем уникальный promo_id на основе канала и message_id
                 promo_id = f"telegram_{channel_username}_{message_id}"
@@ -269,14 +295,20 @@ class TelegramMonitor:
             result: Результат обработки (ключевые слова, ссылки и т.д.)
         """
         try:
+            # КРИТИЧЕСКАЯ ПРОВЕРКА: НЕ отправляем уведомление если нет ключевых слов!
+            if not result or not result.get('matched_keywords'):
+                logger.error(f"❌ ОШИБКА: send_notification вызван БЕЗ ключевых слов! Отмена отправки.")
+                return
+
             # Если message - это объект Telethon Message, пересылаем его
             if hasattr(message, 'id') and hasattr(message, 'chat'):
                 # Сначала отправляем заголовок с информацией
-                header = f"🔔 <b>Новая промоакция из канала @{channel_username}</b>\n"
+                header = f"🎉 <b>НОВАЯ ПРОМОАКЦИЯ!</b>\n\n"
+                header += f"<b>🏢 Биржа:</b> @{channel_username}\n"
 
                 if result.get('matched_keywords'):
                     keywords_str = ", ".join([f"<code>{kw}</code>" for kw in result['matched_keywords']])
-                    header += f"🔑 Ключевые слова: {keywords_str}\n"
+                    header += f"<b>🔑 Найденные ключевые слова:</b> {keywords_str}\n"
 
                 header += f"━━━━━━━━━━━━━━━━\n"
 
@@ -334,11 +366,11 @@ class TelegramMonitor:
         # Создаем краткую версию текста (максимум 300 символов)
         summary = message_text[:300] + "..." if len(message_text) > 300 else message_text
 
-        message = "👾 <b>Новая промоакция из Telegram</b>\n\n"
-        message += f"📢 Канал: @{channel_username}\n"
+        message = "🎉 <b>НОВАЯ ПРОМОАКЦИЯ!</b>\n\n"
+        message += f"<b>🏢 Биржа:</b> @{channel_username}\n"
 
         keywords_str = ", ".join([f"<code>{kw}</code>" for kw in matched_keywords])
-        message += f"🔑 Ключевые слова: {keywords_str}\n\n"
+        message += f"<b>🔑 Найденные ключевые слова:</b> {keywords_str}\n\n"
 
         if dates:
             message += f"📅 Период: {dates}\n\n"

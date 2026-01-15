@@ -63,37 +63,74 @@ class TelegramParser:
             self.api_hash = None
 
     def _load_accounts_from_db(self) -> List[Dict]:
-        """Загрузка активных и авторизованных аккаунтов из БД"""
-        try:
-            from data.database import get_db_session
-            from data.models import TelegramAccount
+        """Загрузка активных и авторизованных аккаунтов из БД с retry логикой"""
+        import time
+        from sqlite3 import OperationalError
+        
+        max_retries = 3
+        retry_delay = 1  # секунды
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                from data.database import get_db_session
+                from data.models import TelegramAccount
 
-            with get_db_session() as db:
-                accounts = db.query(TelegramAccount).filter_by(
-                    is_active=True,
-                    is_authorized=True
-                ).all()
+                with get_db_session() as db:
+                    accounts = db.query(TelegramAccount).filter_by(
+                        is_active=True,
+                        is_authorized=True
+                    ).all()
 
-                # Конвертируем в словари
-                result = []
-                for acc in accounts:
-                    result.append({
-                        'id': acc.id,
-                        'name': acc.name,
-                        'phone_number': acc.phone_number,
-                        'session_file': acc.session_file
-                    })
+                    # Конвертируем в словари
+                    result = []
+                    for acc in accounts:
+                        result.append({
+                            'id': acc.id,
+                            'name': acc.name,
+                            'phone_number': acc.phone_number,
+                            'session_file': acc.session_file
+                        })
 
-                logger.info(f"📋 Загружено {len(result)} активных аккаунтов из БД")
-                return result
+                    logger.info(f"📋 Загружено {len(result)} активных аккаунтов из БД")
+                    return result
 
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки аккаунтов из БД: {e}")
-            return []
+            except OperationalError as e:
+                if "database is locked" in str(e).lower() and attempt < max_retries:
+                    logger.warning(f"⚠️ База данных заблокирована, попытка {attempt}/{max_retries}. Повтор через {retry_delay}с...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Экспоненциальная задержка
+                    continue
+                else:
+                    logger.error(f"❌ Ошибка загрузки аккаунтов из БД: {e}")
+                    return []
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки аккаунтов из БД: {e}")
+                return []
+        
+        return []
 
     def is_configured(self) -> bool:
         """Проверка наличия API credentials"""
         return bool(self.api_id and self.api_hash)
+
+    def _enable_wal_for_session(self, session_file: str):
+        """Включить WAL режим для сессионного файла Telethon"""
+        import sqlite3
+        import os
+        
+        # Проверяем что файл существует
+        if not os.path.exists(session_file):
+            return
+        
+        try:
+            conn = sqlite3.connect(session_file, timeout=60.0)
+            conn.execute('PRAGMA journal_mode=WAL')
+            conn.execute('PRAGMA busy_timeout=60000')
+            conn.commit()
+            conn.close()
+            logger.debug(f"✅ WAL режим включен для сессии {os.path.basename(session_file)}")
+        except Exception as e:
+            logger.debug(f"⚠️ Не удалось включить WAL для сессии {os.path.basename(session_file)}: {e}")
 
     def get_connected_clients_count(self) -> int:
         """Получить количество подключенных клиентов"""
@@ -129,37 +166,57 @@ class TelegramParser:
 
             logger.info(f"🔌 Подключение {len(accounts)} аккаунтов к Telegram...")
 
-            # Подключаем каждый аккаунт
+            # Подключаем каждый аккаунт ПОСЛЕДОВАТЕЛЬНО с задержками
             connected_count = 0
-            for account in accounts:
-                try:
-                    client = TelegramClient(account['session_file'], self.api_id, self.api_hash)
-                    await client.connect()
+            for idx, account in enumerate(accounts):
+                # Добавляем задержку между подключениями для избежания конфликтов БД
+                if idx > 0:
+                    await asyncio.sleep(1.5)  # 1.5 секунды между подключениями (увеличено)
+                
+                # Пытаемся подключить аккаунт с retry логикой
+                max_retries = 3
+                retry_delay = 1.0  # Начальная задержка 1 секунда (увеличено)
+                
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        # Включаем WAL режим для session файла
+                        session_file = account['session_file']
+                        self._enable_wal_for_session(session_file)
+                        
+                        client = TelegramClient(session_file, self.api_id, self.api_hash)
+                        await client.connect()
 
-                    # Проверяем авторизацию
-                    if not await client.is_user_authorized():
-                        logger.warning(f"⚠️ Аккаунт {account['name']} не авторизован, пропускаем")
-                        await client.disconnect()
-                        continue
+                        # Проверяем авторизацию
+                        if not await client.is_user_authorized():
+                            logger.warning(f"⚠️ Аккаунт {account['name']} не авторизован, пропускаем")
+                            await client.disconnect()
+                            break  # Выходим из retry цикла
 
-                    self.clients[account['id']] = {
-                        'client': client,
-                        'account': account,
-                        'is_connected': True
-                    }
-                    connected_count += 1
-                    logger.info(f"✅ Аккаунт {account['name']} ({account['phone_number']}) подключен")
+                        self.clients[account['id']] = {
+                            'client': client,
+                            'account': account,
+                            'is_connected': True
+                        }
+                        connected_count += 1
+                        logger.info(f"✅ Аккаунт {account['name']} ({account['phone_number']}) подключен")
+                        break  # Успешно подключились, выходим из retry цикла
 
-                except (PhoneNumberBannedError, AuthKeyUnregisteredError) as e:
-                    # НОВОЕ: Обработка блокировки аккаунта
-                    logger.error(f"❌ Аккаунт {account['name']} заблокирован: {type(e).__name__}")
-                    # Помечаем аккаунт как заблокированный через handle_client_error
-                    await self.handle_client_error(account['id'], e)
-                    continue
+                    except (PhoneNumberBannedError, AuthKeyUnregisteredError) as e:
+                        # Блокирующие ошибки - не ретраим
+                        logger.error(f"❌ Аккаунт {account['name']} заблокирован: {type(e).__name__}")
+                        await self.handle_client_error(account['id'], e)
+                        break  # Выходим из retry цикла
 
-                except Exception as e:
-                    logger.error(f"❌ Ошибка подключения аккаунта {account['name']}: {e}")
-                    continue
+                    except Exception as e:
+                        error_msg = str(e)
+                        if "database is locked" in error_msg.lower() and attempt < max_retries:
+                            logger.warning(f"⚠️ БД заблокирована при подключении {account['name']}, попытка {attempt}/{max_retries}")
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= 2  # Экспоненциальная задержка
+                            continue
+                        else:
+                            logger.error(f"❌ Ошибка подключения аккаунта {account['name']}: {e}")
+                            break  # Выходим из retry цикла
 
             if connected_count > 0:
                 self.is_connected = True
@@ -428,37 +485,55 @@ class TelegramParser:
             return False
 
         # Помечаем аккаунт как заблокированный в БД
-        try:
-            from data.database import get_db_session
-            from data.models import TelegramAccount
+        import time
+        from sqlite3 import OperationalError
+        
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                from data.database import get_db_session
+                from data.models import TelegramAccount
 
-            with get_db_session() as db:
-                account = db.query(TelegramAccount).filter_by(id=account_id).first()
-                if account:
-                    account.is_blocked = True
-                    account.blocked_at = datetime.utcnow()
-                    account.blocked_reason = blocked_reason
-                    account.last_error = str(error)
-                    db.commit()
+                with get_db_session() as db:
+                    account = db.query(TelegramAccount).filter_by(id=account_id).first()
+                    if account:
+                        account.is_blocked = True
+                        account.blocked_at = datetime.utcnow()
+                        account.blocked_reason = blocked_reason
+                        account.last_error = str(error)
+                        db.commit()
 
-                    logger.error(f"❌ Аккаунт {account.name} (ID: {account_id}) заблокирован. Причина: {blocked_reason}")
+                        logger.error(f"❌ Аккаунт {account.name} (ID: {account_id}) заблокирован. Причина: {blocked_reason}")
 
-                    # Отключаем клиент от парсера
-                    if account_id in self.clients:
-                        try:
-                            await self.clients[account_id]['client'].disconnect()
-                        except:
-                            pass
-                        self.clients[account_id]['is_connected'] = False
+                        # Отключаем клиент от парсера
+                        if account_id in self.clients:
+                            try:
+                                await self.clients[account_id]['client'].disconnect()
+                            except:
+                                pass
+                            self.clients[account_id]['is_connected'] = False
 
-                    return True
+                        return True
+                    else:
+                        logger.error(f"❌ Аккаунт ID {account_id} не найден в БД")
+                        return False
+                        
+            except OperationalError as e:
+                if "database is locked" in str(e).lower() and attempt < max_retries:
+                    logger.warning(f"⚠️ База данных заблокирована при обновлении аккаунта, попытка {attempt}/{max_retries}")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
                 else:
-                    logger.error(f"❌ Аккаунт ID {account_id} не найден в БД")
+                    logger.error(f"❌ Ошибка при пометке аккаунта как заблокированного: {e}")
                     return False
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка при пометке аккаунта как заблокированного: {e}")
-            return False
+            except Exception as e:
+                logger.error(f"❌ Ошибка при пометке аккаунта как заблокированного: {e}")
+                return False
+        
+        return False
 
     async def switch_account_for_link(self, link_id: int, old_account_id: int) -> Optional[int]:
         """

@@ -6,6 +6,8 @@ from datetime import datetime
 from data.database import get_db, get_db_session, PromoHistory, ApiLink
 from parsers.universal_fallback_parser import UniversalFallbackParser
 from parsers.staking_parser import StakingParser
+from parsers.announcement_parser import AnnouncementParser
+from services.stability_tracker_service import StabilityTrackerService
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +397,9 @@ class ParserService:
             # Создаем парсер стейкингов
             parser = StakingParser(api_url=api_url, exchange_name=exchange_name)
 
+            # Сбрасываем circuit breaker перед парсингом
+            parser.price_fetcher.reset_circuit_breaker()
+
             # Парсим стейкинги
             logger.info(f"📡 Запуск парсинга стейкингов...")
             stakings = parser.parse()
@@ -491,6 +496,108 @@ class ParserService:
             'last_check_time': None
         }
 
+    def check_announcement_link(self, link_id: int, url: str) -> Optional[Dict[str, Any]]:
+        """
+        Проверяет анонс-ссылку на изменения с использованием выбранной стратегии
+
+        Args:
+            link_id: ID ссылки в БД
+            url: URL страницы для парсинга
+
+        Returns:
+            Словарь с результатом проверки или None если не было изменений/ошибка
+            {
+                'changed': bool,
+                'message': str,
+                'matched_content': str,
+                'strategy': str
+            }
+        """
+        try:
+            logger.info(f"🔍 ParserService: Начало проверки announcement ссылки {link_id}")
+            logger.info(f"   URL: {url}")
+
+            # Получаем настройки анонса из БД
+            with get_db_session() as db:
+                link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+
+                if not link:
+                    logger.error(f"❌ Ссылка {link_id} не найдена в БД")
+                    return None
+
+                if link.category != 'announcement':
+                    logger.error(f"❌ Ссылка {link_id} не является announcement (category={link.category})")
+                    return None
+
+                # Получаем настройки парсинга
+                strategy = link.announcement_strategy
+                last_snapshot = link.announcement_last_snapshot
+                keywords = link.get_announcement_keywords()
+                regex_pattern = link.announcement_regex
+                css_selector = link.announcement_css_selector
+                use_browser = link.parsing_type == 'browser'  # Используем браузер если тип = browser
+
+                logger.info(f"📊 Настройки парсинга:")
+                logger.info(f"   Стратегия: {strategy}")
+                logger.info(f"   Тип парсинга: {link.parsing_type}")
+                logger.info(f"   Браузерный парсер: {'✅ ДА' if use_browser else '❌ НЕТ'}")
+                if keywords:
+                    logger.info(f"   Ключевые слова: {keywords}")
+                if regex_pattern:
+                    logger.info(f"   Regex: {regex_pattern}")
+                if css_selector:
+                    logger.info(f"   CSS селектор: {css_selector}")
+
+                # Проверяем, что стратегия указана
+                if not strategy:
+                    logger.error(f"❌ Стратегия парсинга не указана для ссылки {link_id}")
+                    return None
+
+                # Создаем парсер анонсов
+                parser = AnnouncementParser(url)
+
+                # Выполняем парсинг
+                logger.info(f"📡 Запуск парсинга анонсов...")
+                result = parser.parse(
+                    strategy=strategy,
+                    last_snapshot=last_snapshot,
+                    keywords=keywords,
+                    regex_pattern=regex_pattern,
+                    css_selector=css_selector,
+                    use_browser=use_browser  # КРИТИЧНО: передаем флаг браузерного парсинга
+                )
+
+                logger.info(f"📦 Результат парсинга:")
+                logger.info(f"   Изменения: {result['changed']}")
+                logger.info(f"   Сообщение: {result['message']}")
+                if result['matched_content']:
+                    logger.info(f"   Найдено: {result['matched_content'][:200]}...")
+
+                # Обновляем последний снимок и время проверки в БД
+                link.announcement_last_snapshot = result['new_snapshot']
+                link.announcement_last_check = datetime.utcnow()
+                db.commit()
+
+                logger.info(f"✅ Снимок обновлен и сохранен в БД")
+
+                # Если были изменения, возвращаем результат
+                if result['changed']:
+                    logger.info(f"🎉 Обнаружены изменения в анонсах!")
+                    return {
+                        'changed': True,
+                        'message': result['message'],
+                        'matched_content': result['matched_content'],
+                        'strategy': strategy,
+                        'url': url
+                    }
+                else:
+                    logger.info(f"ℹ️ Изменений не обнаружено")
+                    return None
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при проверке announcement ссылки {link_id}: {e}", exc_info=True)
+            return None
+
 
 # ========== ФУНКЦИИ ДЛЯ СТЕЙКИНГОВ ==========
 
@@ -509,93 +616,254 @@ def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = N
     from data.models import StakingHistory
     from services.staking_snapshot_service import StakingSnapshotService
 
-    # Инициализируем сервис снимков
+    # Инициализируем сервисы
     snapshot_service = StakingSnapshotService()
     new_stakings = []
     filtered_count = 0
 
+    # КРИТИЧНО: Логируем параметры фильтрации для отладки
+    logger.warning(
+        f"🚨 [VERSION 2.1] check_and_save_new_stakings: link_id={link_id}, min_apr={min_apr}, "
+        f"stakings_count={len(stakings)}"
+    )
+
     with get_db_session() as session:
-        for staking in stakings:
-            exchange = staking.get('exchange')
-            product_id = staking.get('product_id')
+        try:
+            # Инициализируем StabilityTracker
+            stability_tracker = StabilityTrackerService(session)
 
-            if not exchange or not product_id:
-                logger.warning(f"⚠️ Пропуск стейкинга: отсутствует exchange или product_id")
-                continue
+            # Получаем настройки ссылки для уведомлений
+            api_link = None
+            if link_id:
+                api_link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
 
-            # Проверяем, есть ли уже в БД
-            existing = session.query(StakingHistory).filter(
-                StakingHistory.exchange == exchange,
-                StakingHistory.product_id == product_id
-            ).first()
+            for staking in stakings:
+                exchange = staking.get('exchange')
+                product_id = staking.get('product_id')
 
-            if existing:
-                # Стейкинг уже есть, обновляем данные о заполненности и статус
-                existing.apr = staking.get('apr', existing.apr)
-                existing.status = staking.get('status', existing.status)
-                existing.fill_percentage = staking.get('fill_percentage')
-                existing.current_deposit = staking.get('current_deposit')
-                existing.max_capacity = staking.get('max_capacity')
-                existing.token_price_usd = staking.get('token_price_usd')
-                existing.last_updated = datetime.utcnow()
+                if not exchange or not product_id:
+                    logger.warning(f"⚠️ Пропуск стейкинга: отсутствует exchange или product_id")
+                    continue
 
-                logger.debug(f"🔄 Обновлён стейкинг: {exchange} {staking.get('coin')} - {product_id}")
+                # Проверяем, есть ли уже в БД
+                existing = session.query(StakingHistory).filter(
+                    StakingHistory.exchange == exchange,
+                    StakingHistory.product_id == product_id
+                ).first()
 
-                # Коммитим изменения перед созданием снимка
-                session.commit()
+                if existing:
+                    # Стейкинг уже есть, обновляем данные
+                    new_apr = staking.get('apr', existing.apr)
 
-                # Создаем снимок (если прошло >= 1 час)
-                snapshot_service.create_snapshot(existing)
+                    # Обновляем статус и заполненность
+                    existing.status = staking.get('status', existing.status)
+                    existing.fill_percentage = staking.get('fill_percentage')
+                    existing.current_deposit = staking.get('current_deposit')
+                    existing.max_capacity = staking.get('max_capacity')
+                    existing.token_price_usd = staking.get('token_price_usd')
+                    existing.last_updated = datetime.utcnow()
 
-            else:
-                # Новый стейкинг!
-                apr = staking.get('apr', 0)
+                    # УМНЫЕ УВЕДОМЛЕНИЯ: Проверяем изменение APR и обновляем статус стабильности
+                    if api_link:
+                        stability_tracker.update_stability_status(
+                            staking=existing,
+                            new_apr=new_apr,
+                            api_link=api_link
+                        )
 
-                # ФИЛЬТР ПО MIN_APR - проверяем ДО сохранения и добавления в new_stakings
-                if min_apr is not None and apr < min_apr:
-                    logger.info(f"🔽 Пропущен стейкинг (APR {apr}% < {min_apr}%): {exchange} {staking.get('coin')}")
-                    filtered_count += 1
-                    # Все равно сохраняем в БД, но НЕ отправляем уведомление
-                    # Это нужно чтобы в следующий раз не считать его новым
+                        # Проверяем, нужно ли уведомлять
+                        stability_result = stability_tracker.check_stability(existing, api_link)
+                        if stability_result['should_notify']:
+                            # КРИТИЧНО: Не отправляем повторно если уже отправлено (кроме изменений APR)
+                            if stability_result['notification_type'] != 'apr_change' and existing.notification_sent:
+                                logger.debug(f"⏭️ Пропущен (уже отправлено): {exchange} {staking.get('coin')}")
+                                continue
 
-                # Сохраняем в БД всегда (чтобы не считать новым в следующий раз)
-                new_staking_record = StakingHistory(
-                    exchange=exchange,
-                    product_id=product_id,
-                    coin=staking.get('coin'),
-                    reward_coin=staking.get('reward_coin'),
-                    apr=apr,
-                    type=staking.get('type'),
-                    status=staking.get('status'),
-                    category=staking.get('category'),
-                    term_days=staking.get('term_days'),
-                    user_limit_tokens=staking.get('user_limit_tokens'),
-                    user_limit_usd=staking.get('user_limit_usd'),
-                    total_places=staking.get('total_places'),
-                    max_capacity=staking.get('max_capacity'),
-                    current_deposit=staking.get('current_deposit'),
-                    fill_percentage=staking.get('fill_percentage'),
-                    token_price_usd=staking.get('token_price_usd'),
-                    reward_token_price_usd=staking.get('reward_token_price_usd'),
-                    start_time=staking.get('start_time'),
-                    end_time=staking.get('end_time'),
-                    notification_sent=False
-                )
+                            # КРИТИЧНО: Проверяем фильтр min_apr ПЕРЕД добавлением в new_stakings
+                            # Используем явное сравнение: если min_apr установлен, проверяем его
+                            apr_passes_filter = (min_apr is None or existing.apr >= min_apr)
 
-                session.add(new_staking_record)
+                            logger.warning(
+                                f"🚨 [VERSION 2.1] Проверка существующего стейкинга: {exchange} {staking.get('coin')} | "
+                                f"APR={existing.apr}%, min_apr={min_apr}, "
+                                f"passes_filter={apr_passes_filter}, type={stability_result['notification_type']}"
+                            )
 
-                # Добавляем в список новых только если прошел фильтр
-                if min_apr is None or apr >= min_apr:
-                    new_stakings.append(staking)
-                    logger.info(f"🆕 Новый стейкинг: {exchange} {staking.get('coin')} {apr}% APR")
+                            if apr_passes_filter:
+                                logger.info(
+                                    f"📣 Готово к уведомлению: {exchange} {staking.get('coin')} - "
+                                    f"{stability_result['notification_type']} ({stability_result['reason']})"
+                                )
+                                # Отмечаем для уведомления (будет отправлено в main.py)
+                                staking['_should_notify'] = True
+                                staking['_notification_type'] = stability_result['notification_type']
+                                staking['_notification_reason'] = stability_result['reason']
+                                staking['_staking_db_id'] = existing.id  # Сохраняем ID для mark_notification_sent
+                                staking['_lock_type'] = existing.lock_type  # Тип блокировки
 
-                # Коммитим чтобы получить ID
-                session.commit()
+                                # Дополнительные данные для форматирования уведомлений
+                                if stability_result['notification_type'] == 'apr_change':
+                                    staking['_previous_apr'] = existing.previous_apr or 0
+                                    staking['_apr_threshold'] = api_link.notify_min_apr_change
+                                elif stability_result['notification_type'] == 'new' and existing.lock_type == 'Flexible':
+                                    staking['_stability_hours'] = api_link.flexible_stability_hours
 
-                # Создаем первый снимок для нового стейкинга
-                snapshot_service.create_snapshot(new_staking_record)
+                                new_stakings.append(staking)
+                            else:
+                                logger.info(
+                                    f"🔽 Пропущен (APR {existing.apr}% < {min_apr}%): {exchange} {staking.get('coin')} "
+                                    f"({stability_result['notification_type']})"
+                                )
+                                filtered_count += 1
+                    else:
+                        # Без api_link обновляем APR напрямую
+                        existing.apr = new_apr
 
-    if filtered_count > 0:
-        logger.info(f"🔽 Отфильтровано {filtered_count} стейкингов по min_apr={min_apr}%")
-    logger.info(f"✅ Проверено {len(stakings)} стейкингов, найдено {len(new_stakings)} новых (соответствующих фильтру)")
-    return new_stakings
+                    logger.debug(f"🔄 Обновлён стейкинг: {exchange} {staking.get('coin')} - {product_id}")
+
+                    # Синхронизируем изменения перед созданием снимка (без commit)
+                    session.flush()
+
+                    # Создаем снимок (если прошло >= 1 час)
+                    snapshot_service.create_snapshot(existing)
+
+                else:
+                    # Новый стейкинг!
+                    apr = staking.get('apr', 0)
+                    staking_type = staking.get('type', '')
+
+                    # УМНЫЕ УВЕДОМЛЕНИЯ: Определяем тип блокировки
+                    lock_type = 'Unknown'
+                    is_pending = False
+                    stable_since = None
+
+                    if api_link:
+                        lock_type = stability_tracker.determine_lock_type(staking_type)
+
+                        # Для Flexible устанавливаем pending и stable_since
+                        if lock_type == 'Flexible':
+                            is_pending = True
+                            stable_since = datetime.utcnow()
+                            logger.info(f"⏳ Новый Flexible стейкинг, начинаем отслеживание стабильности: {exchange} {staking.get('coin')}")
+                        # Для Fixed и Combined уведомляем сразу
+                        elif lock_type in ['Fixed', 'Combined']:
+                            is_pending = False
+                            logger.info(f"📣 Новый {lock_type} стейкинг, уведомление сразу: {exchange} {staking.get('coin')}")
+
+                    # ФИЛЬТР ПО MIN_APR - проверяем ДО добавления в new_stakings
+                    passes_filter = (min_apr is None or apr >= min_apr)
+
+                    # КРИТИЧНО: Логируем все стейкинги для отладки
+                    logger.info(
+                        f"🔍 Новый стейкинг: {exchange} {staking.get('coin')} | "
+                        f"APR={apr}%, lock_type={lock_type}, min_apr={min_apr}, "
+                        f"passes_filter={passes_filter}, type='{staking.get('type')}'"
+                    )
+
+                    if not passes_filter:
+                        logger.info(f"🔽 Пропущен стейкинг (APR {apr}% < {min_apr}%): {exchange} {staking.get('coin')}")
+                        filtered_count += 1
+
+                    # Сохраняем в БД всегда (чтобы не считать новым в следующий раз)
+                    new_staking_record = StakingHistory(
+                        exchange=exchange,
+                        product_id=product_id,
+                        coin=staking.get('coin'),
+                        reward_coin=staking.get('reward_coin'),
+                        apr=apr,
+                        type=staking_type,
+                        status=staking.get('status'),
+                        category=staking.get('category'),
+                        category_text=staking.get('category_text'),
+                        term_days=staking.get('term_days'),
+                        user_limit_tokens=staking.get('user_limit_tokens'),
+                        user_limit_usd=staking.get('user_limit_usd'),
+                        total_places=staking.get('total_places'),
+                        max_capacity=staking.get('max_capacity'),
+                        current_deposit=staking.get('current_deposit'),
+                        fill_percentage=staking.get('fill_percentage'),
+                        token_price_usd=staking.get('token_price_usd'),
+                        reward_token_price_usd=staking.get('reward_token_price_usd'),
+                        start_time=staking.get('start_time'),
+                        end_time=staking.get('end_time'),
+                        notification_sent=False,
+                        # Умные уведомления
+                        lock_type=lock_type,
+                        is_notification_pending=is_pending,
+                        stable_since=stable_since
+                    )
+
+                    session.add(new_staking_record)
+
+                    # Синхронизируем чтобы получить ID (без commit)
+                    session.flush()
+
+                    # Проверяем готовность к уведомлению
+                    should_notify_now = False
+                    notification_type = 'new'
+
+                    if api_link and lock_type in ['Fixed', 'Combined']:
+                        # Fixed/Combined уведомляем сразу ТОЛЬКО ЕСЛИ прошел фильтр min_apr
+                        should_notify_now = passes_filter
+                    elif lock_type == 'Flexible':
+                        # Flexible проверяем стабильность
+                        stability_result = stability_tracker.check_stability(new_staking_record, api_link)
+                        # КРИТИЧНО: Для Flexible проверяем и стабильность И min_apr
+                        should_notify_now = stability_result['should_notify'] and passes_filter
+                        if stability_result['should_notify']:
+                            notification_type = stability_result['notification_type']
+
+                    # КРИТИЧНО: Добавляем в список новых ТОЛЬКО если прошел фильтр И готов к уведомлению
+                    # Для Fixed/Combined: should_notify_now = passes_filter (установлено выше)
+                    # Для Flexible: should_notify_now = stability + passes_filter
+                    # Для Unknown: уведомляем как Fixed (сразу)
+                    should_add = False
+
+                    if lock_type in ['Fixed', 'Combined']:
+                        # Fixed/Combined: уведомляем если прошел фильтр
+                        should_add = passes_filter
+                    elif lock_type == 'Flexible':
+                        # Flexible: уведомляем если готов И прошел фильтр
+                        should_add = should_notify_now and passes_filter
+                    else:
+                        # Unknown и другие: уведомляем как Fixed (если прошел фильтр)
+                        should_add = passes_filter
+
+                    if should_add:
+                        staking['_should_notify'] = True
+                        staking['_notification_type'] = notification_type
+                        staking['_lock_type'] = lock_type
+                        staking['_staking_db_id'] = new_staking_record.id  # Сохраняем ID для mark_notification_sent
+
+                        # Дополнительные данные для форматирования уведомлений
+                        if lock_type == 'Flexible' and api_link:
+                            staking['_stability_hours'] = api_link.flexible_stability_hours
+
+                        new_stakings.append(staking)
+
+                        logger.info(
+                            f"✅ Добавлен в очередь уведомлений: {exchange} {staking.get('coin')} | "
+                            f"APR={apr}%, type={notification_type}, lock={lock_type}"
+                        )
+                    else:
+                        logger.debug(
+                            f"⏭️ Не готов к уведомлению: {exchange} {staking.get('coin')} | "
+                            f"APR={apr}%, passes_filter={passes_filter}, should_notify={should_notify_now}, lock={lock_type}"
+                        )
+
+                    # Создаем первый снимок для нового стейкинга
+                    snapshot_service.create_snapshot(new_staking_record)
+
+            # КРИТИЧНО: Один финальный commit в конце транзакции
+            session.commit()
+            logger.debug("✅ Транзакция успешно завершена")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка в транзакции БД: {e}", exc_info=True)
+            session.rollback()
+            raise
+
+        if filtered_count > 0:
+            logger.info(f"🔽 Отфильтровано {filtered_count} стейкингов по min_apr={min_apr}%")
+        logger.info(f"✅ Проверено {len(stakings)} стейкингов, найдено {len(new_stakings)} новых (соответствующих фильтру)")
+        return new_stakings
