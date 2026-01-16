@@ -4,6 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from bot.handlers import router
 from bot.telegram_account_handlers import router as telegram_account_router
+from bot.exchange_credentials_handlers import router as exchange_credentials_router
 from data.database import init_database, get_db_session, ApiLink
 from data.models import StakingHistory, PromoHistory
 from services.stability_tracker_service import StabilityTrackerService
@@ -75,6 +76,7 @@ class CryptoPromoBot:
 
         # Регистрируем роутеры (telegram_account_router ПЕРВЫМ для перехвата bypass_telegram)
         self.dp.include_router(telegram_account_router)
+        self.dp.include_router(exchange_credentials_router)
         self.dp.include_router(router)
 
         # Настройка обработчиков завершения

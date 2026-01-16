@@ -346,7 +346,7 @@ class NotificationService:
 
     def format_okx_project(self, stakings: List[Dict[str, Any]], page_url: str = None) -> str:
         """
-        Форматирование уведомления о новом проекте OKX (все пулы в одном сообщении)
+        Форматирование уведомления о новом проекте OKX Flash Earn (все пулы в одном сообщении)
 
         Args:
             stakings: Список пулов проекта
@@ -358,113 +358,310 @@ class NotificationService:
         if not stakings:
             return ""
 
+        from datetime import datetime
+
         # Берём общие данные из первого пула
         first = stakings[0]
         reward_coin = self.escape_html(first.get('reward_coin') or first.get('coin'))
         exchange = self.escape_html(first.get('exchange', 'OKX'))
         end_time = first.get('end_time')
         start_time = first.get('start_time')
-        reward_amount = first.get('reward_amount')
-        term_days = first.get('term_days', 0)
-        term_type = self.escape_html(first.get('type', 'N/A'))
-        status = self.escape_html(first.get('status', 'Active'))
+        total_reward = first.get('total_reward_amount') or first.get('reward_amount')
+        countdown = first.get('countdown')
+        reward_price = first.get('reward_token_price_usd')
+
+        # Функция форматирования времени
+        def format_datetime(ts):
+            if not ts:
+                return ''
+            try:
+                dt = datetime.fromtimestamp(ts / 1000) if ts > 10**10 else datetime.fromtimestamp(ts)
+                return dt.strftime('%d.%m %H:%M')
+            except:
+                return str(ts)
+
+        def format_countdown(ms):
+            if not ms or ms <= 0:
+                return None
+            seconds = ms // 1000
+            days = seconds // 86400
+            hours = (seconds % 86400) // 3600
+            minutes = (seconds % 3600) // 60
+            if days > 0:
+                return f"{days}д {hours}ч {minutes}мин"
+            elif hours > 0:
+                return f"{hours}ч {minutes}мин"
+            else:
+                return f"{minutes}мин"
 
         # Формируем сообщение
         message = f"🆕 <b>НОВЫЙ СТЕЙКИНГ!</b>\n\n"
 
-        # Собираем все стейкаемые монеты
-        stake_coins = [self.escape_html(pool.get('coin', 'N/A')) for pool in stakings]
-        message += f"<b>💎 Стейкай:</b> {', '.join(stake_coins)}\n"
+        # Награда
+        message += f"<b>🎁 Награда:</b> {reward_coin}\n"
 
-        # Награда с количеством на пул и стоимостью в USD
-        reward_price = first.get('reward_token_price_usd')
-        if reward_amount:
-            message += f"<b>🎁 Награда:</b> {reward_coin} ({reward_amount} на пул"
+        # Пул наград
+        if total_reward:
+            try:
+                total_reward_num = float(str(total_reward).replace(',', ''))
+                message += f"<b>💰 Пул наград:</b> {total_reward_num:,.0f} {reward_coin}"
+                if reward_price:
+                    total_usd = total_reward_num * reward_price
+                    message += f" (~${total_usd:,.0f})"
+                message += "\n"
+            except:
+                message += f"<b>💰 Пул наград:</b> {total_reward} {reward_coin}\n"
 
-            # Добавляем стоимость в USD если известна цена
-            if reward_price:
-                try:
-                    # Убираем запятые из числа и конвертируем
-                    clean_amount = reward_amount.replace(',', '')
-                    total_reward_usd = float(clean_amount) * reward_price
-                    message += f", ~${total_reward_usd:,.2f}"
-                except (ValueError, AttributeError):
-                    pass
+        message += f"<b>🏦 Биржа:</b> {exchange} Flash Earn\n"
 
-            message += ")\n"
-        else:
-            message += f"<b>🎁 Награда:</b> {reward_coin}\n"
-
-        message += f"<b>🏦 Биржа:</b> {exchange}\n"
-
-        # APR для каждого пула
-        apr_parts = []
-        for pool in stakings:
-            coin = self.escape_html(pool.get('coin', 'N/A'))
-            apr = pool.get('apr', 0)
-            apr_parts.append(f"{coin}: {apr:.2f}%")
-        message += f"<b>💰 APR:</b> {' | '.join(apr_parts)}\n"
-
-        # Период
-        if term_days == 0:
-            message += f"<b>📅 Период:</b> Flexible (бессрочно)\n"
-        else:
-            message += f"<b>📅 Период:</b> {term_days} дней\n"
-
-        # Тип и статус
-        if term_type:
-            message += f"<b>🔧 Тип:</b> {term_type}\n"
-        if status:
-            message += f"<b>📊 Статус:</b> {status}\n"
-
-        # Лимиты на человека для каждого пула
-        message += f"\n<b>👤 ЛИМИТЫ НА ЧЕЛОВЕКА:</b>\n"
+        # Пулы для подписки
+        message += f"\n<b>💎 ПУЛЫ ДЛЯ ПОДПИСКИ:</b>\n"
         for i, pool in enumerate(stakings):
             coin = self.escape_html(pool.get('coin', 'N/A'))
+            apr = pool.get('apr', 0)
             user_limit = pool.get('user_limit_tokens')
             token_price = pool.get('token_price_usd')
 
+            # Символ ветки
+            if i == len(stakings) - 1:
+                branch = "└"
+            else:
+                branch = "├"
+
+            # Строка пула
+            pool_str = f"{branch} <b>{coin}</b>: {apr:.2f}% APR"
+
+            # Лимит
             if user_limit:
-                # Определяем символ для форматирования
-                if i == len(stakings) - 1:
-                    symbol = "└─"
-                else:
-                    symbol = "├─"
-
-                limit_str = f"{symbol} {coin}: {user_limit:,.2f}"
-
-                # USD эквивалент
+                pool_str += f" | Лимит: {user_limit:,.2f}"
                 if token_price:
                     limit_usd = user_limit * token_price
-                    limit_str += f" (~${limit_usd:,.2f})"
+                    pool_str += f" (~${limit_usd:,.0f})"
 
-                message += limit_str + "\n"
+            message += pool_str + "\n"
 
-        # Даты
+        # Период подписки
+        message += "\n"
         if start_time or end_time:
+            message += f"<b>📅 Период подписки:</b> "
+            if start_time and end_time:
+                message += f"{format_datetime(start_time)} — {format_datetime(end_time)}"
+            elif end_time:
+                message += f"до {format_datetime(end_time)}"
             message += "\n"
 
-        if start_time:
-            try:
-                from datetime import datetime
-                start_dt = datetime.fromtimestamp(start_time / 1000)
-                message += f"<b>⏰ Старт:</b> {start_dt.strftime('%d.%m.%Y, %H:%M')}\n"
-            except:
-                message += f"<b>⏰ Старт:</b> Информация недоступна\n"
-
-        if end_time:
-            try:
-                from datetime import datetime
-                end_dt = datetime.fromtimestamp(end_time / 1000)
-                message += f"<b>🕐 Конец:</b> {end_dt.strftime('%d.%m.%Y, %H:%M')}\n"
-            except:
-                message += f"<b>🕐 Конец:</b> Информация недоступна\n"
+        # Осталось времени
+        if countdown:
+            remaining = format_countdown(countdown)
+            if remaining:
+                message += f"<b>⏰ Осталось:</b> {remaining}\n"
 
         # Ссылка
         if page_url:
             message += f"\n<b>🔗 Ссылка:</b> {page_url}"
 
         return message
+
+    def format_okx_flash_earn_page(
+        self,
+        stakings_with_deltas: List[Dict],
+        page: int,
+        total_pages: int,
+        exchange_name: str = "OKX Flash Earn",
+        min_apr: float = None,
+        page_url: str = None
+    ) -> str:
+        """
+        Форматирует страницу OKX Flash Earn с группировкой по проектам.
+        Каждый проект отображается как один блок с несколькими пулами.
+
+        Args:
+            stakings_with_deltas: Список стейкингов с дельтами
+            page: Текущая страница
+            total_pages: Всего страниц
+            exchange_name: Название биржи
+            min_apr: Фильтр APR
+            page_url: Ссылка
+
+        Returns:
+            Отформатированное HTML сообщение
+        """
+        try:
+            from datetime import datetime
+
+            # Заголовок
+            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+            message = f"📈 <b>ТЕКУЩИЕ СТЕЙКИНГИ</b>\n\n"
+            message += f"<b>🏦 Биржа:</b> {self.escape_html(exchange_name)}\n"
+            message += f"<b>🕐 Обновлено:</b> {now}\n\n"
+
+            if not stakings_with_deltas:
+                message += "📭 <i>Нет активных проектов</i>\n\n"
+                message += f"📄 Страница {page} из {total_pages}\n"
+                return message
+
+            # Группируем стейкинги по проектам (reward_coin + start_time + end_time)
+            projects = {}
+            for item in stakings_with_deltas:
+                staking = item['staking'] if isinstance(item, dict) and 'staking' in item else item
+
+                # Получаем данные для группировки
+                if hasattr(staking, '__dict__'):
+                    # Это объект StakingHistory
+                    reward_coin = staking.reward_coin or staking.coin
+                    start_time = staking.start_time
+                    end_time = staking.end_time
+                else:
+                    # Это словарь
+                    reward_coin = staking.get('reward_coin') or staking.get('coin')
+                    start_time = staking.get('start_time')
+                    end_time = staking.get('end_time')
+
+                # Ключ группировки
+                project_key = (reward_coin, start_time, end_time)
+
+                if project_key not in projects:
+                    projects[project_key] = []
+                projects[project_key].append(item)
+
+            # Функция форматирования времени
+            def format_datetime(ts):
+                if not ts:
+                    return ''
+                try:
+                    # Если строка - пробуем преобразовать в число
+                    if isinstance(ts, str):
+                        # Проверяем, это timestamp или уже отформатированная дата
+                        if ts.isdigit():
+                            ts = int(ts)
+                        else:
+                            # Уже отформатированная строка, возвращаем как есть
+                            return ts
+                    # Теперь ts это число (timestamp)
+                    dt = datetime.fromtimestamp(ts / 1000) if ts > 10**10 else datetime.fromtimestamp(ts)
+                    return dt.strftime('%d.%m %H:%M')
+                except:
+                    return str(ts)
+
+            def format_countdown(ms):
+                """Форматирует время в мс в читаемый формат"""
+                if not ms or ms <= 0:
+                    return None
+                seconds = ms // 1000
+                days = seconds // 86400
+                hours = (seconds % 86400) // 3600
+                minutes = (seconds % 3600) // 60
+                if days > 0:
+                    return f"{days}д {hours}ч {minutes}мин"
+                elif hours > 0:
+                    return f"{hours}ч {minutes}мин"
+                else:
+                    return f"{minutes}мин"
+
+            message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Отображаем каждый проект
+            project_list = list(projects.items())
+            for idx, (project_key, pools) in enumerate(project_list):
+                reward_coin, start_time, end_time = project_key
+
+                # Получаем данные из первого пула
+                first_item = pools[0]
+                first_staking = first_item['staking'] if isinstance(first_item, dict) and 'staking' in first_item else first_item
+
+                if hasattr(first_staking, '__dict__'):
+                    total_reward = getattr(first_staking, 'total_reward_amount', None) or getattr(first_staking, 'reward_amount', None)
+                    countdown = getattr(first_staking, 'countdown', None)
+                else:
+                    total_reward = first_staking.get('total_reward_amount') or first_staking.get('reward_amount')
+                    countdown = first_staking.get('countdown')
+
+                # Заголовок проекта - награда
+                message += f"🎁 <b>Награда:</b> {self.escape_html(reward_coin or 'N/A')}"
+                if total_reward:
+                    try:
+                        total_reward_num = float(str(total_reward).replace(',', ''))
+                        message += f" ({total_reward_num:,.0f} токенов)"
+                    except:
+                        message += f" ({total_reward})"
+                message += "\n"
+
+                # Статус
+                message += f"📊 <b>Статус:</b> ✅ Активно\n"
+
+                # Осталось времени
+                if countdown:
+                    remaining = format_countdown(countdown)
+                    if remaining:
+                        message += f"⏰ <b>Осталось:</b> {remaining}\n"
+
+                # Пулы
+                message += f"\n💎 <b>ДОСТУПНЫЕ ПУЛЫ:</b>\n"
+
+                for i, pool_item in enumerate(pools):
+                    pool = pool_item['staking'] if isinstance(pool_item, dict) and 'staking' in pool_item else pool_item
+
+                    if hasattr(pool, '__dict__'):
+                        coin = pool.coin
+                        apr = pool.apr or 0
+                        user_limit = pool.user_limit_tokens
+                        token_price = pool.token_price_usd
+                    else:
+                        coin = pool.get('coin', 'N/A')
+                        apr = pool.get('apr', 0)
+                        user_limit = pool.get('user_limit_tokens')
+                        token_price = pool.get('token_price_usd')
+
+                    # Символ ветки
+                    if i == len(pools) - 1:
+                        branch = "└"
+                    else:
+                        branch = "├"
+
+                    # Строка пула
+                    pool_str = f"{branch} <b>{self.escape_html(coin)}</b>: {apr:.2f}% APR"
+
+                    # Лимит
+                    if user_limit:
+                        pool_str += f" | Лимит: {user_limit:,.2f}"
+                        if token_price:
+                            limit_usd = user_limit * token_price
+                            pool_str += f" (~${limit_usd:,.0f})"
+
+                    message += pool_str + "\n"
+
+                # Период
+                if start_time or end_time:
+                    message += f"\n📅 <b>Период:</b> "
+                    if start_time and end_time:
+                        message += f"{format_datetime(start_time)} — {format_datetime(end_time)}"
+                    elif end_time:
+                        message += f"до {format_datetime(end_time)}"
+                    message += "\n"
+
+                # Разделитель между проектами
+                if idx < len(project_list) - 1:
+                    message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                else:
+                    message += "\n"
+
+            # Пагинация
+            message += f"📄 Страница {page} из {total_pages}\n"
+
+            # Ссылка
+            if page_url:
+                message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+
+            # Проверяем лимит Telegram
+            if len(message) > 4090:
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Обрезано</i>"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования OKX Flash Earn: {e}", exc_info=True)
+            return f"📈 <b>Текущие стейкинги</b>\n\n<b>Биржа:</b> OKX Flash Earn\n\n❌ Ошибка"
 
     def format_new_staking(self, staking: Dict[str, Any], page_url: str = None) -> str:
         """
@@ -991,6 +1188,857 @@ class NotificationService:
         except Exception as e:
             logger.error(f"❌ Ошибка форматирования страницы стейкингов: {e}", exc_info=True)
             return f"📈 <b>Текущие стейкинги</b>\n\n<b>Биржа:</b> {self.escape_html(exchange_name)}\n\n❌ Ошибка форматирования данных"
+
+    def format_current_promos_page(
+        self,
+        promos: List[Dict],
+        page: int,
+        total_pages: int,
+        exchange_name: str,
+        page_url: str = None
+    ) -> str:
+        """
+        Форматирует страницу текущих промоакций (аирдропов)
+
+        Args:
+            promos: Список словарей с данными промоакций
+            page: Текущая страница (1-based)
+            total_pages: Всего страниц
+            exchange_name: Название биржи
+            page_url: Ссылка на страницу промоакций
+
+        Returns:
+            Отформатированное HTML сообщение
+        """
+        try:
+            from datetime import datetime, timedelta
+
+            # Заголовок
+            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+            message = f"🎁 <b>ТЕКУЩИЕ ПРОМОАКЦИИ</b>\n\n"
+            message += f"<b>🏦 Биржа:</b> {self.escape_html(exchange_name)}\n"
+            message += f"<b>🕐 Обновлено:</b> {now}\n\n"
+            message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Если промоакций нет
+            if not promos:
+                message += "📭 <i>Нет активных промоакций</i>\n\n"
+                message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                message += f"📄 Страница {page} из {total_pages}\n"
+                if page_url:
+                    message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+                return message
+
+            # Форматируем каждую промоакцию
+            for idx, promo in enumerate(promos):
+                # Название и токен
+                title = promo.get('title', 'Без названия')
+                award_token = promo.get('award_token', '')
+                
+                if award_token and award_token not in title:
+                    message += f"🪂 <b>{self.escape_html(title)}</b> ({self.escape_html(award_token)})\n"
+                else:
+                    message += f"🪂 <b>{self.escape_html(title)}</b>\n"
+
+                # Статус
+                status = promo.get('status', '')
+                if status:
+                    if status.lower() == 'ongoing':
+                        message += f"📊 <b>Статус:</b> ✅ Активна\n"
+                    elif status.lower() == 'upcoming':
+                        message += f"📊 <b>Статус:</b> 🔜 Скоро\n"
+                    elif status.lower() == 'ended':
+                        message += f"📊 <b>Статус:</b> ⏹ Завершена\n"
+
+                # Награда
+                total_pool = promo.get('total_prize_pool', '')
+                total_pool_usd = promo.get('total_prize_pool_usd')
+                reward_per_winner = promo.get('reward_per_winner', '')
+                reward_per_winner_usd = promo.get('reward_per_winner_usd')
+
+                if total_pool or reward_per_winner:
+                    message += "\n💰 <b>НАГРАДА:</b>\n"
+                    
+                    if total_pool:
+                        # Форматируем призовой пул с токеном
+                        pool_str = str(total_pool)
+                        # Добавляем токен если его нет в строке пула
+                        if award_token and award_token.upper() not in pool_str.upper():
+                            pool_str = f"{pool_str} {award_token}"
+                        
+                        # Форматируем число с разделителями
+                        try:
+                            pool_num = float(str(total_pool).replace(',', '').replace(' ', ''))
+                            pool_str = f"{pool_num:,.0f} {award_token}" if award_token else f"{pool_num:,.0f}"
+                        except (ValueError, TypeError):
+                            pass
+                        
+                        if total_pool_usd:
+                            message += f"   • Призовой пул: {self.escape_html(pool_str)} (~${total_pool_usd:,.0f})\n"
+                        else:
+                            message += f"   • Призовой пул: {self.escape_html(pool_str)}\n"
+                    
+                    if reward_per_winner:
+                        if reward_per_winner_usd:
+                            message += f"   • Награда на место: {self.escape_html(str(reward_per_winner))} (~${reward_per_winner_usd:,.2f})\n"
+                        else:
+                            message += f"   • Награда на место: {self.escape_html(str(reward_per_winner))}\n"
+
+                # Период акции
+                start_time = promo.get('start_time')
+                end_time = promo.get('end_time')
+
+                if start_time or end_time:
+                    message += "\n⏰ <b>ПЕРИОД АКЦИИ:</b>\n"
+                    
+                    if start_time:
+                        if isinstance(start_time, datetime):
+                            message += f"   • Начало: {start_time.strftime('%d.%m.%Y %H:%M')}\n"
+                        else:
+                            message += f"   • Начало: {self.escape_html(str(start_time))}\n"
+                    
+                    if end_time:
+                        if isinstance(end_time, datetime):
+                            message += f"   • Конец: {end_time.strftime('%d.%m.%Y %H:%M')}\n"
+                            
+                            # Рассчитываем оставшееся время
+                            now_dt = datetime.utcnow()
+                            if end_time > now_dt:
+                                remaining = end_time - now_dt
+                                days = remaining.days
+                                hours = remaining.seconds // 3600
+                                
+                                if days > 0:
+                                    message += f"   • Осталось: {days} дн. {hours} ч.\n"
+                                elif hours > 0:
+                                    minutes = (remaining.seconds % 3600) // 60
+                                    message += f"   • Осталось: {hours} ч. {minutes} мин.\n"
+                                else:
+                                    minutes = remaining.seconds // 60
+                                    message += f"   • Осталось: {minutes} мин.\n"
+                        else:
+                            message += f"   • Конец: {self.escape_html(str(end_time))}\n"
+
+                # Участники и места
+                participants = promo.get('participants_count')
+                winners = promo.get('winners_count')
+                
+                # Если нет winners, пытаемся рассчитать
+                if not winners and total_pool_usd and reward_per_winner_usd and reward_per_winner_usd > 0:
+                    winners = int(total_pool_usd / reward_per_winner_usd)
+
+                if participants or winners:
+                    message += "\n👥 <b>УЧАСТНИКИ:</b>\n"
+                    
+                    if participants:
+                        try:
+                            p_num = int(float(str(participants).replace(',', '').replace(' ', '')))
+                            message += f"   • Всего: {p_num:,}\n"
+                        except:
+                            message += f"   • Всего: {participants}\n"
+                    
+                    # Получаем статистику из истории (6ч/12ч/24ч)
+                    participants_stats = promo.get('participants_stats', {})
+                    
+                    # Проверяем есть ли данные хотя бы за 6 часов
+                    has_history = '6h' in participants_stats
+                    
+                    if has_history:
+                        # Статистика за 6ч, 12ч, 24ч
+                        for hours in [6, 12, 24]:
+                            key = f'{hours}h'
+                            if key in participants_stats:
+                                stat = participants_stats[key]
+                                diff = stat.get('diff', 0)
+                                percent = stat.get('percent', 0)
+                                if diff != 0:
+                                    sign = '+' if diff > 0 else ''
+                                    message += f"   • За {hours} ч: {sign}{diff:,} ({sign}{percent:.0f}%)\n"
+                    else:
+                        # Нет истории - отслеживание только начато
+                        message += f"   • 📊 Отслеживание начато\n"
+                    
+                    if winners:
+                        message += f"   • Призовых мест: {winners:,}\n"
+                    
+                    # Коэффициент конкуренции
+                    if participants and winners and winners > 0:
+                        try:
+                            p_num = int(float(str(participants).replace(',', '').replace(' ', '')))
+                            ratio = p_num / winners
+                            if ratio < 1:
+                                ratio_emoji = "🟢"  # Мест больше чем участников - отлично
+                            elif ratio < 3:
+                                ratio_emoji = "🟡"  # Умеренная конкуренция
+                            elif ratio < 7:
+                                ratio_emoji = "🟠"  # Высокая конкуренция
+                            else:
+                                ratio_emoji = "🔴"  # Очень высокая конкуренция
+                            
+                            message += f"   • Конкуренция: {ratio_emoji} {ratio:.1f}x\n"
+                        except:
+                            pass
+
+                # Условия участия
+                conditions = promo.get('conditions', '')
+                if conditions:
+                    message += f"\n📋 <b>Условия:</b> {self.escape_html(conditions)}\n"
+
+                # Тип награды (только если это не просто число)
+                reward_type = promo.get('reward_type', '')
+                if reward_type:
+                    # Пропускаем если это просто число (код типа)
+                    try:
+                        int(str(reward_type))
+                        # Это число - пропускаем
+                    except ValueError:
+                        # Это текст - показываем
+                        message += f"🏆 <b>Тип награды:</b> {self.escape_html(str(reward_type))}\n"
+
+                # Ссылка на промоакцию
+                promo_link = promo.get('link', '')
+                if promo_link:
+                    message += f"\n🔗 {self.escape_html(promo_link)}\n"
+
+                # Разделитель между промоакциями (кроме последней)
+                if idx < len(promos) - 1:
+                    message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                else:
+                    message += "\n"
+
+            # Пагинация
+            message += f"📄 Страница {page} из {total_pages}\n"
+
+            # Ссылка на биржу
+            if page_url:
+                message += f"\n<b>🔗 Страница акций:</b> {self.escape_html(page_url)}"
+
+            # Проверяем лимит Telegram (4096 символов)
+            if len(message) > 4090:
+                logger.warning(f"⚠️ Сообщение слишком длинное ({len(message)} символов), обрезаем")
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Сообщение обрезано из-за лимита длины</i>"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования страницы промоакций: {e}", exc_info=True)
+            return f"🎁 <b>Текущие промоакции</b>\n\n<b>Биржа:</b> {self.escape_html(exchange_name)}\n\n❌ Ошибка форматирования данных"
+
+    def format_okx_boost_page(
+        self,
+        promos: List[Dict],
+        page: int,
+        total_pages: int,
+        page_url: str = None,
+        show_only_active: bool = True
+    ) -> str:
+        """
+        Форматирует страницу OKX Boost (X Launch) промоакций - табличный формат с датами
+        """
+        try:
+            from datetime import datetime
+            
+            def fmt_time(ts):
+                if not ts: return ''
+                dt = datetime.fromtimestamp(ts / 1000) if ts > 10**10 else datetime.fromtimestamp(ts)
+                return dt.strftime('%d.%m %H:%M')
+            
+            # Заголовок
+            message = f"🚀 <b>OKX X LAUNCH</b>\n\n"
+            
+            # Если промоакций нет
+            if not promos:
+                message += "📭 <i>Нет активных launchpool'ов</i>"
+                return message
+            
+            # Форматируем каждый launchpool
+            for idx, promo in enumerate(promos):
+                title = promo.get('title', 'Без названия')
+                home_name = promo.get('home_name', '')
+                award_token = promo.get('award_token', '')
+                total_pool = promo.get('total_prize_pool', 0)
+                chain_name = promo.get('chain_name', '')
+                participants = promo.get('participants_count', 0)
+                link = promo.get('link', '')
+                join_end = promo.get('join_end_time')
+                claim_start = promo.get('claim_start_time')
+                
+                # Статус
+                status = promo.get('status', '')
+                if status == 'ongoing':
+                    status_icon = "✅"
+                elif status == 'upcoming':
+                    status_icon = "🔜"
+                else:
+                    status_icon = "⏹"
+                
+                # Название проекта
+                display_name = home_name if home_name else title.replace(' X Launch', '')
+                message += f"{status_icon} <b>{self.escape_html(display_name)}</b>\n"
+                
+                # Призовой пул и сеть
+                if total_pool and award_token:
+                    message += f"├ 💰 {total_pool:,.0f} {award_token}"
+                    if chain_name:
+                        message += f" ({chain_name})"
+                    message += "\n"
+                
+                # Участники
+                if participants:
+                    message += f"├ 👥 {participants:,}\n"
+                
+                # Регистрация до
+                if join_end:
+                    message += f"├ 📝 Рег до: {fmt_time(join_end)}\n"
+                
+                # Клейм
+                if claim_start:
+                    message += f"├ 🎁 Клейм: {fmt_time(claim_start)}\n"
+                
+                # Ссылка
+                if link:
+                    message += f"└ 🔗 {self.escape_html(link)}\n"
+                
+                # Разделитель
+                if idx < len(promos) - 1:
+                    message += "\n"
+            
+            # Проверяем лимит Telegram
+            if len(message) > 4090:
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Обрезано</i>"
+            
+            return message
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования OKX Boost: {e}", exc_info=True)
+            return f"🚀 <b>OKX X Launch</b>\n\n❌ Ошибка"
+
+    def format_gate_candy_page(
+        self,
+        promos: List[Dict],
+        page: int,
+        total_pages: int,
+        page_url: str = None,
+        prev_participants: Dict[str, int] = None
+    ) -> str:
+        """
+        Форматирует страницу Gate.io CandyDrop промоакций с полной информацией о наградах
+        
+        Args:
+            promos: Список промоакций
+            page: Номер страницы
+            total_pages: Всего страниц
+            page_url: URL страницы
+            prev_participants: Словарь {promo_id: кол-во участников} с предыдущего обновления
+        """
+        try:
+            from datetime import datetime
+
+            def fmt_number(n):
+                """Форматирует число с разделителями"""
+                try:
+                    return '{:,.0f}'.format(float(str(n).replace(',', '').replace(' ', '')))
+                except:
+                    return str(n)
+
+            def fmt_conditions(conditions):
+                """Форматирует условия участия из списка или строки"""
+                if not conditions:
+                    return ''
+                if isinstance(conditions, list):
+                    return ', '.join(conditions)
+                return str(conditions)
+
+            def fmt_reward_type(reward_type):
+                """Форматирует тип награды"""
+                if not reward_type:
+                    return ''
+                if isinstance(reward_type, list):
+                    return ', '.join(reward_type)
+                return str(reward_type)
+
+            # Заголовок
+            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+            message = f"🎁 <b>ТЕКУЩИЕ ПРОМОАКЦИИ</b>\n\n"
+            message += f"<b>🏦 Биржа:</b> GateCandy\n"
+            message += f"<b>🕐 Обновлено:</b> {now} UTC\n\n"
+            message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Если промоакций нет
+            if not promos:
+                message += "📭 <i>Нет активных промоакций</i>\n"
+                return message
+
+            # Словарь предыдущих участников
+            prev_participants = prev_participants or {}
+
+            # Форматируем каждую промоакцию
+            for idx, promo in enumerate(promos):
+                title = promo.get('title', 'Без названия')
+                award_token = promo.get('award_token', '')
+                promo_id = promo.get('promo_id', str(promo.get('id', idx)))
+                
+                # Название акции
+                message += f"🪂 <b>{self.escape_html(title)}</b>\n"
+                
+                # Статус
+                status = promo.get('status', '')
+                if status:
+                    if status.lower() == 'ongoing':
+                        message += f"📊 <b>Статус:</b> ✅ Активна\n"
+                    elif status.lower() == 'upcoming':
+                        message += f"📊 <b>Статус:</b> 🔜 Скоро\n"
+                
+                # Условия участия (сразу после статуса)
+                conditions = promo.get('conditions')
+                if conditions:
+                    message += f"\n📋 <b>УСЛОВИЯ:</b> {self.escape_html(fmt_conditions(conditions))}\n"
+                
+                # Тип награды
+                reward_type = promo.get('reward_type')
+                if reward_type:
+                    rt_str = fmt_reward_type(reward_type)
+                    # Пропускаем если это просто число
+                    try:
+                        int(str(rt_str))
+                    except ValueError:
+                        message += f"🎁 <b>ТИП НАГРАДЫ:</b> {self.escape_html(rt_str)}\n"
+                
+                # Блок НАГРАДЫ
+                total_pool = promo.get('total_prize_pool')
+                total_pool_usd = promo.get('total_prize_pool_usd')
+                max_reward = promo.get('user_max_rewards')
+                max_reward_usd = promo.get('user_max_rewards_usd')
+                exchange_rate = promo.get('exchange_rate')
+                
+                has_reward_info = total_pool or max_reward
+                if has_reward_info:
+                    message += "\n💎 <b>НАГРАДЫ:</b>\n"
+                    
+                    # Общий пул
+                    if total_pool:
+                        pool_str = f"{fmt_number(total_pool)} {award_token}" if award_token else fmt_number(total_pool)
+                        if total_pool_usd:
+                            message += f"   • Общий пул: {pool_str} (~${fmt_number(total_pool_usd)})\n"
+                        else:
+                            message += f"   • Общий пул: {pool_str}\n"
+                    
+                    # Макс награда на юзера
+                    if max_reward:
+                        max_str = f"{fmt_number(max_reward)} {award_token}" if award_token else fmt_number(max_reward)
+                        if max_reward_usd:
+                            message += f"   • Макс. на юзера: {max_str} (~${fmt_number(max_reward_usd)})\n"
+                        else:
+                            message += f"   • Макс. на юзера: {max_str}\n"
+                    
+                    # Курс токена
+                    if exchange_rate and award_token:
+                        message += f"   • Курс: ${exchange_rate}\n"
+                
+                # Участники с полной статистикой
+                participants = promo.get('participants_count')
+                if participants:
+                    message += f"\n👥 <b>УЧАСТНИКИ:</b>\n"
+                    message += f"   • Всего: {fmt_number(participants)}\n"
+                    
+                    # Получаем статистику из истории
+                    participants_stats = promo.get('participants_stats', {})
+                    
+                    # Проверяем есть ли данные хотя бы за 6 часов
+                    has_history = '6h' in participants_stats
+                    
+                    if has_history:
+                        # Статистика за 6ч, 12ч, 24ч
+                        for hours in [6, 12, 24]:
+                            key = f'{hours}h'
+                            if key in participants_stats:
+                                stat = participants_stats[key]
+                                diff = stat.get('diff', 0)
+                                percent = stat.get('percent', 0)
+                                if diff != 0:
+                                    sign = '+' if diff > 0 else ''
+                                    message += f"   • За {hours} ч: {sign}{fmt_number(diff)} ({sign}{percent:.0f}%)\n"
+                    else:
+                        # Нет истории - отслеживание только начато
+                        message += f"   • 📊 Отслеживание начато\n"
+                    
+                    # Новых с последнего обновления
+                    if 'last_update' in participants_stats:
+                        last = participants_stats['last_update']
+                        diff = last.get('diff', 0)
+                        time_ago = last.get('time_ago', '')
+                        if diff > 0:
+                            message += f"   • Новых ({time_ago}): +{fmt_number(diff)} 📈\n"
+                        elif diff < 0:
+                            message += f"   • Изменение ({time_ago}): {fmt_number(diff)} 📉\n"
+                    elif prev_participants:
+                        # Fallback на старую логику если нет статистики из БД
+                        prev_count = prev_participants.get(promo_id)
+                        if prev_count is not None:
+                            try:
+                                current = int(float(str(participants).replace(',', '').replace(' ', '')))
+                                prev = int(prev_count)
+                                diff = current - prev
+                                if diff > 0:
+                                    message += f"   • Новых с обновления: +{fmt_number(diff)} 📈\n"
+                                elif diff < 0:
+                                    message += f"   • Изменение: {fmt_number(diff)} 📉\n"
+                            except:
+                                pass
+                
+                # Ссылка на промоакцию
+                promo_link = promo.get('link', '')
+                if promo_link:
+                    message += f"\n🔗 {self.escape_html(promo_link)}\n"
+                
+                # Разделитель между промоакциями
+                if idx < len(promos) - 1:
+                    message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Проверяем лимит Telegram (4096 символов)
+            if len(message) > 4090:
+                logger.warning(f"⚠️ Сообщение слишком длинное ({len(message)} символов), обрезаем")
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Сообщение обрезано из-за лимита длины</i>"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования GateCandy: {e}", exc_info=True)
+            return f"🎁 <b>Текущие промоакции</b>\n\n<b>Биржа:</b> GateCandy\n\n❌ Ошибка форматирования данных"
+
+    def format_weex_airdrop_page(
+        self,
+        promos: List[Dict],
+        page: int,
+        total_pages: int,
+        page_url: str = None
+    ) -> str:
+        """
+        Форматирует страницу Weex Airdrop Hub промоакций
+        
+        Args:
+            promos: Список промоакций (из WeexParser)
+            page: Номер страницы
+            total_pages: Всего страниц
+            page_url: URL страницы
+        """
+        try:
+            from datetime import datetime
+
+            def fmt_number(n):
+                """Форматирует число с разделителями"""
+                try:
+                    return '{:,.0f}'.format(float(str(n).replace(',', '').replace(' ', '')))
+                except:
+                    return str(n)
+
+            def fmt_time(timestamp):
+                """Форматирует timestamp в дату"""
+                if not timestamp:
+                    return ''
+                try:
+                    if isinstance(timestamp, (int, float)):
+                        if timestamp > 10**10:
+                            timestamp = timestamp / 1000
+                        dt = datetime.fromtimestamp(timestamp)
+                        return dt.strftime("%d.%m.%Y %H:%M")
+                    return str(timestamp)
+                except:
+                    return str(timestamp)
+
+            # Заголовок
+            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+            message = f"🎁 <b>WEEX AIRDROP HUB</b>\n\n"
+            message += f"<b>🏦 Биржа:</b> Weex\n"
+            message += f"<b>🕐 Обновлено:</b> {now} UTC\n"
+            message += f"<b>📄 Страница:</b> {page}/{total_pages}\n\n"
+            message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Если промоакций нет
+            if not promos:
+                message += "📭 <i>Нет активных airdrop</i>\n"
+                return message
+
+            # Форматируем каждую промоакцию
+            for idx, promo in enumerate(promos):
+                title = promo.get('title', 'Без названия')
+                token = promo.get('token', '')
+                promo_id = promo.get('promo_id', '')
+                
+                # Название airdrop
+                message += f"🪂 <b>{self.escape_html(title)}</b>"
+                if token and token != title:
+                    message += f" ({token})"
+                message += "\n"
+                
+                # Статус
+                status = promo.get('status', '')
+                if status == 'ongoing':
+                    message += f"📊 <b>Статус:</b> ✅ Активен\n"
+                elif status == 'upcoming':
+                    message += f"📊 <b>Статус:</b> 🔜 Скоро\n"
+                
+                # Награда
+                reward = promo.get('reward')
+                if reward:
+                    message += f"💰 <b>Награда:</b> {self.escape_html(str(reward))}\n"
+                
+                # Участники с полной статистикой (как в GateCandy)
+                participants = promo.get('participants')
+                if participants:
+                    message += f"\n👥 <b>УЧАСТНИКИ:</b>\n"
+                    message += f"   • Всего: {fmt_number(participants)}\n"
+                    
+                    # Получаем статистику из истории
+                    participants_stats = promo.get('participants_stats', {})
+                    
+                    # Проверяем есть ли данные хотя бы за 6 часов
+                    has_history = '6h' in participants_stats
+                    
+                    if has_history:
+                        # Статистика за 6ч, 12ч, 24ч
+                        for hours in [6, 12, 24]:
+                            key = f'{hours}h'
+                            if key in participants_stats:
+                                stat = participants_stats[key]
+                                diff = stat.get('diff', 0)
+                                percent = stat.get('percent', 0)
+                                if diff != 0:
+                                    sign = '+' if diff > 0 else ''
+                                    message += f"   • За {hours} ч: {sign}{fmt_number(diff)} ({sign}{percent:.0f}%)\n"
+                    else:
+                        # Нет истории - отслеживание только начато
+                        message += f"   • 📊 Отслеживание начато\n"
+                    
+                    # Новых с последнего обновления
+                    if 'last_update' in participants_stats:
+                        last = participants_stats['last_update']
+                        diff = last.get('diff', 0)
+                        time_ago = last.get('time_ago', '')
+                        if diff > 0:
+                            message += f"   • Новых ({time_ago}): +{fmt_number(diff)} 📈\n"
+                        elif diff < 0:
+                            message += f"   • Изменение ({time_ago}): {fmt_number(diff)} 📉\n"
+                
+                # Время
+                start_time = promo.get('startTime')
+                end_time = promo.get('endTime')
+                if start_time:
+                    message += f"🚀 <b>Начало:</b> {fmt_time(start_time)}\n"
+                if end_time:
+                    message += f"⏰ <b>Конец:</b> {fmt_time(end_time)}\n"
+                
+                # Ссылка
+                url = promo.get('url')
+                if url:
+                    message += f"🔗 {self.escape_html(url)}\n"
+                
+                # Разделитель между промоакциями
+                if idx < len(promos) - 1:
+                    message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Ссылка на страницу
+            if page_url:
+                message += f"\n\n🌐 <b>Страница:</b> {self.escape_html(page_url)}"
+
+            # Проверяем лимит Telegram (4096 символов)
+            if len(message) > 4090:
+                logger.warning(f"⚠️ Сообщение слишком длинное ({len(message)} символов), обрезаем")
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Сообщение обрезано из-за лимита длины</i>"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования Weex: {e}", exc_info=True)
+            return f"🎁 <b>WEEX AIRDROP HUB</b>\n\n<b>Биржа:</b> Weex\n\n❌ Ошибка форматирования данных"
+
+    def format_weex_rewards_page(
+        self,
+        promos: List[Dict],
+        page: int,
+        total_pages: int,
+        page_url: str = None
+    ) -> str:
+        """
+        Форматирует страницу WEEX Rewards (все активности)
+        
+        Args:
+            promos: Список промоакций (из WeexParser для /rewards)
+            page: Номер страницы
+            total_pages: Всего страниц
+            page_url: URL страницы
+        """
+        try:
+            from datetime import datetime
+
+            def fmt_time(timestamp):
+                """Форматирует timestamp в дату"""
+                if not timestamp:
+                    return ''
+                try:
+                    if isinstance(timestamp, (int, float)):
+                        if timestamp > 10**10:
+                            timestamp = timestamp / 1000
+                        dt = datetime.fromtimestamp(timestamp)
+                        return dt.strftime("%d.%m.%Y %H:%M")
+                    return str(timestamp)
+                except:
+                    return str(timestamp)
+
+            # Заголовок
+            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+            message = f"🎁 <b>WEEX REWARDS</b>\n\n"
+            message += f"<b>🏦 Биржа:</b> WEEX\n"
+            message += f"<b>🕐 Обновлено:</b> {now} UTC\n"
+            message += f"<b>📄 Страница:</b> {page}/{total_pages}\n\n"
+            message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Если промоакций нет
+            if not promos:
+                message += "📭 <i>Нет активных промоакций</i>\n"
+                return message
+
+            # Форматируем каждую промоакцию (компактный вид для 5 на страницу)
+            for idx, promo in enumerate(promos):
+                title = promo.get('title', 'Без названия')
+                description = promo.get('description', '')
+                
+                # Номер и название промоакции
+                message += f"<b>{idx + 1}. {self.escape_html(title)}</b>\n"
+                
+                # Статус + Тип активности
+                status = promo.get('status', '')
+                activity_type = promo.get('activityType')
+                type_emoji = ''
+                type_name = ''
+                
+                # Определяем тип активности
+                if activity_type == 2:
+                    type_emoji = '🏆'
+                    type_name = 'Trading Competition'
+                elif activity_type == 7:
+                    type_emoji = '🎁'
+                    type_name = 'Promo'
+                elif activity_type:
+                    type_emoji = '📌'
+                    type_name = f'Activity #{activity_type}'
+                
+                status_text = '✅ Активна' if status == 'ongoing' else '🔜 Скоро' if status == 'upcoming' else ''
+                if status_text and type_name:
+                    message += f"   {status_text} | {type_emoji} {type_name}\n"
+                elif status_text:
+                    message += f"   {status_text}\n"
+                
+                # Описание (краткое)
+                if description:
+                    # Обрезаем длинные описания
+                    desc_short = description[:100] + '...' if len(description) > 100 else description
+                    message += f"   📝 {self.escape_html(desc_short)}\n"
+                
+                # Время (компактно в одну строку)
+                start_time = promo.get('startTime')
+                end_time = promo.get('endTime')
+                time_parts = []
+                if start_time:
+                    time_parts.append(f"С: {fmt_time(start_time)}")
+                if end_time:
+                    time_parts.append(f"До: {fmt_time(end_time)}")
+                if time_parts:
+                    message += f"   ⏰ {' | '.join(time_parts)}\n"
+                
+                # Ссылка
+                url = promo.get('url')
+                if url:
+                    message += f"   🔗 <a href='{self.escape_html(url)}'>Перейти</a>\n"
+                
+                # Разделитель между промоакциями
+                if idx < len(promos) - 1:
+                    message += "\n"
+
+            # Ссылка на страницу
+            if page_url:
+                message += f"\n\n🌐 <b>Страница:</b> {self.escape_html(page_url)}"
+
+            # Проверяем лимит Telegram (4096 символов)
+            if len(message) > 4090:
+                logger.warning(f"⚠️ Сообщение слишком длинное ({len(message)} символов), обрезаем")
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Сообщение обрезано из-за лимита длины</i>"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования Weex Rewards: {e}", exc_info=True)
+            return f"🎁 <b>WEEX REWARDS</b>\n\n<b>Биржа:</b> WEEX\n\n❌ Ошибка форматирования данных"
+
+    def format_new_weex_rewards_notification(
+        self,
+        promo: Dict,
+        link_name: str = None
+    ) -> str:
+        """
+        Форматирует уведомление о новой промоакции WEEX Rewards
+        
+        Args:
+            promo: Данные промоакции
+            link_name: Название ссылки (опционально)
+        """
+        try:
+            from datetime import datetime
+
+            def fmt_time(timestamp):
+                if not timestamp:
+                    return 'N/A'
+                try:
+                    if isinstance(timestamp, (int, float)):
+                        if timestamp > 10**10:
+                            timestamp = timestamp / 1000
+                        dt = datetime.fromtimestamp(timestamp)
+                        return dt.strftime("%d.%m.%Y %H:%M")
+                    return str(timestamp)
+                except:
+                    return str(timestamp)
+
+            title = promo.get('title', 'Без названия')
+            description = promo.get('description', '')
+            status = promo.get('status', 'ongoing')
+            start_time = promo.get('startTime')
+            end_time = promo.get('endTime')
+            url = promo.get('url', '')
+
+            # Формируем сообщение
+            message = "🎉 <b>НОВАЯ ПРОМОАКЦИЯ НА WEEX!</b>\n\n"
+            
+            message += f"🏆 <b>{self.escape_html(title)}</b>\n\n"
+            
+            # Статус
+            if status == 'ongoing':
+                message += f"📊 <b>Статус:</b> ✅ Активна\n"
+            elif status == 'upcoming':
+                message += f"📊 <b>Статус:</b> 🔜 Скоро\n"
+            
+            # Описание
+            if description:
+                message += f"\n📝 <b>Описание:</b> {self.escape_html(description)}\n"
+            
+            # Период
+            message += f"\n📅 <b>Период:</b>\n"
+            message += f"   🚀 Начало: {fmt_time(start_time)}\n"
+            message += f"   ⏰ Конец: {fmt_time(end_time)}\n"
+            
+            # Ссылка
+            if url:
+                message += f"\n🔗 {self.escape_html(url)}"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования уведомления Weex Rewards: {e}", exc_info=True)
+            return f"🎉 <b>НОВАЯ ПРОМОАКЦИЯ НА WEEX!</b>\n\n❌ Ошибка форматирования"
 
     async def notify_account_blocked(
         self,

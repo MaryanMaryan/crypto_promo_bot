@@ -8,6 +8,7 @@ import requests
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from utils.price_fetcher import get_price_fetcher
+from utils.exchange_auth_manager import get_exchange_auth_manager
 from bybit_coin_mapping import BYBIT_COIN_MAPPING
 
 logger = logging.getLogger(__name__)
@@ -15,11 +16,15 @@ logger = logging.getLogger(__name__)
 class StakingParser:
     """Парсер стейкингов"""
 
-    def __init__(self, api_url: str, exchange_name: str = None):
+    def __init__(self, api_url: str, exchange_name: str = None, use_auth: bool = True):
         self.api_url = api_url
         # Автоопределение биржи по URL если exchange_name не указан
         self.exchange_name = self._detect_exchange(api_url, exchange_name)
         self.price_fetcher = get_price_fetcher()
+        
+        # Авторизация для получения расширенных данных (user_limit)
+        self.use_auth = use_auth
+        self.auth_manager = get_exchange_auth_manager() if use_auth else None
 
     def _detect_exchange(self, api_url: str, exchange_name: str = None) -> str:
         """
@@ -73,37 +78,7 @@ class StakingParser:
 
             # Разные биржи используют разные методы запроса
             if 'bybit' in self.exchange_name:
-                # Bybit требует POST запрос с payload
-                headers = {
-                    'accept': '*/*',
-                    'accept-language': 'en-US,en;q=0.9',
-                    'content-type': 'application/json',
-                    'origin': 'https://www.bybit.com',
-                    'referer': 'https://www.bybit.com/en/earn/easy-earn',
-                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-
-                payload = {
-                    "tab": "2",  # 0 - все, 1 - flexible, 2 - fixed (ТОЛЬКО ФИКСИРОВАННЫЕ стейкинги)
-                    "page": 1,
-                    "limit": 100,
-                    "fixed_saving_version": 1,
-                    "fuzzy_coin_name": "",
-                    "sort_type": 0,
-                    "match_user_asset": False,
-                    "eligible_only": False
-                }
-
-                response = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
-                response.raise_for_status()
-                data = response.json()
-
-                # Проверяем статус ответа
-                if data.get('ret_code') != 0:
-                    logger.error(f"❌ Bybit API error: {data.get('ret_msg')}")
-                    return []
-
-                return self._parse_bybit(data)
+                return self._parse_bybit_with_auth()
 
             elif 'kucoin' in self.exchange_name:
                 # Kucoin использует обычный GET
@@ -134,6 +109,134 @@ class StakingParser:
 
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга стейкингов: {e}", exc_info=True)
+            return []
+
+    def _parse_bybit_with_auth(self) -> List[Dict[str, Any]]:
+        """
+        Парсинг Bybit стейкингов с авторизацией для получения user_limit
+        
+        Если авторизация доступна - использует приватный API,
+        иначе fallback на публичный API.
+        При ошибках API (403/404) используется браузерный парсинг.
+        """
+        # Проверяем наличие ключей Bybit
+        has_auth = self.use_auth and self.auth_manager and self.auth_manager.has_credentials('bybit')
+        
+        if has_auth:
+            logger.info("🔑 Bybit: использую авторизованный запрос")
+        else:
+            logger.info("📢 Bybit: публичный запрос (без user_limit)")
+        
+        # Bybit требует POST запрос с payload
+        headers = {
+            'accept': '*/*',
+            'accept-language': 'en-US,en;q=0.9',
+            'content-type': 'application/json',
+            'origin': 'https://www.bybit.com',
+            'referer': 'https://www.bybit.com/en/earn/easy-earn',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+        payload = {
+            "tab": "2",  # 0 - все, 1 - flexible, 2 - fixed (ТОЛЬКО ФИКСИРОВАННЫЕ стейкинги)
+            "page": 1,
+            "limit": 100,
+            "fixed_saving_version": 1,
+            "fuzzy_coin_name": "",
+            "sort_type": 0,
+            "match_user_asset": False,
+            "eligible_only": False
+        }
+        
+        # Если есть авторизация - добавляем подпись
+        if has_auth:
+            auth_headers = self.auth_manager.get_bybit_headers(payload)
+            if auth_headers:
+                headers.update(auth_headers)
+        
+        try:
+            response = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
+            
+            # Если API заблокирован (403/404) - используем браузерный парсинг
+            if response.status_code in (403, 404):
+                logger.warning(f"⚠️ Bybit API вернул {response.status_code}, пробуем браузерный парсинг...")
+                return self._parse_bybit_with_browser(has_auth)
+            
+            response.raise_for_status()
+            data = response.json()
+
+            # Проверяем статус ответа
+            if data.get('ret_code') != 0:
+                logger.error(f"❌ Bybit API error: {data.get('ret_msg')}")
+                return []
+
+            return self._parse_bybit(data, has_auth=has_auth)
+            
+        except requests.exceptions.HTTPError as e:
+            # Для других HTTP ошибок тоже пробуем браузер
+            if hasattr(e, 'response') and e.response.status_code in (403, 404):
+                logger.warning(f"⚠️ Bybit API HTTP ошибка, пробуем браузерный парсинг...")
+                return self._parse_bybit_with_browser(has_auth)
+            logger.error(f"❌ Ошибка Bybit парсинга: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"❌ Ошибка Bybit парсинга: {e}")
+            return []
+    
+    def _parse_bybit_with_browser(self, has_auth: bool = False) -> List[Dict[str, Any]]:
+        """
+        Fallback парсинг Bybit через браузер когда API заблокирован
+        
+        Args:
+            has_auth: Есть ли авторизация (для парсинга user_limit)
+            
+        Returns:
+            Список стейкингов
+        """
+        try:
+            from .browser_parser import BrowserParser
+            
+            logger.info("🌐 Bybit: использую браузерный парсинг (API заблокирован)")
+            
+            browser_parser = BrowserParser(self.api_url)
+            promotions = browser_parser.get_promotions()
+            
+            if not promotions:
+                logger.warning("⚠️ Браузерный парсинг Bybit не вернул данных")
+                return []
+            
+            # Конвертируем промоакции в формат стейкингов
+            stakings = []
+            for promo in promotions:
+                staking = {
+                    'exchange': 'Bybit',
+                    'product_id': promo.get('product_id', ''),
+                    'coin': promo.get('coin', promo.get('title', 'Unknown')),
+                    'reward_coin': promo.get('reward_coin'),
+                    'apr': promo.get('apr', 0),
+                    'type': promo.get('type', 'Unknown'),
+                    'status': promo.get('status', 'Unknown'),
+                    'category': promo.get('category'),
+                    'category_text': promo.get('category_text'),
+                    'term_days': promo.get('term_days', 0),
+                    'token_price_usd': promo.get('token_price_usd'),
+                    'start_time': promo.get('start_time'),
+                    'end_time': promo.get('end_time'),
+                    'user_limit_tokens': promo.get('user_limit_tokens'),
+                    'user_limit_usd': promo.get('user_limit_usd'),
+                    'max_capacity': promo.get('max_capacity'),
+                    'current_deposit': promo.get('current_deposit'),
+                    'fill_percentage': promo.get('fill_percentage'),
+                    'is_vip': promo.get('is_vip', False),
+                    'is_new_user': promo.get('is_new_user', False),
+                }
+                stakings.append(staking)
+            
+            logger.info(f"✅ Браузерный парсинг: получено {len(stakings)} стейкингов")
+            return stakings
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка браузерного парсинга Bybit: {e}")
             return []
 
     def _parse_kucoin(self, data: dict) -> List[Dict[str, Any]]:
@@ -211,10 +314,14 @@ class StakingParser:
 
         return stakings
 
-    def _parse_bybit(self, data: dict) -> List[Dict[str, Any]]:
+    def _parse_bybit(self, data: dict, has_auth: bool = False) -> List[Dict[str, Any]]:
         """
         Парсинг Bybit стейкингов
         ВАЖНО: Bybit API требует POST запрос с JSON payload
+        
+        Args:
+            data: Ответ API
+            has_auth: Есть ли авторизация (для парсинга user_limit)
         """
         stakings = []
 
@@ -383,6 +490,36 @@ class StakingParser:
                             except:
                                 pass
 
+                        # Парсинг user_limit (доступен только с авторизацией)
+                        user_limit_tokens = None
+                        user_limit_usd = None
+                        
+                        # Пробуем получить user_max_subscribe (лимит на пользователя)
+                        user_max_subscribe = product.get('user_max_subscribe')
+                        if user_max_subscribe:
+                            try:
+                                user_limit_tokens = float(user_max_subscribe)
+                                if token_price and user_limit_tokens:
+                                    user_limit_usd = round(user_limit_tokens * token_price, 2)
+                            except:
+                                pass
+                        
+                        # Альтернативные поля для лимита
+                        if user_limit_tokens is None:
+                            # Пробуем min_purchase_amount как альтернативу
+                            min_purchase = product.get('min_purchase_amount') or product.get('min_subscribe_amount')
+                            max_purchase = product.get('max_purchase_amount') or product.get('max_subscribe_amount')
+                            if max_purchase:
+                                try:
+                                    user_limit_tokens = float(max_purchase)
+                                    if token_price and user_limit_tokens:
+                                        user_limit_usd = round(user_limit_tokens * token_price, 2)
+                                except:
+                                    pass
+                        
+                        if has_auth and user_limit_tokens:
+                            logger.debug(f"🔑 {coin_name}: user_limit = {user_limit_tokens} (${user_limit_usd})")
+
                         staking = {
                             'exchange': 'Bybit',
                             'product_id': product_id,
@@ -398,8 +535,8 @@ class StakingParser:
                             'reward_token_price_usd': None,
                             'start_time': start_time_str,
                             'end_time': end_time_str,
-                            'user_limit_tokens': None,  # Требует авторизации
-                            'user_limit_usd': None,
+                            'user_limit_tokens': user_limit_tokens,
+                            'user_limit_usd': user_limit_usd,
                             'total_places': None,
                             'max_capacity': max_capacity,
                             'current_deposit': current_deposit,
@@ -519,9 +656,18 @@ class StakingParser:
                         # Название пула (обычно совпадает с монетой стейкинга)
                         pool_name = pool.get('projectName', coin)
 
+                        # Общая сумма наград проекта
+                        total_reward_amount = None
+                        if project_rewards:
+                            total_reward_amount = project_rewards[0].get('totalRewardAmount')
+
+                        # Время до конца (countdown)
+                        countdown = project.get('countdownToEnd', 0)
+
                         staking = {
                             'exchange': 'OKX',
                             'product_id': pool_id,
+                            'project_id': project_id,  # ID проекта для группировки
                             'coin': coin,
                             'reward_coin': reward_coin if reward_coin != coin else None,
                             'apr': apr,
@@ -534,6 +680,7 @@ class StakingParser:
                             'reward_token_price_usd': reward_token_price,
                             'start_time': project.get('startTime'),
                             'end_time': end_time,
+                            'countdown': countdown,  # Время до конца в мс
                             'user_limit_tokens': user_limit_tokens,
                             'user_limit_usd': user_limit_usd,
                             'total_places': None,
@@ -542,6 +689,7 @@ class StakingParser:
                             'fill_percentage': fill_percentage,
                             'pool_name': pool_name,
                             'reward_amount': reward_amount,
+                            'total_reward_amount': total_reward_amount,  # Общий пул наград
                         }
 
                         stakings.append(staking)

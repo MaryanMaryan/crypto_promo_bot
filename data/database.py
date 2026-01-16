@@ -168,7 +168,8 @@ class DatabaseMigration:
             self._migration_007_add_telegram_tables,
             self._migration_008_add_telegram_accounts,
             self._migration_009_add_staking_snapshots,
-            self._migration_010_add_announcement_fields
+            self._migration_010_add_announcement_fields,
+            self._migration_011_add_exchange_credentials
         ])
 
     def _migration_010_add_announcement_fields(self, session):
@@ -197,6 +198,52 @@ class DatabaseMigration:
                 logging.info("ℹ️ Все поля анонсов уже существуют")
         except Exception as e:
             logging.error(f"❌ Ошибка в миграции 010: {e}")
+            raise
+    
+    def _migration_011_add_exchange_credentials(self, session):
+        """Миграция 011: Создание таблицы exchange_credentials для API ключей бирж"""
+        try:
+            # Проверяем существование таблицы
+            result = session.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='exchange_credentials'"
+            ))
+            if result.fetchone() is not None:
+                logging.info("ℹ️ Таблица exchange_credentials уже существует")
+                return
+            
+            # Создаём таблицу
+            session.execute(text("""
+                CREATE TABLE exchange_credentials (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name VARCHAR NOT NULL,
+                    exchange VARCHAR NOT NULL,
+                    api_key VARCHAR NOT NULL,
+                    api_secret VARCHAR NOT NULL,
+                    passphrase VARCHAR,
+                    is_active BOOLEAN DEFAULT 1,
+                    is_verified BOOLEAN DEFAULT 0,
+                    last_verified DATETIME,
+                    last_used DATETIME,
+                    requests_count INTEGER DEFAULT 0,
+                    success_count INTEGER DEFAULT 0,
+                    error_count INTEGER DEFAULT 0,
+                    last_error TEXT,
+                    added_by INTEGER NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            
+            # Создаём индекс
+            session.execute(text(
+                "CREATE INDEX idx_exchange_active ON exchange_credentials(exchange, is_active)"
+            ))
+            
+            session.commit()
+            logging.info("✅ Миграция 011: Создана таблица exchange_credentials")
+            
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 011: {e}")
             raise
     
     def _migration_001_initial(self, session):

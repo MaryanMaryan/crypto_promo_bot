@@ -7,12 +7,18 @@ from data.database import get_db, get_db_session, PromoHistory, ApiLink
 from parsers.universal_fallback_parser import UniversalFallbackParser
 from parsers.staking_parser import StakingParser
 from parsers.announcement_parser import AnnouncementParser
+from parsers.weex_parser import WeexParser
 from services.stability_tracker_service import StabilityTrackerService
 
 logger = logging.getLogger(__name__)
 
 class ParserService:
     """Сервис для управления парсерами с улучшенной обработкой ошибок"""
+
+    # Биржи, требующие специальных парсеров
+    SPECIAL_PARSERS = {
+        'weex': WeexParser,
+    }
 
     def __init__(self):
         self.parsers = {}
@@ -25,6 +31,63 @@ class ParserService:
             'fallback_accepted': 0,
             'last_check_time': None
         }
+
+    def _extract_exchange_from_url(self, url: str) -> str:
+        """Извлекает название биржи из URL"""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            
+            # Убираем www. и поддомены
+            parts = domain.split('.')
+            if len(parts) >= 2:
+                # Берём основную часть домена
+                main_domain = parts[-2] if parts[-1] in ['com', 'io', 'org', 'net', 'ru'] else parts[-1]
+                return main_domain
+            return domain
+        except:
+            return ''
+
+    def _select_parser(self, url: str, api_url: Optional[str], html_url: Optional[str], parsing_type: str, special_parser: Optional[str] = None):
+        """Выбирает подходящий парсер на основе URL или явного указания special_parser"""
+        
+        # Если явно указан специальный парсер - используем его
+        if special_parser:
+            if special_parser in self.SPECIAL_PARSERS:
+                parser_class = self.SPECIAL_PARSERS[special_parser]
+                target_url = html_url or url
+                logger.info(f"🔧 Используется ЯВНО УКАЗАННЫЙ специальный парсер: {parser_class.__name__} для {target_url}")
+                return parser_class(target_url)
+            else:
+                logger.warning(f"⚠️ Указанный special_parser '{special_parser}' не найден, используем автоопределение")
+        
+        # Определяем биржу из всех доступных URL
+        exchange = self._extract_exchange_from_url(url)
+        
+        # Также проверяем html_url (для типа "Только Browser")
+        if not exchange or exchange not in self.SPECIAL_PARSERS:
+            if html_url:
+                exchange = self._extract_exchange_from_url(html_url)
+        
+        # Также проверяем api_url
+        if not exchange or exchange not in self.SPECIAL_PARSERS:
+            if api_url:
+                exchange = self._extract_exchange_from_url(api_url)
+        
+        logger.info(f"🔍 Определена биржа: {exchange or 'unknown'}")
+        
+        # Проверяем, есть ли специальный парсер для этой биржи
+        if exchange in self.SPECIAL_PARSERS:
+            parser_class = self.SPECIAL_PARSERS[exchange]
+            # Используем html_url если он есть (для browser-only парсинга)
+            target_url = html_url or url
+            logger.info(f"🔧 Используется специальный парсер: {parser_class.__name__} для {target_url}")
+            return parser_class(target_url)
+        
+        # По умолчанию используем UniversalFallbackParser
+        logger.debug(f"🔧 Создание UniversalFallbackParser")
+        return UniversalFallbackParser(url, api_url=api_url, html_url=html_url, parsing_type=parsing_type)
 
     def _convert_to_datetime(self, time_value: Any) -> Optional[datetime]:
         """Конвертирует различные форматы времени в datetime объект"""
@@ -74,7 +137,96 @@ class ParserService:
 
         logger.warning(f"⚠️ Неизвестный формат времени: {type(time_value)} - {time_value}")
         return None
+
+    def _safe_int(self, value: Any) -> Optional[int]:
+        """Безопасное преобразование в int"""
+        if value is None:
+            return None
+        try:
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value)
+            if isinstance(value, str):
+                # Убираем пробелы и запятые
+                clean_value = value.replace(',', '').replace(' ', '').strip()
+                if clean_value:
+                    return int(float(clean_value))
+            return None
+        except (ValueError, TypeError):
+            return None
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        """Безопасное преобразование в float"""
+        if value is None:
+            return None
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                # Убираем пробелы и запятые
+                clean_value = value.replace(',', '').replace(' ', '').strip()
+                if clean_value:
+                    return float(clean_value)
+            return None
+        except (ValueError, TypeError):
+            return None
     
+    def _check_with_special_parser(self, link_id: int, url: str, special_parser: str, link) -> Optional[Dict]:
+        """
+        Проверяет ссылку с использованием специального парсера (для announcement с special_parser).
+        Возвращает результат в формате, совместимом с check_announcements.
+        """
+        try:
+            logger.info(f"🔧 Использование специального парсера '{special_parser}' для announcement ссылки {link_id}")
+            
+            # Получаем парсер
+            html_url = link.get_primary_html_url()
+            api_url = link.get_primary_api_url()
+            target_url = html_url or api_url or url
+            
+            parser = self._select_parser(url, api_url, html_url, link.parsing_type or 'combined', special_parser)
+            
+            # Получаем промоакции
+            promotions = parser.get_promotions()
+            
+            if not promotions:
+                logger.info(f"ℹ️ Специальный парсер не вернул промоакций")
+                return None
+            
+            logger.info(f"📦 Специальный парсер вернул {len(promotions)} промоакций")
+            
+            # Фильтруем новые промоакции
+            new_promos = self._filter_new_promotions(link_id, promotions)
+            
+            if new_promos:
+                logger.info(f"🎉 Найдено {len(new_promos)} НОВЫХ промоакций!")
+                
+                # Сохраняем в историю
+                saved_count = self._save_to_history(link_id, new_promos)
+                
+                # Формируем сообщение для уведомления
+                promo_titles = [p.get('title', 'Без названия') for p in new_promos[:3]]
+                message = f"Найдено {len(new_promos)} новых промоакций:\n" + "\n".join(f"• {t}" for t in promo_titles)
+                if len(new_promos) > 3:
+                    message += f"\n...и ещё {len(new_promos) - 3}"
+                
+                return {
+                    'changed': True,
+                    'message': message,
+                    'matched_content': str(new_promos),
+                    'strategy': f'special_parser:{special_parser}',
+                    'url': url,
+                    'new_promos': new_promos  # Добавляем сами промоакции для форматирования
+                }
+            else:
+                logger.info(f"ℹ️ Все промоакции уже известны")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка в _check_with_special_parser: {e}", exc_info=True)
+            return None
+
     def check_for_new_promos(self, link_id: int, url: str) -> List[Dict[str, Any]]:
         """Проверяет новые промоакции для указанной ссылки"""
         self.stats['total_checks'] += 1
@@ -88,6 +240,7 @@ class ParserService:
             api_url = None
             html_url = None
             parsing_type = 'combined'  # По умолчанию
+            special_parser = None  # Специальный парсер
 
             with get_db_session() as db:
                 link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
@@ -95,14 +248,16 @@ class ParserService:
                     api_url = link.get_primary_api_url()
                     html_url = link.get_primary_html_url()
                     parsing_type = link.parsing_type or 'combined'
+                    special_parser = link.special_parser  # Получаем специальный парсер
 
             logger.info(f"📡 API URL: {api_url or 'Не указан'}")
             logger.info(f"🌐 HTML URL (fallback): {html_url or 'Не указан'}")
             logger.info(f"🎯 Тип парсинга: {parsing_type}")
+            if special_parser:
+                logger.info(f"🔧 Специальный парсер: {special_parser}")
 
-            # Создаем парсер с одиночными URL и типом парсинга
-            logger.debug(f"🔧 Создание UniversalFallbackParser")
-            parser = UniversalFallbackParser(url, api_url=api_url, html_url=html_url, parsing_type=parsing_type)
+            # Выбираем парсер в зависимости от биржи
+            parser = self._select_parser(url, api_url, html_url, parsing_type, special_parser)
 
             logger.info(f"📡 Запуск парсинга...")
             promotions = parser.get_promotions()
@@ -273,7 +428,16 @@ class ParserService:
                             start_time=self._convert_to_datetime(promo.get('start_time')),
                             end_time=self._convert_to_datetime(promo.get('end_time')),
                             link=promo.get('link', ''),
-                            icon=promo.get('icon', '')
+                            icon=promo.get('icon', ''),
+                            # Новые поля для детальной информации
+                            participants_count=self._safe_int(promo.get('participants_count')),
+                            winners_count=self._safe_int(promo.get('winners_count')),
+                            reward_per_winner=str(promo.get('reward_per_winner', '')) if promo.get('reward_per_winner') else None,
+                            reward_per_winner_usd=self._safe_float(promo.get('reward_per_winner_usd')),
+                            conditions=promo.get('conditions', ''),
+                            reward_type=str(promo.get('reward_type', '')) if promo.get('reward_type') else None,
+                            total_prize_pool_usd=self._safe_float(promo.get('total_prize_pool_usd')),
+                            status=str(promo.get('status', '')) if promo.get('status') else None
                         )
                         db.add(history_item)
                         saved_count += 1
@@ -528,6 +692,14 @@ class ParserService:
                 if link.category != 'announcement':
                     logger.error(f"❌ Ссылка {link_id} не является announcement (category={link.category})")
                     return None
+
+                # ПРОВЕРЯЕМ СПЕЦИАЛЬНЫЙ ПАРСЕР
+                special_parser = link.special_parser
+                if special_parser:
+                    logger.info(f"🔧 Обнаружен специальный парсер: {special_parser}")
+                    logger.info(f"   Переключаемся на check_for_new_promos вместо announcement парсинга")
+                    # Используем обычный метод парсинга с специальным парсером
+                    return self._check_with_special_parser(link_id, url, special_parser, link)
 
                 # Получаем настройки парсинга
                 strategy = link.announcement_strategy

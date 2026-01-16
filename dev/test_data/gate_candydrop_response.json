@@ -1,0 +1,177 @@
+{
+  "timestamp": 1768501590350,
+  "method": "/apiw/v2/launch/candydrop/activity-list?page=1&pageSize=10&activityStatus=ongoing",
+  "code": 200,
+  "message": "success",
+  "data": {
+    "page": 1,
+    "pageSize": 10,
+    "pageCount": 1,
+    "totalCount": 4,
+    "list": {
+      "count": {
+        "ongoing": 4,
+        "upcoming": 0,
+        "ended": 131
+      },
+      "end": {
+        "list": [
+          {
+            "id": 250,
+            "participants": 18856,
+            "currency": "BREV",
+            "icon_url": "https://icon.staticimgs.com/images/coin_icon/256/brev_1767618860.png",
+            "start_time": 1767769200,
+            "end_time": 1768374000,
+            "activity_status": "ended",
+            "registered": false,
+            "total_rewards": "100000",
+            "total_rewards_usdt": "53930",
+            "user_max_rewards": "800",
+            "user_max_rewards_usdt": "431.44",
+            "rule_name": [
+              "Spot"
+            ],
+            "reward_type": [
+              "Share Rewards"
+            ],
+            "reward_status": 0,
+            "airdrop_received": "",
+            "phase": 132,
+            "title": "Win up to 800 BREV",
+            "exchange_rate": "0.5393",
+            "top": 0,
+            "lottery_drawing_status": 1,
+            "reward_is_init": true
+          }
+        ],
+        "icon_urls": [
+          "https://icon.staticimgs.com/images/coin_icon/256/brev_1767618860.png",
+          "https://icon.staticimgs.com/images/coin_icon/256/oooo_1767012119.png",
+          "https://icon.staticimgs.com/images/coin_icon/256/eth.png?v=1743408000"
+        ],
+        "count": 131
+      },
+      "list": [
+        {
+          "id": 247,
+          "participants": 40469,
+          "currency": "SOL",
+          "icon_url": "https://icon.staticimgs.com/images/coin_icon/256/sol.png?v=1743408000",
+          "start_time": 1767686400,
+          "end_time": 1768809600,
+          "activity_status": "ongoing",
+          "registered": false,
+          "total_rewards": "600",
+          "total_rewards_usdt": "177528",
+          "user_max_rewards": "3",
+          "user_max_rewards_usdt": "887.64",
+          "rule_name": [
+            "Futures",
+            "Invite Friends"
+          ],
+          "reward_type": [
+            "Share Rewards"
+          ],
+          "reward_status": 0,
+          "airdrop_received": "",
+          "phase": 131,
+          "title": "Win up to 3 SOL",
+          "exchange_rate": "295.88",
+          "top": 1,
+          "lottery_drawing_status": 1,
+          "reward_is_init": false
+        },
+        {
+          "id": 256,
+          "participants": 8400,
+          "currency": "ZTC",
+          "icon_url": "https://icon.staticimgs.com/images/coin_icon/256/ztc_1767782422.png",
+          "start_time": 1768392000,
+          "end_time": 1769342400,
+          "activity_status": "ongoing",
+          "registered": false,
+          "total_rewards": "14583334",
+          "total_rewards_usdt": "184843.75",
+          "user_max_rewards": "54000",
+          "user_max_rewards_usdt": "684.45",
+          "rule_name": [
+            "Spot"
+          ],
+          "reward_type": [
+            "Fixed Rewards",
+            "Share Rewards"
+          ],
+          "reward_status": 0,
+          "airdrop_received": "",
+          "phase": 135,
+          "title": "Win up to 54,000 ZTC",
+          "exchange_rate": "0.012675",
+          "top": 0,
+          "lottery_drawing_status": 1,
+          "reward_is_init": false
+        },
+        {
+          "id": 253,
+          "participants": 9808,
+          "currency": "老子",
+          "icon_url": "https://icon.staticimgs.com/images/coin_icon/256/老子_1768017018.png",
+          "start_time": 1768298400,
+          "end_time": 1769421600,
+          "activity_status": "ongoing",
+          "registered": false,
+          "total_rewards": "8000000",
+          "total_rewards_usdt": "120000",
+          "user_max_rewards": "50000",
+          "user_max_rewards_usdt": "750",
+          "rule_name": [
+            "Futures",
+            "Invite Friends"
+          ],
+          "reward_type": [
+            "Share Rewards"
+          ],
+          "reward_status": 0,
+          "airdrop_received": "",
+          "phase": 134,
+          "title": "Win up to 50,000 老子",
+          "exchange_rate": "0.015",
+          "top": 0,
+          "lottery_drawing_status": 1,
+          "reward_is_init": false
+        },
+        {
+          "id": 251,
+          "participants": 13513,
+          "currency": "YALA",
+          "icon_url": "https://icon.staticimgs.com/images/coin_icon/256/yala_1753182448.png",
+          "start_time": 1768208400,
+          "end_time": 1769072400,
+          "activity_status": "ongoing",
+          "registered": false,
+          "total_rewards": "1390176",
+          "total_rewards_usdt": "643373.45",
+          "user_max_rewards": "10300",
+          "user_max_rewards_usdt": "4766.84",
+          "rule_name": [
+            "Futures",
+            "Spot",
+            "Alpha"
+          ],
+          "reward_type": [
+            "Share Rewards",
+            "Fixed Rewards"
+          ],
+          "reward_status": 0,
+          "airdrop_received": "",
+          "phase": 133,
+          "title": "Win up to 10,300 YALA",
+          "exchange_rate": "0.4628",
+          "top": 0,
+          "lottery_drawing_status": 1,
+          "reward_is_init": false
+        }
+      ]
+    }
+  }
+}

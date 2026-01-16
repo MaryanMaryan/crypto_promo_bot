@@ -91,3 +91,41 @@ if TELEGRAM_PARSER_ENABLED:
         print(f"ℹ️  Настройте Telegram API через бота: Обход блокировок → Telegram API")
 else:
     print(f"ℹ️ Telegram Parser отключен (TELEGRAM_PARSER_ENABLED=false)")
+
+# =============================================================================
+# EXCHANGE API CREDENTIALS (для получения полных данных о стейкингах)
+# =============================================================================
+# Bybit API
+BYBIT_API_KEY = os.getenv('BYBIT_API_KEY', '')
+BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET', '')
+
+# Kucoin API
+KUCOIN_API_KEY = os.getenv('KUCOIN_API_KEY', '')
+KUCOIN_API_SECRET = os.getenv('KUCOIN_API_SECRET', '')
+KUCOIN_PASSPHRASE = os.getenv('KUCOIN_PASSPHRASE', '')
+
+# OKX API
+OKX_API_KEY = os.getenv('OKX_API_KEY', '')
+OKX_API_SECRET = os.getenv('OKX_API_SECRET', '')
+OKX_PASSPHRASE = os.getenv('OKX_PASSPHRASE', '')
+
+# Логирование настроек API ключей
+def _log_exchange_api_status():
+    """Логирует статус настройки API ключей бирж"""
+    exchanges = [
+        ('Bybit', BYBIT_API_KEY, BYBIT_API_SECRET),
+        ('Kucoin', KUCOIN_API_KEY, KUCOIN_API_SECRET),
+        ('OKX', OKX_API_KEY, OKX_API_SECRET),
+    ]
+    
+    configured = []
+    for name, api_key, api_secret in exchanges:
+        if api_key and api_secret:
+            configured.append(name)
+    
+    if configured:
+        print(f"🔑 API ключи настроены: {', '.join(configured)}")
+    else:
+        print(f"ℹ️  API ключи бирж не настроены (расширенные данные недоступны)")
+
+_log_exchange_api_status()

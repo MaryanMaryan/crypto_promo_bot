@@ -259,6 +259,20 @@ class RotationManager:
             
             self.logger.info("Ротация всех комбинаций завершена")
 
+    def invalidate_cache_for_exchange(self, exchange: str):
+        """Принудительная инвалидация кеша для конкретной биржи (для retry логики)"""
+        with self._lock:
+            # Удаляем активную комбинацию
+            if exchange in self._active_combinations:
+                del self._active_combinations[exchange]
+                self.logger.info(f"🔄 Удалена активная комбинация для {exchange}")
+            
+            # Очищаем кеш
+            cache_key = f"combination_{exchange}"
+            if cache_key in self._combination_cache:
+                del self._combination_cache[cache_key]
+                self.logger.info(f"🔄 Очищен кеш комбинации для {exchange}")
+
     def handle_request_result(self, exchange: str, proxy_id: int, user_agent_id: int, 
                             success: bool, response_time_ms: float, response_code: int = None):
         """Обработка результата запроса и обновление статистики"""

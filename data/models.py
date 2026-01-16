@@ -59,6 +59,9 @@ class ApiLink(Base):
     announcement_last_snapshot = Column(Text, nullable=True)  # Последний снимок страницы или элемента (hash или содержимое)
     announcement_last_check = Column(DateTime, nullable=True)  # Время последней проверки
 
+    # СПЕЦИАЛЬНЫЙ ПАРСЕР (переопределяет стандартную логику):
+    special_parser = Column(String, nullable=True)  # 'weex', 'okx_boost', etc. - использовать специальный парсер вместо стандартного
+
     # Связи
     telegram_account = relationship("TelegramAccount", backref="assigned_links")
 
@@ -185,7 +188,37 @@ class PromoHistory(Base):
     icon = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     
+    # НОВЫЕ ПОЛЯ для детальной информации о промоакциях
+    participants_count = Column(Integer, nullable=True)  # Количество участников
+    winners_count = Column(Integer, nullable=True)  # Количество призовых мест
+    reward_per_winner = Column(String, nullable=True)  # Награда на одного победителя (например "400 FOGO")
+    reward_per_winner_usd = Column(Float, nullable=True)  # Награда в USD
+    conditions = Column(String, nullable=True)  # Условия участия (Spot, Futures, Invite и т.д.)
+    reward_type = Column(String, nullable=True)  # Тип награды (Share Rewards, Fixed Rewards)
+    max_reward_per_user = Column(String, nullable=True)  # Максимальная награда на пользователя
+    total_prize_pool_usd = Column(Float, nullable=True)  # Призовой пул в USD
+    status = Column(String, nullable=True)  # Статус: ongoing, upcoming, ended
+    last_updated = Column(DateTime, nullable=True)  # Время последнего обновления данных
+    
     api_link = relationship("ApiLink", backref="promos")
+    
+    def get_estimated_winners(self) -> int:
+        """Рассчитывает примерное количество призовых мест если не указано"""
+        if self.winners_count:
+            return self.winners_count
+        
+        # Пытаемся рассчитать: пул / награда = места
+        if self.total_prize_pool_usd and self.reward_per_winner_usd and self.reward_per_winner_usd > 0:
+            return int(self.total_prize_pool_usd / self.reward_per_winner_usd)
+        
+        return 0
+    
+    def get_competition_ratio(self) -> float:
+        """Рассчитывает коэффициент конкуренции (участники / места)"""
+        winners = self.get_estimated_winners()
+        if winners > 0 and self.participants_count:
+            return round(self.participants_count / winners, 1)
+        return 0.0
 
 class ProxyServer(Base):
     __tablename__ = 'proxy_servers'
@@ -498,6 +531,52 @@ class TelegramMessage(Base):
         """Установить список извлеченных ссылок"""
         self.extracted_links = json.dumps(links_list) if links_list else '[]'
 
+class ExchangeCredentials(Base):
+    """Учетные данные для авторизации на биржах (для получения полных данных о стейкингах)"""
+    __tablename__ = 'exchange_credentials'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)  # Название (например "Основной Bybit")
+    exchange = Column(String, nullable=False)  # 'bybit', 'kucoin', 'okx'
+    
+    # API ключи
+    api_key = Column(String, nullable=False)
+    api_secret = Column(String, nullable=False)  # TODO: зашифровать в будущем
+    passphrase = Column(String, nullable=True)  # Для Kucoin и OKX
+    
+    # Статус и метаданные
+    is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)  # Прошел ли проверку
+    last_verified = Column(DateTime, nullable=True)
+    last_used = Column(DateTime, nullable=True)
+    
+    # Статистика
+    requests_count = Column(Integer, default=0)
+    success_count = Column(Integer, default=0)
+    error_count = Column(Integer, default=0)
+    last_error = Column(Text, nullable=True)
+    
+    # Метаданные
+    added_by = Column(Integer, nullable=False)  # User ID кто добавил
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Индексы
+    __table_args__ = (
+        Index('idx_exchange_active', 'exchange', 'is_active'),
+    )
+    
+    def mask_api_key(self) -> str:
+        """Маскировать API ключ для отображения"""
+        if len(self.api_key) > 8:
+            return self.api_key[:4] + '****' + self.api_key[-4:]
+        return '****'
+    
+    def mask_api_secret(self) -> str:
+        """Маскировать API secret для отображения"""
+        return '**********'
+
+
 class UserLinkSubscription(Base):
     """Подписки пользователей на уведомления по конкретным ссылкам"""
     __tablename__ = 'user_link_subscriptions'
@@ -523,4 +602,27 @@ class UserLinkSubscription(Base):
     # Уникальность: один пользователь может подписаться на ссылку только раз
     __table_args__ = (
         UniqueConstraint('user_id', 'api_link_id', name='_user_link_uc'),
+    )
+
+
+class PromoParticipantsHistory(Base):
+    """История участников промоакций для отслеживания динамики"""
+    __tablename__ = 'promo_participants_history'
+
+    id = Column(Integer, primary_key=True)
+    
+    # Идентификация промо
+    exchange = Column(String, nullable=False)  # Биржа: GateCandy, OKX и др.
+    promo_id = Column(String, nullable=False)  # ID промо (gate_247, okx_123)
+    promo_title = Column(String, nullable=True)  # Название для удобства
+    
+    # Данные
+    participants_count = Column(Integer, nullable=False)  # Количество участников
+    
+    # Временная метка
+    recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Индексы для быстрого поиска
+    __table_args__ = (
+        Index('idx_promo_history_lookup', 'exchange', 'promo_id', 'recorded_at'),
     )

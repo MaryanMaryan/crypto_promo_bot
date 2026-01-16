@@ -11,4 +11,9 @@ try:
 except ImportError:
     pass
 
-__all__ = ['BaseParser', 'UniversalParser', 'UniversalFallbackParser']
+try:
+    from .weex_parser import WeexParser
+except ImportError:
+    pass
+
+__all__ = ['BaseParser', 'UniversalParser', 'UniversalFallbackParser', 'WeexParser']

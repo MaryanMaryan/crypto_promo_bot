@@ -1,0 +1,48 @@
+[
+  {
+    "exchange": "Gate.io",
+    "promo_id": "gate.io_200",
+    "navName": 200,
+    "title": "Gate.io Promo gate.io_200"
+  },
+  {
+    "exchange": "Gate.io",
+    "promo_id": "gate.io_250",
+    "title": "Win up to 800 BREV",
+    "award_token": "BREV",
+    "participants_count": 18856,
+    "link": "https://www.gate.com/ru/candy-drop/detail/BREV-250"
+  },
+  {
+    "exchange": "Gate.io",
+    "promo_id": "gate.io_247",
+    "title": "Win up to 3 SOL",
+    "award_token": "SOL",
+    "participants_count": 40469,
+    "link": "https://www.gate.com/ru/candy-drop/detail/SOL-247"
+  },
+  {
+    "exchange": "Gate.io",
+    "promo_id": "gate.io_256",
+    "title": "Win up to 54,000 ZTC",
+    "award_token": "ZTC",
+    "participants_count": 8400,
+    "link": "https://www.gate.com/ru/candy-drop/detail/ZTC-256"
+  },
+  {
+    "exchange": "Gate.io",
+    "promo_id": "gate.io_253",
+    "title": "Win up to 50,000 老子",
+    "award_token": "老子",
+    "participants_count": 9808,
+    "link": "https://www.gate.com/ru/candy-drop/detail/老子-253"
+  },
+  {
+    "exchange": "Gate.io",
+    "promo_id": "gate.io_251",
+    "title": "Win up to 10,300 YALA",
+    "award_token": "YALA",
+    "participants_count": 13513,
+    "link": "https://www.gate.com/ru/candy-drop/detail/YALA-251"
+  }
+]

@@ -7,6 +7,13 @@ from utils.rotation_manager import get_rotation_manager
 from utils.statistics_manager import get_statistics_manager
 
 class BaseParser:
+    # Домены, которые блокируют запросы с User-Agent
+    # Для этих доменов User-Agent НЕ будет добавляться
+    NO_USER_AGENT_DOMAINS = [
+        'gate.com',
+        'gate.io'
+    ]
+
     def __init__(self, url: str = None):  # ✅ ДОБАВЛЯЕМ url параметр
         self.url = url
         self.session = requests.Session()
@@ -15,6 +22,14 @@ class BaseParser:
         self.stats_manager = get_statistics_manager()
         self._last_request_time = 0
         self._min_request_interval = 1.0
+
+    def _should_skip_user_agent(self, url: str) -> bool:
+        """Проверяет, нужно ли пропустить User-Agent для данного URL"""
+        url_lower = url.lower()
+        for domain in self.NO_USER_AGENT_DOMAINS:
+            if domain in url_lower:
+                return True
+        return False
 
     def _extract_exchange_from_url(self, url: str) -> str:
         """Извлечение названия биржи из URL"""
@@ -30,7 +45,7 @@ class BaseParser:
             return 'kucoin'
         elif 'okx' in url_lower or 'okex' in url_lower:
             return 'okx'
-        elif 'gate.io' in url_lower or 'gateio' in url_lower:
+        elif 'gate.io' in url_lower or 'gateio' in url_lower or 'gate.com' in url_lower:
             return 'gate'
         elif 'huobi' in url_lower:
             return 'huobi'
@@ -64,7 +79,11 @@ class BaseParser:
             self.logger.info(f"🔧 Используем User-Agent: {user_agent.browser_type} {user_agent.browser_version} на {user_agent.platform}")
 
         # Подготавливаем параметры запроса
-        headers = kwargs.get('headers', {})
+        # Сначала сохраняем переданные headers (они будут иметь приоритет)
+        passed_headers = kwargs.get('headers', {}).copy()
+        
+        # Базовые headers
+        headers = {}
 
         # Определяем тип запроса (API или HTML)
         is_api_request = any(indicator in url.lower() for indicator in ['/api/', '/x-api/', '/v1/', '/v2/', '/v3/', '/v4/', '/v5/'])
@@ -106,7 +125,13 @@ class BaseParser:
 
             headers.update(browser_headers)
 
-        if use_fallback:
+        # Проверяем, нужно ли пропустить User-Agent для данного домена
+        skip_user_agent = self._should_skip_user_agent(url)
+
+        if skip_user_agent:
+            self.logger.info(f"🚫 User-Agent пропущен для домена (Gate.io требует запросы без UA)")
+            # НЕ добавляем User-Agent для доменов из whitelist
+        elif use_fallback:
             # Fallback User-Agent - современный Chrome на Windows
             headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             # Не используем прокси в fallback режиме
@@ -119,6 +144,9 @@ class BaseParser:
             }
             kwargs['proxies'] = proxies
 
+        # Применяем переданные headers поверх базовых (переданные имеют приоритет)
+        headers.update(passed_headers)
+        
         kwargs['headers'] = headers
         kwargs['timeout'] = kwargs.get('timeout', 30)
 

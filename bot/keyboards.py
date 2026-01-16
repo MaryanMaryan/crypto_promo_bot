@@ -147,3 +147,175 @@ def get_archive_inactive_keyboard():
     
     builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
+
+
+# =============================================================================
+# EXCHANGE CREDENTIALS KEYBOARDS
+# =============================================================================
+
+def get_exchange_credentials_menu_keyboard():
+    """Главное меню управления API ключами бирж"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(text="➕ Добавить ключи", callback_data="exchange_cred_add"))
+    builder.add(InlineKeyboardButton(text="📋 Список ключей", callback_data="exchange_cred_list"))
+    builder.add(InlineKeyboardButton(text="✅ Проверить все", callback_data="exchange_cred_verify_all"))
+    builder.add(InlineKeyboardButton(text="📊 Статистика", callback_data="exchange_cred_stats"))
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="settings_menu"))
+    
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
+def get_exchange_select_keyboard():
+    """Клавиатура выбора биржи для добавления ключей"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(
+        text="🟡 Bybit",
+        callback_data="exchange_select_bybit"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🟢 Kucoin",
+        callback_data="exchange_select_kucoin"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="⚫ OKX",
+        callback_data="exchange_select_okx"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data="exchange_cred_menu"
+    ))
+    
+    builder.adjust(3, 1)
+    return builder.as_markup()
+
+
+def get_exchange_credentials_list_keyboard(credentials: list):
+    """
+    Клавиатура со списком API ключей
+    
+    Args:
+        credentials: Список словарей с данными о ключах
+    """
+    builder = InlineKeyboardBuilder()
+    
+    for cred in credentials:
+        status = "✅" if cred['is_verified'] else "❓"
+        active = "🟢" if cred['is_active'] else "🔴"
+        exchange_icon = {
+            'bybit': '🟡',
+            'kucoin': '🟢',
+            'okx': '⚫'
+        }.get(cred['exchange'], '⚪')
+        
+        builder.add(InlineKeyboardButton(
+            text=f"{active}{status} {exchange_icon} {cred['name']}",
+            callback_data=f"exchange_cred_view_{cred['id']}"
+        ))
+    
+    if not credentials:
+        builder.add(InlineKeyboardButton(
+            text="📝 Ключи не добавлены",
+            callback_data="exchange_cred_add"
+        ))
+    
+    builder.add(InlineKeyboardButton(text="➕ Добавить", callback_data="exchange_cred_add"))
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="exchange_cred_menu"))
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_exchange_credential_actions_keyboard(credential_id: int, is_verified: bool = False):
+    """Клавиатура действий для конкретных API ключей"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(
+        text="✅ Проверить" if not is_verified else "🔄 Перепроверить",
+        callback_data=f"exchange_cred_verify_{credential_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="📊 Статистика",
+        callback_data=f"exchange_cred_stats_{credential_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🔴 Деактивировать",
+        callback_data=f"exchange_cred_toggle_{credential_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🗑️ Удалить",
+        callback_data=f"exchange_cred_delete_{credential_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🔙 К списку",
+        callback_data="exchange_cred_list"
+    ))
+    
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
+def get_exchange_delete_confirm_keyboard(credential_id: int):
+    """Подтверждение удаления API ключей"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(
+        text="✅ Да, удалить",
+        callback_data=f"exchange_cred_confirm_delete_{credential_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data=f"exchange_cred_view_{credential_id}"
+    ))
+    
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def get_cancel_exchange_keyboard():
+    """Кнопка отмены при добавлении ключей"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="exchange_cred_menu"))
+    return builder.as_markup()
+
+
+# =============================================================================
+# AIRDROP MANAGEMENT KEYBOARDS
+# =============================================================================
+
+def get_airdrop_management_keyboard():
+    """Меню управления для ссылок категории 'airdrop' с кнопкой текущих промоакций"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🗑️ Удалить ссылку", callback_data="manage_delete"))
+    builder.add(InlineKeyboardButton(text="⏰ Изменить интервал", callback_data="manage_interval"))
+    builder.add(InlineKeyboardButton(text="✏️ Переименовать ссылку", callback_data="manage_rename"))
+    builder.add(InlineKeyboardButton(text="🎯 Настроить парсинг", callback_data="manage_configure_parsing"))
+    builder.add(InlineKeyboardButton(text="🎁 Текущие промоакции", callback_data="manage_view_current_promos"))
+    builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
+    builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
+    builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_link_list"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_current_promos_keyboard(current_page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Клавиатура пагинации для текущих промоакций"""
+    builder = InlineKeyboardBuilder()
+    
+    # Навигация
+    if current_page > 1:
+        builder.add(InlineKeyboardButton(text="◀️ Назад", callback_data="promos_page_prev"))
+    
+    builder.add(InlineKeyboardButton(text=f"📄 {current_page}/{total_pages}", callback_data="promos_page_info"))
+    
+    if current_page < total_pages:
+        builder.add(InlineKeyboardButton(text="Вперед ▶️", callback_data="promos_page_next"))
+    
+    # Дополнительные кнопки
+    builder.add(InlineKeyboardButton(text="🔄 Обновить", callback_data="manage_view_current_promos"))
+    builder.add(InlineKeyboardButton(text="⬅️ К ссылке", callback_data="back_to_link_management"))
+    
+    builder.adjust(3, 1, 1)
+    return builder.as_markup()

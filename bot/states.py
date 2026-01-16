@@ -1,5 +1,5 @@
 """
-FSM состояния для управления Telegram аккаунтами
+FSM состояния для управления Telegram аккаунтами и Exchange API ключами
 """
 
 from aiogram.fsm.state import State, StatesGroup
@@ -21,3 +21,24 @@ class TelegramAccountStates(StatesGroup):
     # Управление аккаунтом
     selecting_account = State()
     confirming_deletion = State()
+
+
+class ExchangeCredentialsStates(StatesGroup):
+    """Состояния для добавления API ключей бирж"""
+    
+    # Выбор биржи
+    selecting_exchange = State()
+    
+    # Ввод данных
+    waiting_for_name = State()       # Название для ключей (например "Основной Bybit")
+    waiting_for_api_key = State()    # API Key
+    waiting_for_api_secret = State() # API Secret
+    waiting_for_passphrase = State() # Passphrase (для Kucoin/OKX)
+    
+    # Подтверждения
+    confirming_add = State()         # Подтверждение добавления
+    confirming_deletion = State()    # Подтверждение удаления
+    
+    # Управление
+    selecting_credential = State()   # Выбор ключей для действия
+    viewing_details = State()        # Просмотр деталей

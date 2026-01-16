@@ -174,6 +174,9 @@ class StakingSnapshotService:
             Список словарей с данными стейкинга, дельтами и алертами
         """
         try:
+            import time
+            current_timestamp_ms = int(time.time() * 1000)
+
             with get_db_session() as session:
                 # Базовый запрос
                 query = session.query(StakingHistory).filter(
@@ -183,11 +186,22 @@ class StakingSnapshotService:
 
                 # ФИЛЬТР: Исключаем 100% заполненные стейкинги
                 # Используем OR для случаев когда fill_percentage = None (нет данных о заполненности)
-                from sqlalchemy import or_
+                from sqlalchemy import or_, and_, cast, BigInteger
                 query = query.filter(
                     or_(
                         StakingHistory.fill_percentage == None,
                         StakingHistory.fill_percentage < 100.0
+                    )
+                )
+
+                # ФИЛЬТР: Исключаем завершенные стейкинги (end_time < текущее время)
+                # end_time хранится как строка (timestamp в мс)
+                query = query.filter(
+                    or_(
+                        StakingHistory.end_time == None,
+                        StakingHistory.end_time == '',
+                        # Для числовых timestamp - сравниваем как строки (лексикографически работает для timestamp)
+                        StakingHistory.end_time > str(current_timestamp_ms)
                     )
                 )
 
