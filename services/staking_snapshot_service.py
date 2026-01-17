@@ -178,21 +178,32 @@ class StakingSnapshotService:
             current_timestamp_ms = int(time.time() * 1000)
 
             with get_db_session() as session:
+                # Подсчет общего количества стейкингов до фильтрации
+                total_query = session.query(StakingHistory).filter(
+                    StakingHistory.exchange.ilike(f"%{exchange}%"),
+                    StakingHistory.status != 'Sold Out'
+                )
+                total_count = total_query.count()
+
                 # Базовый запрос
                 query = session.query(StakingHistory).filter(
                     StakingHistory.exchange.ilike(f"%{exchange}%"),
                     StakingHistory.status != 'Sold Out'  # Исключаем распроданные
                 )
 
-                # ФИЛЬТР: Исключаем 100% заполненные стейкинги
+                # ФИЛЬТР: Исключаем стейкинги с высокой заполненностью
+                # Импортируем настройку максимальной заполненности из конфига
+                from config import MAX_POOL_FILL_PERCENTAGE
+                
                 # Используем OR для случаев когда fill_percentage = None (нет данных о заполненности)
                 from sqlalchemy import or_, and_, cast, BigInteger
                 query = query.filter(
                     or_(
                         StakingHistory.fill_percentage == None,
-                        StakingHistory.fill_percentage < 100.0
+                        StakingHistory.fill_percentage < MAX_POOL_FILL_PERCENTAGE
                     )
                 )
+                after_fill_filter = query.count()
 
                 # ФИЛЬТР: Исключаем завершенные стейкинги (end_time < текущее время)
                 # end_time хранится как строка (timestamp в мс)
@@ -204,6 +215,7 @@ class StakingSnapshotService:
                         StakingHistory.end_time > str(current_timestamp_ms)
                     )
                 )
+                after_time_filter = query.count()
 
                 # Фильтр по APR
                 if min_apr is not None:
@@ -212,7 +224,17 @@ class StakingSnapshotService:
                 # Сортировка по APR (сначала самые высокие)
                 stakings = query.order_by(desc(StakingHistory.apr)).all()
 
-                logger.info(f"📊 Найдено {len(stakings)} стейкингов для {exchange} (min_apr={min_apr})")
+                # Логирование статистики фильтрации
+                filtered_by_fill = total_count - after_fill_filter
+                filtered_by_time = after_fill_filter - after_time_filter
+                
+                logger.info(f"📊 Статистика для {exchange}:")
+                logger.info(f"   ├─ Всего стейкингов: {total_count}")
+                logger.info(f"   ├─ Отфильтровано по заполненности (≥{MAX_POOL_FILL_PERCENTAGE}%): {filtered_by_fill}")
+                logger.info(f"   ├─ Отфильтровано по времени окончания: {filtered_by_time}")
+                if min_apr:
+                    logger.info(f"   ├─ Отфильтровано по APR (<{min_apr}%): {after_time_filter - len(stakings)}")
+                logger.info(f"   └─ Итого показано: {len(stakings)}")
 
                 result = []
 
@@ -237,6 +259,7 @@ class StakingSnapshotService:
                         'reward_coin': staking.reward_coin,
                         'apr': staking.apr,
                         'type': staking.type,
+                        'product_type': staking.product_type,
                         'status': staking.status,
                         'category': staking.category,
                         'term_days': staking.term_days,
@@ -251,7 +274,13 @@ class StakingSnapshotService:
                         'start_time': staking.start_time,
                         'end_time': staking.end_time,
                         'first_seen': staking.first_seen,
-                        'last_updated': staking.last_updated
+                        'last_updated': staking.last_updated,
+                        # Поля для объединённых продуктов Fixed/Flexible (Gate.io)
+                        'fixed_apr': staking.fixed_apr,
+                        'fixed_term_days': staking.fixed_term_days,
+                        'fixed_user_limit': staking.fixed_user_limit,
+                        'flexible_apr': staking.flexible_apr,
+                        'flexible_user_limit': staking.flexible_user_limit
                     }
 
                     result.append({
@@ -281,9 +310,11 @@ class StakingSnapshotService:
         """
         alerts = []
 
-        # Алерт: Пул почти заполнен (>90%)
-        if staking.fill_percentage is not None and staking.fill_percentage > 90:
-            alerts.append("⚠️ Пул почти заполнен!")
+        # Алерт: Пул почти заполнен (порог - 5% от максимальной заполненности)
+        from config import MAX_POOL_FILL_PERCENTAGE
+        alert_threshold = MAX_POOL_FILL_PERCENTAGE - 5.0
+        if staking.fill_percentage is not None and staking.fill_percentage > alert_threshold:
+            alerts.append(f"⚠️ Пул почти заполнен ({staking.fill_percentage:.1f}%)!")
 
         # Алерт: APR резко вырос (>50%)
         if deltas.get('apr_delta', 0) > 50:

@@ -2,7 +2,7 @@ import json
 import logging
 import hashlib
 import requests
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .base_parser import BaseParser
 from utils.url_template_builder import get_url_builder
 
@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 class UniversalParser(BaseParser):
     def __init__(self, url: str):
         super().__init__(url)  # ✅ Передаем url в родительский класс
+        self._session: Optional[requests.Session] = None  # Сессия для Bybit API
 
     def extract_promo_id(self, obj: Dict) -> str:
         """Создает стабильный уникальный ID для промоакции"""
@@ -195,6 +196,11 @@ class UniversalParser(BaseParser):
             if self._is_okx_boost_data(data):
                 logger.info(f"🎯 Обнаружен OKX Boost API, используем специализированный парсер")
                 return self._parse_okx_boost(data)
+            
+            # Проверяем, является ли это MEXC Airdrop (EFTD) API
+            if self._is_mexc_airdrop_data(data):
+                logger.info(f"🎯 Обнаружен MEXC Airdrop API, используем специализированный парсер")
+                return self._parse_mexc_airdrop(data)
             
             # Проверяем, является ли это MEXC Launchpad API
             if self._is_mexc_launchpad_data(data):
@@ -483,6 +489,14 @@ class UniversalParser(BaseParser):
                 )
 
             # ========================================================================
+            # СПЕЦИАЛЬНАЯ ОБРАБОТКА BYBIT TOKEN SPLASH
+            # ========================================================================
+            # Bybit API не предоставляет winners_count и reward_per_winner напрямую
+            # Но мы можем получить эти данные из prizes массива или рассчитать
+            if exchange_name == 'Bybit':
+                self._process_bybit_token_splash(promo_data, obj)
+
+            # ========================================================================
             # АВТОМАТИЧЕСКАЯ ГЕНЕРАЦИЯ ССЫЛОК
             # ========================================================================
             # Если в API нет ссылки, пытаемся сгенерировать её используя шаблоны
@@ -520,6 +534,308 @@ class UniversalParser(BaseParser):
                 if value is not None and str(value).strip():
                     return value
         return None
+
+    def _process_bybit_token_splash(self, promo_data: Dict, obj: Dict) -> None:
+        """
+        Специальная обработка данных Bybit Token Splash для извлечения
+        winners_count и reward_per_winner из prizes массива.
+        
+        Структура API Bybit Token Splash:
+        {
+            "code": "20260116054439",
+            "totalPrizePool": "7500000",  # Общий пул в токенах
+            "token": "SCOR",              # Токен награды
+            "prizeToken": "SCOR",         # Токен приза
+            "participants": 1625,          # Участники
+            "taskType": 3,                 # 3=новые пользователи, 4=торговля
+            "prizes": [                    # Массив с призами (если доступен)
+                {
+                    "prizePool": "2000000",
+                    "count": 1000,         # Количество мест
+                    "unitPrize": "2000"    # Приз на место
+                }
+            ]
+        }
+        """
+        try:
+            # Проверяем что это Bybit Token Splash
+            task_type = obj.get('taskType') or obj.get('task_type')
+            total_prize_pool = obj.get('totalPrizePool') or obj.get('total_prize_pool')
+            prize_token = obj.get('prizeToken') or obj.get('token')
+            
+            if not total_prize_pool:
+                return
+            
+            # Преобразуем в число
+            try:
+                total_prize_pool_num = float(str(total_prize_pool).replace(',', ''))
+            except (ValueError, TypeError):
+                total_prize_pool_num = 0
+            
+            # Способ 1: Пытаемся извлечь из prizes массива
+            prizes = obj.get('prizes', [])
+            if prizes and isinstance(prizes, list):
+                total_winners = 0
+                min_unit_prize = None
+                
+                for prize in prizes:
+                    count = prize.get('count') or prize.get('winnersCount') or 0
+                    unit_prize = prize.get('unitPrize') or prize.get('prizePerUser')
+                    
+                    if count:
+                        total_winners += int(count)
+                    
+                    if unit_prize:
+                        try:
+                            unit_val = float(str(unit_prize).replace(',', ''))
+                            if min_unit_prize is None or unit_val < min_unit_prize:
+                                min_unit_prize = unit_val
+                        except (ValueError, TypeError):
+                            pass
+                
+                if total_winners > 0:
+                    promo_data['winners_count'] = total_winners
+                    logger.debug(f"📊 Bybit: извлечено {total_winners} призовых мест из prizes")
+                
+                if min_unit_prize and prize_token:
+                    promo_data['reward_per_winner'] = f"{int(min_unit_prize)} {prize_token}"
+                    logger.debug(f"📊 Bybit: reward_per_winner = {min_unit_prize} {prize_token}")
+            
+            # Способ 2: Пытаемся извлечь из newUserPrizes / tradeCompetitionPrizes
+            if not promo_data.get('winners_count'):
+                new_user_prizes = obj.get('newUserPrizes', [])
+                trade_prizes = obj.get('tradeCompetitionPrizes', [])
+                all_prizes = new_user_prizes + trade_prizes
+                
+                if all_prizes:
+                    total_winners = 0
+                    rewards_info = []
+                    
+                    for prize in all_prizes:
+                        count = prize.get('count') or prize.get('places') or 0
+                        pool = prize.get('prizePool') or prize.get('pool') or '0'
+                        
+                        try:
+                            count = int(count)
+                            pool_num = float(str(pool).replace(',', ''))
+                            
+                            if count > 0:
+                                total_winners += count
+                                reward = pool_num / count if count > 0 else 0
+                                rewards_info.append((count, reward))
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    if total_winners > 0:
+                        promo_data['winners_count'] = total_winners
+                    
+                    # Берем минимальную награду (для New Users обычно)
+                    if rewards_info and prize_token:
+                        min_reward = min(r[1] for r in rewards_info)
+                        promo_data['reward_per_winner'] = f"{int(min_reward)} {prize_token}"
+            
+            # Способ 3: Рассчитываем если есть только общий пул и unitPrize
+            if not promo_data.get('winners_count'):
+                unit_prize = obj.get('unitPrize') or obj.get('rewardPerUser')
+                
+                if unit_prize and total_prize_pool_num > 0:
+                    try:
+                        unit_val = float(str(unit_prize).replace(',', ''))
+                        if unit_val > 0:
+                            winners = int(total_prize_pool_num / unit_val)
+                            promo_data['winners_count'] = winners
+                            
+                            if prize_token:
+                                promo_data['reward_per_winner'] = f"{int(unit_val)} {prize_token}"
+                            
+                            logger.debug(f"📊 Bybit: рассчитано {winners} мест ({total_prize_pool_num} / {unit_val})")
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Логируем результат
+            if promo_data.get('winners_count') or promo_data.get('reward_per_winner'):
+                logger.info(
+                    f"✅ Bybit Token Splash: winners={promo_data.get('winners_count')}, "
+                    f"reward={promo_data.get('reward_per_winner')}"
+                )
+            else:
+                logger.debug(f"⚠️ Bybit Token Splash: не удалось извлечь winners/reward из данных")
+            
+            # Способ 4: Добавляем условия участия (минимальный депозит для новых пользователей)
+            # В Bybit API поле "prizePool" - это минимальный депозит для новых пользователей!
+            min_deposit = obj.get('prizePool')
+            award_token = obj.get('awardToken')  # USDT обычно
+            task_type = obj.get('taskType')
+            
+            if min_deposit and award_token and task_type == 3:  # taskType 3 = New Users
+                try:
+                    deposit_num = float(str(min_deposit).replace(',', ''))
+                    if deposit_num > 0:
+                        conditions = f"Мин. депозит: {deposit_num:,.0f} {award_token} (New Users)"
+                        if not promo_data.get('conditions'):
+                            promo_data['conditions'] = conditions
+                        logger.debug(f"📊 Bybit: условия = {conditions}")
+                except (ValueError, TypeError):
+                    pass
+            
+            # Способ 5: ВСЕГДА получаем детальную информацию о проекте
+            # Detail API содержит правильный токен награды (newUserPrizeToken может отличаться от prizeToken)
+            project_code = obj.get('code')
+            if project_code:
+                details = self._fetch_bybit_project_details(project_code)
+                if details:
+                    # Перезаписываем данные из Detail API (они более точные)
+                    self._extract_bybit_prizes(promo_data, details, prize_token)
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка обработки Bybit Token Splash: {e}")
+
+    def _fetch_bybit_project_details(self, project_code: str) -> Optional[Dict]:
+        """
+        Получает детальную информацию о проекте Bybit Token Splash.
+        
+        Args:
+            project_code: Код проекта (например, "20260116054439")
+            
+        Returns:
+            Словарь с деталями проекта или None
+        """
+        try:
+            # ВАЖНО: Правильный URL с параметром projectCode (не code!)
+            detail_url = f"https://www.bybit.com/x-api/spot/api/deposit-activity/v2/project/detail?projectCode={project_code}"
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Referer': 'https://www.bybit.com/en/trade/spot/token-splash',
+                'Origin': 'https://www.bybit.com',
+                'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+            }
+            
+            # Используем существующую сессию или создаем новую
+            if self._session is None:
+                self._session = requests.Session()
+                # Прогреваем сессию - делаем запрос к главной странице для получения cookies
+                try:
+                    warmup_url = 'https://www.bybit.com/en/trade/spot/token-splash'
+                    self._session.get(warmup_url, headers=headers, timeout=10)
+                    logger.debug(f"✅ Bybit: сессия прогрета, cookies получены")
+                except Exception as warmup_err:
+                    logger.debug(f"⚠️ Bybit: не удалось прогреть сессию: {warmup_err}")
+            
+            response = self._session.get(detail_url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ret_code') == 0 and data.get('result'):
+                    logger.debug(f"✅ Bybit: получены детали проекта {project_code}")
+                    return data.get('result')
+                else:
+                    logger.debug(f"⚠️ Bybit: API вернул ret_code={data.get('ret_code')}")
+            else:
+                logger.debug(f"⚠️ Bybit: не удалось получить детали проекта {project_code} (код {response.status_code})")
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"⚠️ Bybit: ошибка получения деталей проекта {project_code}: {e}")
+            return None
+    
+    def _extract_bybit_prizes(self, promo_data: Dict, details: Dict, prize_token: str) -> None:
+        """
+        Извлекает данные о призах из деталей проекта Bybit.
+        
+        Структура API /project/detail:
+        {
+            "newUserPrizeTotal": 2000000,  # Общий пул для новых пользователей
+            "newUserPrize": 2000,          # Награда на нового пользователя
+            "newUserPrizeToken": "SCOR",   # Токен награды
+            "oldUserPrizeTotal": 5500000,  # Общий пул для старых пользователей
+            "oldUserPrize": 500,           # Награда на старого пользователя
+            "oldUserPrizeToken": "SCOR",   # Токен награды
+            "tradeUserPrizeTotal": ...,    # Пул для торговой конкуренции
+        }
+        
+        Args:
+            promo_data: Словарь с данными промоакции (будет модифицирован)
+            details: Детальная информация о проекте
+            prize_token: Токен награды (fallback)
+        """
+        try:
+            total_winners = 0
+            rewards_info = []
+            
+            # Обрабатываем New Users
+            new_user_total = details.get('newUserPrizeTotal')
+            new_user_prize = details.get('newUserPrize')
+            new_user_token = details.get('newUserPrizeToken') or prize_token
+            
+            if new_user_total and new_user_prize:
+                try:
+                    total = float(str(new_user_total).replace(',', ''))
+                    prize = float(str(new_user_prize).replace(',', ''))
+                    if prize > 0:
+                        count = int(total / prize)
+                        total_winners += count
+                        rewards_info.append(('New Users', count, prize, new_user_token))
+                        logger.debug(f"📊 Bybit New Users: {count} мест по {prize} {new_user_token}")
+                except (ValueError, TypeError):
+                    pass
+            
+            # Обрабатываем Old Users (Existing Users)
+            old_user_total = details.get('oldUserPrizeTotal')
+            old_user_prize = details.get('oldUserPrize')
+            old_user_token = details.get('oldUserPrizeToken') or prize_token
+            
+            if old_user_total and old_user_prize:
+                try:
+                    total = float(str(old_user_total).replace(',', ''))
+                    prize = float(str(old_user_prize).replace(',', ''))
+                    if prize > 0:
+                        count = int(total / prize)
+                        total_winners += count
+                        rewards_info.append(('Old Users', count, prize, old_user_token))
+                        logger.debug(f"📊 Bybit Old Users: {count} мест по {prize} {old_user_token}")
+                except (ValueError, TypeError):
+                    pass
+            
+            # Устанавливаем результаты
+            if total_winners > 0:
+                promo_data['winners_count'] = total_winners
+                logger.info(f"✅ Bybit (details): {total_winners} призовых мест")
+            
+            # Формируем reward_per_winner - берём награду New Users (если есть)
+            if rewards_info:
+                # Приоритет: New Users, потом Old Users
+                category, count, prize, token = rewards_info[0]
+                promo_data['reward_per_winner'] = f"{int(prize):,} {token}"
+                logger.info(f"✅ Bybit (details): награда = {int(prize):,} {token} ({category})")
+                
+                # Если есть несколько категорий, добавляем в conditions
+                if len(rewards_info) > 1:
+                    conditions_parts = []
+                    for cat, cnt, prz, tok in rewards_info:
+                        conditions_parts.append(f"{cat}: {cnt:,} мест по {int(prz):,} {tok}")
+                    
+                    existing_conditions = promo_data.get('conditions', '')
+                    new_conditions = ' | '.join(conditions_parts)
+                    
+                    if existing_conditions:
+                        promo_data['conditions'] = f"{existing_conditions} | {new_conditions}"
+                    else:
+                        promo_data['conditions'] = new_conditions
+                    
+                    logger.debug(f"📊 Bybit conditions: {promo_data['conditions']}")
+                    
+        except Exception as e:
+            logger.debug(f"⚠️ Bybit: ошибка извлечения призов: {e}")
 
     def _extract_domain_name(self, url: str) -> str:
         """Извлекает название из домена URL (универсально для любой биржи)"""
@@ -922,4 +1238,262 @@ class UniversalParser(BaseParser):
             
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга MEXC Launchpad: {e}", exc_info=True)
+            return []
+
+    def _is_mexc_airdrop_data(self, data: Any) -> bool:
+        """Проверяет, является ли это данными MEXC Airdrop (EFTD) API"""
+        if not isinstance(data, dict):
+            return False
+        
+        # MEXC Airdrop API имеет структуру: {"code": 0, "data": [{...}, ...]}
+        # где каждый объект имеет поля activityCurrency, state, eftdVOS и т.д.
+        if data.get('code') == 0 and 'data' in data:
+            items = data.get('data', [])
+            if isinstance(items, list) and len(items) > 0:
+                first = items[0]
+                # Проверяем характерные поля MEXC Airdrop
+                return (
+                    isinstance(first, dict) and
+                    'activityCurrency' in first and 
+                    'state' in first and
+                    first.get('state') in ['ACTIVE', 'AWARDED', 'END', 'DOING', 'NOT_START'] and
+                    ('eftdVOS' in first or 'taskVOList' in first or 'mainTaskVOList' in first)
+                )
+        return False
+
+    def _parse_mexc_airdrop(self, data: dict) -> List[Dict[str, Any]]:
+        """
+        Специализированный парсер для MEXC Airdrop (EFTD) API
+        
+        API: https://www.mexc.com/api/operateactivity/eftd/list
+        
+        Структура API:
+        {
+            "code": 0,
+            "data": [
+                {
+                    "id": 3156,
+                    "activityCurrency": "DN",  // Символ токена
+                    "activityCurrencyFullName": "DeepNode",  // Полное название
+                    "state": "ACTIVE",  // ACTIVE, AWARDED, END
+                    "startTime": 1768190400000,
+                    "endTime": 1768622400000,
+                    "applyNum": 1234,  // Участники
+                    "firstProfitCurrency": "DN",  // Валюта награды 1
+                    "firstProfitCurrencyQuantity": "1000",  // Количество награды 1
+                    "secondProfitCurrency": "MX",  // Валюта награды 2 (опционально)
+                    "secondProfitCurrencyQuantity": "500",  // Количество награды 2
+                    "websiteUrl": "https://...",
+                    "twitterUrl": "https://...",
+                    "eftdVOS": [...]  // Вложенные активности с детальными заданиями
+                }
+            ]
+        }
+        """
+        from datetime import datetime
+        promotions = []
+        
+        try:
+            items = data.get('data', [])
+            logger.info(f"📊 MEXC Airdrop: найдено {len(items)} аирдропов")
+            
+            for airdrop in items:
+                try:
+                    airdrop_id = airdrop.get('id')
+                    state = airdrop.get('state', 'UNKNOWN')
+                    
+                    # Пропускаем завершенные
+                    if state in ['AWARDED', 'END']:
+                        continue
+                    
+                    # Определяем статус
+                    status_map = {
+                        'ACTIVE': 'ongoing',
+                        'DOING': 'ongoing',
+                        'NOT_START': 'upcoming',
+                        'AWARDED': 'ended',
+                        'END': 'ended'
+                    }
+                    status_str = status_map.get(state, 'unknown')
+                    
+                    # Название токена
+                    token = airdrop.get('activityCurrency', '')
+                    token_full_name = airdrop.get('activityCurrencyFullName', token)
+                    
+                    # Участники
+                    participants = airdrop.get('applyNum', 0)
+                    
+                    # Награды (основные)
+                    first_reward = airdrop.get('firstProfitCurrencyQuantity', '0')
+                    first_currency = airdrop.get('firstProfitCurrency', '')
+                    second_reward = airdrop.get('secondProfitCurrencyQuantity', '0')
+                    second_currency = airdrop.get('secondProfitCurrency', '')
+                    
+                    # Собираем общий призовой пул из вложенных активностей
+                    total_pool = 0
+                    tasks_info = []
+                    winners_count = 0
+                    
+                    # Парсим eftdVOS для получения детальных наград
+                    eftd_vos = airdrop.get('eftdVOS', [])
+                    for sub in eftd_vos:
+                        # Получаем награды из sub активности
+                        sub_reward = sub.get('firstProfitCurrencyQuantity', '0')
+                        try:
+                            total_pool += float(sub_reward) if sub_reward else 0
+                        except:
+                            pass
+                        
+                        # Парсим задания для информации
+                        main_tasks = sub.get('mainTaskVOList', []) or sub.get('taskVOList', [])
+                        for task in main_tasks:
+                            task_type = task.get('completeType', '')
+                            top_num = task.get('topNum', 0)
+                            task_reward = task.get('firstProfitCurrencyQuantity', '0')
+                            task_reward_total = task.get('firstProfitCurrencyQuantityTotal', '0')
+                            
+                            if task_type:
+                                task_info = {
+                                    'type': task_type,
+                                    'top_num': top_num,
+                                    'reward': task_reward,
+                                    'total_reward': task_reward_total
+                                }
+                                tasks_info.append(task_info)
+                                winners_count += top_num if top_num else 0
+                            
+                            # Парсим подзадания
+                            sub_tasks = task.get('subTaskVOList', [])
+                            for st in sub_tasks:
+                                st_type = st.get('completeType', '')
+                                st_top = st.get('topNum', 0)
+                                st_reward = st.get('firstProfitCurrencyQuantity', '0')
+                                st_total = st.get('firstProfitCurrencyQuantityTotal', '0')
+                                
+                                if st_type:
+                                    tasks_info.append({
+                                        'type': st_type,
+                                        'top_num': st_top,
+                                        'reward': st_reward,
+                                        'total_reward': st_total
+                                    })
+                                    winners_count += st_top if st_top else 0
+                    
+                    # Если нет данных из eftdVOS, используем основные
+                    if total_pool == 0:
+                        try:
+                            total_pool = float(first_reward) if first_reward else 0
+                        except:
+                            total_pool = 0
+                    
+                    # Временные метки
+                    start_time = airdrop.get('startTime')
+                    end_time = airdrop.get('endTime')
+                    
+                    start_dt = None
+                    end_dt = None
+                    if start_time:
+                        try:
+                            start_dt = datetime.fromtimestamp(start_time / 1000)
+                        except:
+                            pass
+                    if end_time:
+                        try:
+                            end_dt = datetime.fromtimestamp(end_time / 1000)
+                        except:
+                            pass
+                    
+                    # Ссылки
+                    website_url = airdrop.get('websiteUrl', '')
+                    twitter_url = airdrop.get('twitterUrl', '')
+                    telegram_url = airdrop.get('telegramUrl', '')
+                    
+                    # Генерация ссылки на страницу аирдропа
+                    link = f"https://www.mexc.com/ru-RU/token-airdrop/rollx/{airdrop_id}" if airdrop_id else ""
+                    
+                    # Иконка
+                    icon = airdrop.get('activityCurrencyIcon', '')
+                    if not icon:
+                        detail_logo = airdrop.get('detailLogoWeb', '')
+                        if detail_logo:
+                            icon = f"https://static.mexc.com/{detail_logo}"
+                    
+                    # Формируем описание с условиями
+                    conditions = []
+                    task_types_map = {
+                        'TRADE': '🔄 Торговля',
+                        'CONTRACT': '📊 Фьючерсы',
+                        'RECHARGE': '💰 Депозит',
+                        'CONTRACT_AMOUNT': '📊 Объём фьючерсов',
+                        'SPOT_AMOUNT': '🔄 Объём спот',
+                        'INVITE': '👥 Приглашение',
+                        'KYC': '🆔 KYC'
+                    }
+                    
+                    seen_types = set()
+                    for ti in tasks_info:
+                        t_type = ti.get('type', '')
+                        if t_type and t_type not in seen_types:
+                            seen_types.add(t_type)
+                            readable = task_types_map.get(t_type, t_type)
+                            top_n = ti.get('top_num', 0)
+                            if top_n:
+                                conditions.append(f"{readable} (топ {top_n})")
+                            else:
+                                conditions.append(readable)
+                    
+                    # Определяем тип пользователей (NEW = только для новых)
+                    join_user_type = None
+                    for sub in eftd_vos:
+                        jut = sub.get('joinUserType', '')
+                        if jut == 'NEW':
+                            join_user_type = 'new_users'
+                            break
+                    
+                    promo = {
+                        'exchange': 'MEXC',
+                        'promo_id': f"mexc_airdrop_{airdrop_id}",
+                        'title': f"{token_full_name}" if token_full_name else token,
+                        'award_token': token,
+                        'total_prize_pool': total_pool if total_pool > 0 else None,
+                        'participants_count': participants,
+                        'winners_count': winners_count if winners_count > 0 else None,
+                        'status': status_str,
+                        'state': state,  # Оригинальный статус
+                        'start_time': start_dt,
+                        'end_time': end_dt,
+                        'start_timestamp': start_time,
+                        'end_timestamp': end_time,
+                        'link': link,
+                        'icon': icon,
+                        'website_url': website_url,
+                        'twitter_url': twitter_url,
+                        'telegram_url': telegram_url,
+                        'conditions': ', '.join(conditions) if conditions else None,
+                        'tasks_info': tasks_info,
+                        'join_user_type': join_user_type,
+                        'first_reward': first_reward,
+                        'first_currency': first_currency,
+                        'second_reward': second_reward,
+                        'second_currency': second_currency,
+                        'promo_type': 'mexc_airdrop',
+                        'raw_data': airdrop
+                    }
+                    
+                    promotions.append(promo)
+                    logger.debug(f"   ✅ {promo['title']} ({status_str}) - {participants} участников")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка парсинга MEXC Airdrop: {e}")
+                    continue
+            
+            # Сортируем по количеству участников (популярные вверх)
+            promotions.sort(key=lambda x: x.get('participants_count') or 0, reverse=True)
+            
+            logger.info(f"✅ MEXC Airdrop: успешно распарсено {len(promotions)} активных аирдропов")
+            
+            return promotions
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга MEXC Airdrop: {e}", exc_info=True)
             return []

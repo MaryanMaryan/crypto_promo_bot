@@ -101,6 +101,30 @@
       "static_segments": [
         "token-airdrop"
       ]
+    },
+    "token-airdrop": {
+      "pattern": "/ru-RU/token-airdrop/{activityCurrencyFullName}/{id}",
+      "pattern_type": "path",
+      "base_url": "https://www.mexc.com",
+      "fields": {
+        "activityCurrencyFullName": [
+          "activityCurrencyFullName",
+          "activity_currency_full_name",
+          "name",
+          "title",
+          "projectName",
+          "tokenName",
+          "coinName"
+        ],
+        "id": [
+          "id",
+          "_id"
+        ]
+      },
+      "static_segments": [
+        "ru-RU",
+        "token-airdrop"
+      ]
     }
   },
   "gate.io": {
@@ -127,6 +151,26 @@
         "ru",
         "candy-drop",
         "detail"
+      ]
+    }
+  },
+  "binance": {
+    "simple-earn": {
+      "pattern": "/earn/simple-earn/{asset}",
+      "pattern_type": "path",
+      "base_url": "https://www.binance.com/uk-UA",
+      "api_url": "https://www.binance.com/bapi/earn/v1/friendly/finance-earn/homepage/overview?pageSize=100",
+      "fields": {
+        "asset": [
+          "asset",
+          "coin",
+          "symbol",
+          "token"
+        ]
+      },
+      "static_segments": [
+        "earn",
+        "simple-earn"
       ]
     }
   }

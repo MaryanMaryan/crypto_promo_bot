@@ -350,6 +350,7 @@ class StakingHistory(Base):
     # Условия стейкинга
     apr = Column(Float, nullable=False)  # 200.0, 100.0
     type = Column(String, nullable=True)  # 'Flexible', 'Fixed 30d', 'MULTI_TIME'
+    product_type = Column(String, nullable=True)  # 'SIMPLE_EARN', 'DUAL_CURRENCY', 'ETH_TWO' (для Binance и других)
     status = Column(String, nullable=True)  # 'Active', 'Sold Out', 'ONGOING', 'INTERESTING'
     category = Column(String, nullable=True)  # 'ACTIVITY', 'DEMAND' (Kucoin)
     category_text = Column(String, nullable=True)  # Текстовое описание категории (Kucoin)
@@ -385,6 +386,13 @@ class StakingHistory(Base):
     previous_apr = Column(Float, nullable=True)  # Предыдущий APR для расчета дельт
     notification_sent_at = Column(DateTime, nullable=True)  # Когда отправлено уведомление
     is_notification_pending = Column(Boolean, default=False)  # Ожидает ли уведомление (для Flexible)
+
+    # ПОЛЯ ДЛЯ ОБЪЕДИНЁННЫХ ПРОДУКТОВ Fixed/Flexible (Gate.io):
+    fixed_apr = Column(Float, nullable=True)  # APR для Fixed части
+    fixed_term_days = Column(Integer, nullable=True)  # Срок Fixed в днях
+    fixed_user_limit = Column(Float, nullable=True)  # Лимит пользователя для Fixed
+    flexible_apr = Column(Float, nullable=True)  # APR для Flexible части
+    flexible_user_limit = Column(Float, nullable=True)  # Лимит пользователя для Flexible
 
     # Уникальность по бирже и product_id
     __table_args__ = (

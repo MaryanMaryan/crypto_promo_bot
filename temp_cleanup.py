@@ -9,11 +9,11 @@ with get_db_session() as session:
     full_stakings = session.query(StakingHistory).filter(
         and_(
             StakingHistory.fill_percentage != None,
-            StakingHistory.fill_percentage >= 100.0
+            StakingHistory.fill_percentage >= 95.0
         )
     ).all()
     
-    print(f'Found {len(full_stakings)} stakings with 100 percent fill')
+    print(f'Found {len(full_stakings)} stakings with 95+ percent fill')
     
     for staking in full_stakings:
         staking.status = 'Sold Out'

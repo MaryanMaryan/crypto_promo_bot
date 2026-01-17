@@ -5,6 +5,7 @@ parsers/staking_parser.py
 
 import logging
 import requests
+import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from utils.price_fetcher import get_price_fetcher
@@ -37,11 +38,7 @@ class StakingParser:
         Returns:
             Название биржи в нижнем регистре
         """
-        # Если exchange_name уже указан и не пустой, используем его
-        if exchange_name and exchange_name.lower() not in ['none', 'unknown', '']:
-            return exchange_name.lower()
-
-        # Автоопределение по URL
+        # ВАЖНО: Сначала пробуем определить по URL (более надёжно)
         url_lower = api_url.lower()
 
         if 'bybit.com' in url_lower:
@@ -62,9 +59,28 @@ class StakingParser:
         elif 'mexc.com' in url_lower:
             logger.info("🔍 Автоопределение: биржа MEXC")
             return 'mexc'
-        else:
-            logger.warning(f"⚠️ Не удалось определить биржу по URL: {api_url}")
-            return 'unknown'
+        
+        # Если URL не помог, пробуем exchange_name
+        if exchange_name and exchange_name.lower() not in ['none', 'unknown', '']:
+            name_lower = exchange_name.lower()
+            # Нормализуем известные биржи
+            if 'bybit' in name_lower:
+                return 'bybit'
+            elif 'kucoin' in name_lower:
+                return 'kucoin'
+            elif 'okx' in name_lower:
+                return 'okx'
+            elif 'binance' in name_lower:
+                return 'binance'
+            elif 'gate' in name_lower:
+                return 'gate'
+            elif 'mexc' in name_lower:
+                return 'mexc'
+            else:
+                return name_lower
+        
+        logger.warning(f"⚠️ Не удалось определить биржу по URL: {api_url}")
+        return 'unknown'
 
     def parse(self) -> List[Dict[str, Any]]:
         """
@@ -102,6 +118,14 @@ class StakingParser:
             elif 'gate' in self.exchange_name:
                 # Gate.io использует обычный GET с пагинацией
                 return self._parse_gate()
+
+            elif 'mexc' in self.exchange_name:
+                # MEXC использует браузерный парсинг из-за защиты
+                return self._parse_mexc_with_browser()
+
+            elif 'binance' in self.exchange_name:
+                # Binance использует обычный GET
+                return self._parse_binance()
 
             else:
                 logger.warning(f"⚠️ Неизвестная биржа: {self.exchange_name}")
@@ -708,111 +732,152 @@ class StakingParser:
 
     def _parse_gate(self) -> List[Dict[str, Any]]:
         """
-        Парсинг Gate.io стейкингов с пагинацией и объединением Fixed/Flexible
-        ВАЖНО: Gate.io API требует GET запрос с пагинацией через параметр page
+        Парсинг Gate.io стейкингов с объединением Fixed/Flexible
+        
+        API: https://www.gate.com/apiw/v2/uni-loan/earn/market/list
+        
+        ВАЖНО: Для получения ВСЕХ монет (800+) необходима пагинация!
+        Параметры пагинации:
+        - page: номер страницы (начиная с 1)
+        - limit: количество на страницу (макс 100)
+        - sort_business: 1 (сортировка)
+        - have_balance: 2
+        - have_award: 0
+        - is_subscribed: 0
+        
+        КРИТИЧНО: referer ДОЛЖЕН быть 'https://www.gate.com/ru/simple-earn' (НЕ /earn/hodl!)
         """
         stakings = []
 
-        # Параметры для пагинации
-        page = 1
-        limit = 100  # Увеличиваем лимит для эффективности
-
         try:
-            logger.info(f"🔍 Gate.io: начало парсинга с пагинацией")
+            # API URL для Simple Earn (поддерживает пагинацию)
+            base_url = "https://www.gate.com/apiw/v2/uni-loan/earn/market/list"
+            
+            # КРИТИЧНО: Gate.com усилил защиту - нужны полные браузерные заголовки
+            # Важно: referer должен быть /ru/simple-earn, а не /earn/hodl!
+            headers = {
+                'accept': 'application/json, text/plain, */*',
+                'accept-encoding': 'gzip, deflate, br, zstd',
+                'accept-language': 'en-US,en;q=0.9,ru;q=0.8',
+                'cache-control': 'no-cache',
+                'pragma': 'no-cache',
+                'referer': 'https://www.gate.com/ru/simple-earn',
+                'origin': 'https://www.gate.com',
+                'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'x-requested-with': 'XMLHttpRequest'
+            }
 
+            logger.info(f"🔍 Gate.io: запрос стейкингов с пагинацией...")
+            
+            # Используем сессию для сохранения cookies между запросами
+            session = requests.Session()
+            
+            # Сначала запрашиваем страницу Simple Earn для получения cookies
+            try:
+                session.get('https://www.gate.com/ru/simple-earn', headers={
+                    'user-agent': headers['user-agent'],
+                    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'accept-language': 'en-US,en;q=0.9',
+                }, timeout=10)
+            except Exception as e:
+                logger.debug(f"⚠️ Gate.io: не удалось получить cookies: {e}")
+            
+            # Загружаем ВСЕ страницы с пагинацией
+            all_coins = []
+            page = 1
+            limit = 100  # Максимум 100 на страницу
+            total_count = None
+            
             while True:
-                # Формируем URL с параметрами
-                # Извлекаем базовый URL без параметров
-                base_url = self.api_url.split('?')[0]
-
-                # Формируем параметры
+                # Формируем URL с параметрами пагинации
                 params = {
-                    'available': 'false',
+                    'page': page,
                     'limit': limit,
+                    'sort_business': 1,
                     'have_balance': 2,
                     'have_award': 0,
-                    'is_subscribed': 0,
-                    'sort_business': 1,
-                    'kyc_level': 1,
-                    'search_type': 0,
-                    'page': page
+                    'is_subscribed': 0
                 }
-
-                headers = {
-                    'accept': 'application/json',
-                    'accept-language': 'en-US,en;q=0.9',
-                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-
-                logger.info(f"📄 Gate.io: запрос страницы {page}")
-                response = requests.get(base_url, params=params, headers=headers, timeout=30)
+                
+                response = session.get(base_url, headers=headers, params=params, timeout=30)
                 response.raise_for_status()
                 data = response.json()
 
                 # Проверяем статус ответа
                 if data.get('code') != 0:
-                    logger.error(f"❌ Gate.io API error: {data.get('message')}")
+                    logger.error(f"❌ Gate.io API error на стр.{page}: {data.get('message')}")
                     break
 
-                # Получаем список монет
-                coin_list = data.get('data', {}).get('list', [])
-
-                if not coin_list:
-                    logger.info(f"📭 Gate.io: страница {page} пустая, завершаем пагинацию")
+                # Получаем список монет и total
+                page_coins = data.get('data', {}).get('list', [])
+                if total_count is None:
+                    total_count = data.get('data', {}).get('total', 0)
+                
+                if not page_coins:
                     break
+                
+                all_coins.extend(page_coins)
+                logger.info(f"   📄 Страница {page}: +{len(page_coins)} (всего: {len(all_coins)}/{total_count})")
+                
+                # Проверяем, все ли загружено
+                if len(all_coins) >= total_count or len(page_coins) < limit:
+                    break
+                
+                page += 1
+                
+                # Небольшая задержка между запросами для избежания rate limiting
+                time.sleep(0.5)
+            
+            if not all_coins:
+                logger.info(f"📭 Gate.io: API вернул пустой список")
+                return []
 
-                logger.info(f"📊 Gate.io: найдено {len(coin_list)} монет на странице {page}")
+            logger.info(f"📊 Gate.io: загружено {len(all_coins)} монет из {total_count}")
+            coin_list = all_coins
 
-                # Парсим каждую монету
-                for coin_data in coin_list:
-                    try:
-                        coin = coin_data.get('asset')
+            # Парсим каждую монету
+            for coin_data in coin_list:
+                try:
+                    coin = coin_data.get('asset')
 
-                        # ФИЛЬТР 1: Проверяем total_lend_available
-                        total_lend_available = float(coin_data.get('total_lend_available', 0))
-                        if total_lend_available <= 0:
-                            logger.debug(f"🔽 Gate.io: пропущена монета {coin} (total_lend_available={total_lend_available})")
-                            continue
-
-                        # ФИЛЬТР 2: Проверяем заполненность
-                        total_lend_amount = float(coin_data.get('total_lend_amount', 0))
-                        total_lend_all_amount = float(coin_data.get('total_lend_all_amount', 0))
-                        fill_percentage = None
-                        if total_lend_all_amount > 0:
-                            fill_percentage = round((total_lend_amount / total_lend_all_amount) * 100, 2)
-                            # Скрываем 100% заполненные
-                            if fill_percentage >= 100:
-                                logger.debug(f"🔽 Gate.io: пропущена монета {coin} (заполненность={fill_percentage}%)")
-                                continue
-
-                        # Собираем Fixed и Flexible продукты
-                        fixed_list = coin_data.get('fixed_list') or []
-                        fixable_list = coin_data.get('fixable_list') or []
-
-                        # Создаем объединенный продукт если есть оба типа
-                        combined_staking = self._create_combined_gate_product(
-                            coin, coin_data, fixed_list, fixable_list
-                        )
-
-                        if combined_staking:
-                            stakings.append(combined_staking)
-
-                    except Exception as e:
-                        logger.warning(f"⚠️ Ошибка парсинга монеты Gate.io: {e}")
+                    # ФИЛЬТР 1: Проверяем total_lend_available
+                    total_lend_available = float(coin_data.get('total_lend_available', 0))
+                    if total_lend_available <= 0:
+                        logger.debug(f"🔽 Gate.io: пропущена монета {coin} (total_lend_available={total_lend_available})")
                         continue
 
-                # Проверяем, есть ли еще страницы
-                # Если вернулось меньше чем limit, значит это последняя страница
-                if len(coin_list) < limit:
-                    logger.info(f"✅ Gate.io: достигнута последняя страница {page}")
-                    break
+                    # ФИЛЬТР 2: Проверяем заполненность
+                    total_lend_amount = float(coin_data.get('total_lend_amount', 0))
+                    total_lend_all_amount = float(coin_data.get('total_lend_all_amount', 0))
+                    fill_percentage = None
+                    if total_lend_all_amount > 0:
+                        fill_percentage = round((total_lend_amount / total_lend_all_amount) * 100, 2)
+                        # Скрываем стейкинги с заполненностью >= 95%
+                        if fill_percentage >= 95:
+                            logger.debug(f"🔽 Gate.io: пропущена монета {coin} (заполненность={fill_percentage}%)")
+                            continue
 
-                page += 1
+                    # Собираем Fixed и Flexible продукты
+                    fixed_list = coin_data.get('fixed_list') or []
+                    fixable_list = coin_data.get('fixable_list') or []
 
-                # Защита от бесконечного цикла (максимум 100 страниц)
-                if page > 100:
-                    logger.warning(f"⚠️ Gate.io: достигнут лимит страниц (100)")
-                    break
+                    # Создаем объединенный продукт если есть оба типа
+                    combined_staking = self._create_combined_gate_product(
+                        coin, coin_data, fixed_list, fixable_list
+                    )
+
+                    if combined_staking:
+                        stakings.append(combined_staking)
+
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка парсинга монеты Gate.io: {e}")
+                    continue
 
             logger.info(f"✅ Gate.io: обработано {len(stakings)} стейкингов")
             return stakings
@@ -856,8 +921,19 @@ class StakingParser:
                 logger.debug(f"🔽 Gate.io: нет активных продуктов для {coin}")
                 return None
 
-            # Получаем цену токена
-            token_price = self.price_fetcher.get_token_price(coin) if coin else None
+            # ОПТИМИЗАЦИЯ: Используем цену из Gate.io API (usdt_rate)
+            # Это избавляет от ~20 дополнительных HTTP запросов к другим биржам!
+            token_price = None
+            usdt_rate = coin_data.get('usdt_rate')
+            if usdt_rate:
+                try:
+                    token_price = float(usdt_rate)
+                except (ValueError, TypeError):
+                    pass
+            
+            # Fallback на price_fetcher только если Gate.io не вернул цену
+            if token_price is None or token_price <= 0:
+                token_price = self.price_fetcher.get_token_price(coin) if coin else None
 
             # Данные о пуле (общие для монеты)
             total_lend_amount = float(coin_data.get('total_lend_amount', 0))
@@ -874,19 +950,23 @@ class StakingParser:
 
             # СЛУЧАЙ 1: Есть оба типа - создаем объединенный продукт
             if active_fixed and active_flexible:
-                # Берем максимальный APR из Fixed
-                fixed_apr = max(float(p.get('year_rate', 0)) * 100 for p in active_fixed)
+                # Берем максимальный APR из Fixed и соответствующий продукт
+                best_fixed = max(active_fixed, key=lambda p: float(p.get('year_rate', 0)))
+                fixed_apr = float(best_fixed.get('year_rate', 0)) * 100
+                fixed_term_days = int(best_fixed.get('lock_up_period', 0))
+                fixed_user_limit = float(best_fixed.get('user_max_lend_volume', 0))
 
-                # Берем максимальный APR из Flexible
+                # Берем Flexible продукт
                 flexible_product = active_flexible[0]  # Обычно один Flexible продукт
                 flexible_apr_str = flexible_product.get('max_year_rate') or flexible_product.get('year_rate', '0')
                 flexible_apr = float(flexible_apr_str) * 100
+                flexible_user_limit = float(flexible_product.get('user_max_lend_amount', 0))
 
                 # Максимальный APR для отображения
                 max_apr = max(fixed_apr, flexible_apr)
 
-                # Лимит на аккаунт (из Flexible)
-                user_limit_tokens = float(flexible_product.get('user_max_lend_amount', 0))
+                # Лимит на аккаунт (общий - из Flexible для совместимости)
+                user_limit_tokens = flexible_user_limit
                 user_limit_usd = None
                 if user_limit_tokens and user_limit_tokens > 0 and token_price:
                     user_limit_usd = round(user_limit_tokens * token_price, 2)
@@ -920,9 +1000,12 @@ class StakingParser:
                     'is_new_user': False,
                     'regional_tag': None,
                     'regional_countries': None,
-                    # Дополнительные поля для объединенного продукта
+                    # Дополнительные поля для объединенного продукта Fixed/Flexible
                     'fixed_apr': fixed_apr,
+                    'fixed_term_days': fixed_term_days,
+                    'fixed_user_limit': fixed_user_limit if fixed_user_limit > 0 else None,
                     'flexible_apr': flexible_apr,
+                    'flexible_user_limit': flexible_user_limit if flexible_user_limit > 0 else None,
                 }
 
                 logger.debug(f"✅ Gate.io: создан объединенный продукт {coin} (Fixed: {fixed_apr:.1f}% | Flexible: {flexible_apr:.1f}%)")
@@ -1277,6 +1360,493 @@ class StakingParser:
         except Exception as e:
             logger.warning(f"⚠️ Ошибка парсинга Gate.io гибкого продукта: {e}")
             return None
+
+    # ===== MEXC Earn Parsing Methods =====
+
+    def _parse_mexc_with_browser(self) -> List[Dict[str, Any]]:
+        """
+        Парсинг MEXC Earn через браузер (API защищён от ботов)
+        
+        API Endpoint: https://www.mexc.com/api/financialactivity/financial/products/list/V2
+        
+        Returns:
+            Список стейкингов в унифицированном формате
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+            
+            logger.info("🌐 MEXC: использую браузерный парсинг (API защищён)")
+            
+            api_responses = {}
+            
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    viewport={'width': 1920, 'height': 1080}
+                )
+                page = context.new_page()
+                
+                # Перехватываем API ответы
+                def handle_response(response):
+                    url = response.url
+                    if 'financialactivity/financial/products/list' in url and response.status == 200:
+                        try:
+                            body = response.json()
+                            api_responses['products'] = body
+                        except:
+                            pass
+                
+                page.on('response', handle_response)
+                
+                # Переходим на страницу заработка
+                logger.info("📄 MEXC: загрузка страницы Earn...")
+                page.goto('https://www.mexc.com/earn', wait_until='domcontentloaded', timeout=60000)
+                page.wait_for_timeout(5000)
+                
+                # Прокрутка для загрузки данных
+                page.evaluate('window.scrollBy(0, 500)')
+                page.wait_for_timeout(2000)
+                
+                browser.close()
+            
+            # Парсим полученные данные
+            if 'products' not in api_responses:
+                logger.warning("⚠️ MEXC: не удалось получить данные API")
+                return []
+            
+            return self._parse_mexc(api_responses['products'])
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка браузерного парсинга MEXC: {e}", exc_info=True)
+            return []
+
+    def _parse_mexc(self, data: dict) -> List[Dict[str, Any]]:
+        """
+        Парсинг MEXC Earn API ответа
+        
+        Структура API:
+        {
+            "data": [
+                {
+                    "currency": "USDT",
+                    "minApr": "15",
+                    "maxApr": "600",
+                    "financialProductList": [
+                        {
+                            "financialId": "...",
+                            "financialType": "FIXED" | "FLEXIBLE",
+                            "showApr": "600",
+                            "fixedInvestPeriodCount": 7,  // дней (для FIXED)
+                            "memberType": "EFTD" | "NORMAL",  // EFTD = новые пользователи
+                            "minPledgeQuantity": "100",
+                            "perPledgeMaxQuantity": "200",
+                            "soldOut": false,
+                            "startTime": 1758621600000,
+                            "endTime": null
+                        }
+                    ]
+                }
+            ]
+        }
+        """
+        stakings = []
+        
+        # Проверка успешности ответа
+        if data.get('code') != 0:
+            logger.error(f"❌ MEXC API error: {data.get('msg')}")
+            return []
+        
+        currencies_data = data.get('data', [])
+        if not currencies_data:
+            logger.warning("⚠️ MEXC: нет данных о стейкингах")
+            return []
+        
+        logger.info(f"📊 MEXC: найдено {len(currencies_data)} валют")
+        
+        total_products = 0
+        
+        for currency_data in currencies_data:
+            try:
+                coin = currency_data.get('currency')
+                product_list = currency_data.get('financialProductList', [])
+                
+                if not product_list:
+                    continue
+                
+                # Получаем цену токена
+                token_price = self.price_fetcher.get_token_price(coin) if coin else None
+                
+                for product in product_list:
+                    try:
+                        # Пропускаем распроданные продукты
+                        if product.get('soldOut', False):
+                            logger.debug(f"🔽 MEXC: пропущен распроданный продукт {coin}")
+                            continue
+                        
+                        # Проверяем статус (financialState: 2 = активный)
+                        financial_state = product.get('financialState')
+                        if financial_state != 2:
+                            logger.debug(f"🔽 MEXC: пропущен неактивный продукт {coin} (state={financial_state})")
+                            continue
+                        
+                        # Основные поля
+                        financial_id = str(product.get('financialId', ''))
+                        financial_type = product.get('financialType', 'FIXED')  # FIXED или FLEXIBLE
+                        
+                        # APR
+                        apr_str = product.get('showApr', '0')
+                        apr = float(apr_str) if apr_str else 0.0
+                        
+                        # Период (только для FIXED)
+                        term_days = 0
+                        if financial_type == 'FIXED':
+                            term_days = int(product.get('fixedInvestPeriodCount', 0))
+                        
+                        # Тип продукта
+                        product_type = "Flexible" if financial_type == 'FLEXIBLE' else f"Fixed {term_days}d"
+                        
+                        # Тип пользователя (EFTD = для новых пользователей, NORMAL = обычный)
+                        member_type = product.get('memberType', 'NORMAL')
+                        is_new_user = member_type == 'EFTD'
+                        
+                        # Категория
+                        category = None
+                        category_text = None
+                        if is_new_user:
+                            category = 'New User'
+                            category_text = 'Для новых пользователей'
+                        
+                        # Лимиты
+                        min_pledge = product.get('minPledgeQuantity')
+                        max_pledge = product.get('perPledgeMaxQuantity')
+                        
+                        # -1 означает "без ограничений"
+                        user_limit_tokens = None
+                        if max_pledge:
+                            limit_value = float(max_pledge)
+                            if limit_value > 0:
+                                user_limit_tokens = limit_value
+                        
+                        user_limit_usd = None
+                        if user_limit_tokens and token_price:
+                            user_limit_usd = round(user_limit_tokens * token_price, 2)
+                        
+                        # Временные метки
+                        start_time = product.get('startTime')
+                        end_time = product.get('endTime')
+                        
+                        start_time_str = None
+                        end_time_str = None
+                        
+                        if start_time:
+                            try:
+                                from datetime import datetime
+                                start_dt = datetime.utcfromtimestamp(start_time / 1000)
+                                start_time_str = start_dt.strftime('%d.%m.%Y %H:%M UTC')
+                            except:
+                                pass
+                        
+                        if end_time:
+                            try:
+                                from datetime import datetime
+                                end_dt = datetime.utcfromtimestamp(end_time / 1000)
+                                end_time_str = end_dt.strftime('%d.%m.%Y %H:%M UTC')
+                            except:
+                                pass
+                        
+                        # Монета награды (обычно такая же как стейкинга)
+                        profit_currency = product.get('profitCurrency')
+                        reward_coin = profit_currency if profit_currency and profit_currency != coin else None
+                        
+                        # Ступенчатый APR (tieredSubsidyApr)
+                        tiered_apr = product.get('tieredSubsidyApr')
+                        if tiered_apr and isinstance(tiered_apr, list):
+                            # Для ступенчатого APR показываем максимальный
+                            max_tiered = max(float(tier.get('apr', 0)) for tier in tiered_apr)
+                            if max_tiered > apr:
+                                apr = max_tiered
+                        
+                        staking = {
+                            'exchange': 'MEXC',
+                            'product_id': financial_id,
+                            'coin': coin,
+                            'reward_coin': reward_coin,
+                            'apr': apr,
+                            'type': product_type,
+                            'status': 'Active',
+                            'category': category,
+                            'category_text': category_text,
+                            'term_days': term_days,
+                            'token_price_usd': token_price,
+                            'reward_token_price_usd': None,
+                            'start_time': start_time_str,
+                            'end_time': end_time_str,
+                            'user_limit_tokens': user_limit_tokens,
+                            'user_limit_usd': user_limit_usd,
+                            'total_places': None,
+                            'max_capacity': None,  # Недоступно в API
+                            'current_deposit': None,  # Недоступно в API
+                            'fill_percentage': None,  # Недоступно в API
+                            'is_vip': False,
+                            'is_new_user': is_new_user,
+                            'regional_tag': None,
+                            'regional_countries': None,
+                            # MEXC-специфичные поля
+                            'min_pledge_quantity': float(min_pledge) if min_pledge else None,
+                            'member_type': member_type,
+                        }
+                        
+                        stakings.append(staking)
+                        total_products += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка парсинга MEXC продукта {coin}: {e}")
+                        continue
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка парсинга MEXC валюты: {e}")
+                continue
+        
+        logger.info(f"✅ MEXC: обработано {total_products} стейкинг продуктов")
+        return stakings
+
+    # ==================== BINANCE PARSING ====================
+
+    def _parse_binance(self) -> List[Dict[str, Any]]:
+        """
+        Парсинг Binance стейкингов
+        
+        API: https://www.binance.com/bapi/earn/v1/friendly/finance-earn/homepage/overview?pageSize=100
+        
+        Возвращает агрегированные данные по монетам с несколькими продуктами:
+        - SIMPLE_EARN (Flexible/Locked)
+        - DUAL_CURRENCY
+        - ETH_TWO (ETH Staking)
+        - BN_SOL_STAKING (SOL Staking)
+        - BFUSD
+        - RWUSD
+        """
+        stakings = []
+
+        try:
+            headers = {
+                'accept': 'application/json, text/plain, */*',
+                'accept-language': 'en-US,en;q=0.9',
+                'origin': 'https://www.binance.com',
+                'referer': 'https://www.binance.com/uk-UA/earn',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            }
+
+            logger.info("🔍 Binance: запрос стейкингов...")
+
+            # Основной API для получения обзора продуктов
+            response = requests.get(self.api_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if not data.get('success'):
+                logger.error(f"❌ Binance API error: {data.get('message')}")
+                return []
+
+            coins_data = data.get('data', {}).get('list', [])
+            total_count = data.get('data', {}).get('total', 0)
+
+            if not coins_data:
+                logger.info("📭 Binance: API вернул пустой список")
+                return []
+
+            logger.info(f"📊 Binance: найдено {len(coins_data)} монет (total: {total_count})")
+
+            # Парсим каждую монету
+            for coin_data in coins_data:
+                try:
+                    coin = coin_data.get('asset')
+                    max_apr = float(coin_data.get('maxApr', 0)) * 100  # Конвертируем в проценты
+                    min_apr = float(coin_data.get('minApr', 0)) * 100
+                    durations = coin_data.get('duration', [])  # ["FLEXIBLE", "FIXED"]
+                    has_max = coin_data.get('hasMax', False)
+
+                    # Получаем цену токена
+                    token_price = self.price_fetcher.get_token_price(coin) if coin else None
+
+                    # Парсим каждый продукт монеты
+                    product_summary = coin_data.get('productSummary', [])
+
+                    for product in product_summary:
+                        try:
+                            parsed = self._parse_binance_product(coin, coin_data, product, token_price)
+                            if parsed:
+                                stakings.append(parsed)
+                        except Exception as e:
+                            logger.warning(f"⚠️ Ошибка парсинга Binance продукта {coin}: {e}")
+                            continue
+
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка парсинга монеты Binance: {e}")
+                    continue
+
+            logger.info(f"✅ Binance: обработано {len(stakings)} стейкингов")
+            return stakings
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга Binance: {e}", exc_info=True)
+            return []
+
+    def _parse_binance_product(
+        self,
+        coin: str,
+        coin_data: dict,
+        product: dict,
+        token_price: Optional[float]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Парсинг отдельного продукта Binance
+        
+        Типы продуктов:
+        - SIMPLE_EARN: Simple Earn (Flexible/Locked)
+        - DUAL_CURRENCY: Dual Investment
+        - ETH_TWO: ETH Staking
+        - BN_SOL_STAKING: SOL Staking
+        - BFUSD: BFUSD Earn
+        - RWUSD: RWUSD Earn
+        - ARBITRAGE_BOT: Arbitrage Bot
+        """
+        try:
+            product_type = product.get('productType', 'Unknown')
+            product_id = product.get('productId', '')
+            
+            # APR
+            max_apr = float(product.get('maxApr', 0)) * 100
+            min_apr = float(product.get('minApr', 0)) * 100
+            apr = max_apr  # Используем максимальный APR
+            
+            # Длительность
+            durations = product.get('duration', [])
+            term_days = 0
+            product_duration = product.get('projectDuration')
+            if product_duration:
+                try:
+                    term_days = int(product_duration)
+                except:
+                    pass
+            
+            # Определяем тип по duration
+            if 'FIXED' in durations:
+                staking_type = 'Locked'
+                if term_days > 0:
+                    staking_type = f'Locked {term_days}d'
+            elif 'FLEXIBLE' in durations:
+                staking_type = 'Flexible'
+            else:
+                staking_type = product_type
+            
+            # Целевой актив (для Dual Currency)
+            target_asset = product.get('targetAsset')
+            reward_coin = target_asset if target_asset and target_asset != coin else None
+            
+            # Статус
+            is_sold_out = product.get('soldOut', False)
+            status = 'Sold Out' if is_sold_out else 'Active'
+            
+            # Флаги
+            is_special_offer = product.get('specialOffer', False)
+            is_low_risk = product.get('lowRisk', False)
+            has_launchpool = product.get('hasLaunchpool', False)
+            has_megadrop = product.get('hasMegadrop', False)
+            has_super_earn = product.get('hasSuperEarn', False)
+            has_max = product.get('hasMax')
+            
+            # Launchpool APR (дополнительный доход)
+            launchpool_apr = product.get('launchpoolApr')
+            if launchpool_apr:
+                try:
+                    launchpool_apr = float(launchpool_apr) * 100
+                except:
+                    launchpool_apr = None
+            
+            # Категория
+            category = None
+            category_text = None
+            if has_super_earn:
+                category = 'Super Earn'
+                category_text = 'Super Earn Product'
+            elif has_launchpool:
+                category = 'Launchpool'
+                category_text = 'With Launchpool Rewards'
+            elif has_megadrop:
+                category = 'Megadrop'
+                category_text = 'Megadrop Eligible'
+            elif is_special_offer:
+                category = 'Special'
+                category_text = 'Special Offer'
+            
+            # Partner name (для некоторых продуктов)
+            partner_name = product.get('partnerName')
+            
+            # Boost details
+            boost_detail = product.get('boostDetail')
+            
+            staking = {
+                'exchange': 'Binance',
+                'product_id': product_id,
+                'coin': coin,
+                'reward_coin': reward_coin,
+                'apr': apr,
+                'apr_min': min_apr,
+                'apr_max': max_apr,
+                'type': staking_type,
+                'product_type': product_type,
+                'status': status,
+                'category': category,
+                'category_text': category_text,
+                'term_days': term_days,
+                'token_price_usd': token_price,
+                'reward_token_price_usd': None,
+                'start_time': None,  # Недоступно в этом API
+                'end_time': None,
+                'user_limit_tokens': None,  # Требует авторизации
+                'user_limit_usd': None,
+                'total_places': None,
+                'max_capacity': None,
+                'current_deposit': None,
+                'fill_percentage': None,
+                'is_vip': False,
+                'is_new_user': False,
+                'is_sold_out': is_sold_out,
+                'is_special_offer': is_special_offer,
+                'is_low_risk': is_low_risk,
+                'has_launchpool': has_launchpool,
+                'has_megadrop': has_megadrop,
+                'has_super_earn': has_super_earn,
+                'has_max': has_max,
+                'launchpool_apr': launchpool_apr,
+                'launchpool_details': product.get('launchpoolDetails'),
+                'megadrop_projects': product.get('megadropProjects'),
+                'partner_name': partner_name,
+                'boost_detail': boost_detail,
+                'target_asset': target_asset,
+            }
+            
+            return staking
+
+        except Exception as e:
+            logger.warning(f"⚠️ Binance: ошибка парсинга продукта {product.get('productId')}: {e}")
+            return None
+
+    def _get_binance_simple_earn_products(self) -> List[Dict[str, Any]]:
+        """
+        Получить детальный список Simple Earn продуктов
+        (Требует браузерный парсинг из-за защиты API)
+        
+        Returns:
+            Список Simple Earn продуктов с детальными данными
+        """
+        # TODO: Реализовать браузерный парсинг для получения детальных данных
+        # Включая user_limit, capacity и т.д.
+        return []
+
+    # ==================== END BINANCE PARSING ====================
 
     def get_pool_fills(self) -> List[Dict[str, Any]]:
         """

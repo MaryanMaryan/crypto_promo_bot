@@ -220,11 +220,25 @@ class WeexParser(BaseParser):
 
                 # Формируем URL
                 show_url = airdrop.get('showUrl', '')
-                full_url = f"https://www.weex.com/token-airdrop/{show_url}" if show_url else ''
+                full_url = f"https://www.weex.com/events/promo/{show_url}" if show_url else ''
+                
+                # Получаем описание проекта (пробуем разные поля)
+                description = (
+                    airdrop.get('projectDesc') or 
+                    airdrop.get('description') or 
+                    airdrop.get('subTitle') or
+                    airdrop.get('desc') or
+                    airdrop.get('activityDesc') or
+                    ''
+                )
+                # Очищаем HTML из описания
+                if description:
+                    description = self._clean_html(description)
 
                 promotion = {
                     'promo_id': promo_id,
                     'title': title,
+                    'description': description,
                     'token': token,
                     'reward': airdrop.get('totalPrizePool', ''),
                     'participants': airdrop.get('applyNum', 0),

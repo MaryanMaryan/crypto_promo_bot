@@ -169,7 +169,8 @@ class DatabaseMigration:
             self._migration_008_add_telegram_accounts,
             self._migration_009_add_staking_snapshots,
             self._migration_010_add_announcement_fields,
-            self._migration_011_add_exchange_credentials
+            self._migration_011_add_exchange_credentials,
+            self._migration_012_add_combined_staking_fields
         ])
 
     def _migration_010_add_announcement_fields(self, session):
@@ -467,6 +468,37 @@ class DatabaseMigration:
 
         except Exception as e:
             logging.error(f"❌ Ошибка в миграции 009: {e}")
+            raise
+
+    def _migration_012_add_combined_staking_fields(self, session):
+        """Миграция 012: Добавление полей для объединённых продуктов Fixed/Flexible (Gate.io)"""
+        try:
+            result = session.execute(text("PRAGMA table_info(staking_history)"))
+            columns = [row[1] for row in result.fetchall()]
+            
+            fields_to_add = {
+                'fixed_apr': 'REAL',
+                'fixed_term_days': 'INTEGER',
+                'fixed_user_limit': 'REAL',
+                'flexible_apr': 'REAL',
+                'flexible_user_limit': 'REAL'
+            }
+            
+            added_count = 0
+            for field_name, field_type in fields_to_add.items():
+                if field_name not in columns:
+                    session.execute(text(f"ALTER TABLE staking_history ADD COLUMN {field_name} {field_type}"))
+                    logging.info(f"✅ Добавлен столбец {field_name}")
+                    added_count += 1
+            
+            if added_count > 0:
+                session.commit()
+                logging.info(f"✅ Миграция 012: Добавлено {added_count} полей для Fixed/Flexible продуктов")
+            else:
+                logging.info("ℹ️ Все поля Fixed/Flexible уже существуют")
+                
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 012: {e}")
             raise
 
     def run_migrations(self):

@@ -829,11 +829,24 @@ def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = N
 
                     # Обновляем статус и заполненность
                     existing.status = staking.get('status', existing.status)
+                    existing.product_type = staking.get('product_type', existing.product_type)
                     existing.fill_percentage = staking.get('fill_percentage')
                     existing.current_deposit = staking.get('current_deposit')
                     existing.max_capacity = staking.get('max_capacity')
                     existing.token_price_usd = staking.get('token_price_usd')
                     existing.last_updated = datetime.utcnow()
+                    
+                    # Обновляем поля для объединённых продуктов Fixed/Flexible (Gate.io)
+                    if staking.get('fixed_apr') is not None:
+                        existing.fixed_apr = staking.get('fixed_apr')
+                    if staking.get('fixed_term_days') is not None:
+                        existing.fixed_term_days = staking.get('fixed_term_days')
+                    if staking.get('fixed_user_limit') is not None:
+                        existing.fixed_user_limit = staking.get('fixed_user_limit')
+                    if staking.get('flexible_apr') is not None:
+                        existing.flexible_apr = staking.get('flexible_apr')
+                    if staking.get('flexible_user_limit') is not None:
+                        existing.flexible_user_limit = staking.get('flexible_user_limit')
 
                     # УМНЫЕ УВЕДОМЛЕНИЯ: Проверяем изменение APR и обновляем статус стабильности
                     if api_link:
@@ -944,6 +957,7 @@ def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = N
                         reward_coin=staking.get('reward_coin'),
                         apr=apr,
                         type=staking_type,
+                        product_type=staking.get('product_type'),
                         status=staking.get('status'),
                         category=staking.get('category'),
                         category_text=staking.get('category_text'),
@@ -962,7 +976,13 @@ def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = N
                         # Умные уведомления
                         lock_type=lock_type,
                         is_notification_pending=is_pending,
-                        stable_since=stable_since
+                        stable_since=stable_since,
+                        # Поля для объединённых продуктов Fixed/Flexible (Gate.io)
+                        fixed_apr=staking.get('fixed_apr'),
+                        fixed_term_days=staking.get('fixed_term_days'),
+                        fixed_user_limit=staking.get('fixed_user_limit'),
+                        flexible_apr=staking.get('flexible_apr'),
+                        flexible_user_limit=staking.get('flexible_user_limit')
                     )
 
                     session.add(new_staking_record)

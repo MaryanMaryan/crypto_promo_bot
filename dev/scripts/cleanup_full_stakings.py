@@ -10,22 +10,22 @@ from data.models import StakingHistory
 from sqlalchemy import and_, or_
 
 def cleanup_full_stakings():
-    """Удаляет или деактивирует 100% заполненные стейкинги"""
+    """Удаляет или деактивирует стейкинги с заполненностью >= 95%"""
     
     print("=" * 80)
-    print("CLEANUP 100% FILLED STAKINGS")
+    print("CLEANUP 95%+ FILLED STAKINGS")
     print("=" * 80)
     
     with get_db_session() as session:
-        # Находим все стейкинги с заполненностью >= 100%
+        # Находим все стейкинги с заполненностью >= 95%
         full_stakings = session.query(StakingHistory).filter(
             and_(
                 StakingHistory.fill_percentage != None,
-                StakingHistory.fill_percentage >= 100.0
+                StakingHistory.fill_percentage >= 95.0
             )
         ).all()
         
-        print(f"\nFound {len(full_stakings)} stakings with 100% fill")
+        print(f"\nFound {len(full_stakings)} stakings with 95%+ fill")
         
         if not full_stakings:
             print("Nothing to cleanup!")

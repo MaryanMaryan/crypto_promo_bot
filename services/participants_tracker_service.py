@@ -107,12 +107,30 @@ class ParticipantsTrackerService:
                 for hours in ParticipantsTrackerService.TRACKING_INTERVALS:
                     time_ago = now - timedelta(hours=hours)
                     
-                    # Ищем ближайшую запись к этому времени
+                    # Ищем ближайшую запись к этому времени (в пределах ±2 часа)
+                    # Это гарантирует, что мы не используем одну и ту же старую запись для всех интервалов
+                    tolerance_hours = 2
+                    time_window_start = time_ago - timedelta(hours=tolerance_hours)
+                    time_window_end = time_ago + timedelta(hours=tolerance_hours)
+                    
                     record = db.query(PromoParticipantsHistory).filter(
                         PromoParticipantsHistory.exchange == exchange,
                         PromoParticipantsHistory.promo_id == promo_id,
-                        PromoParticipantsHistory.recorded_at <= time_ago
-                    ).order_by(PromoParticipantsHistory.recorded_at.desc()).first()
+                        PromoParticipantsHistory.recorded_at >= time_window_start,
+                        PromoParticipantsHistory.recorded_at <= time_window_end
+                    ).order_by(PromoParticipantsHistory.recorded_at.asc()).first()
+                    
+                    # Если не нашли в узком окне, берем ближайшую до целевого времени
+                    if not record:
+                        record = db.query(PromoParticipantsHistory).filter(
+                            PromoParticipantsHistory.exchange == exchange,
+                            PromoParticipantsHistory.promo_id == promo_id,
+                            PromoParticipantsHistory.recorded_at <= time_ago
+                        ).order_by(PromoParticipantsHistory.recorded_at.desc()).first()
+                        
+                        # Если запись слишком старая (более 3 часов до целевого времени), пропускаем
+                        if record and (time_ago - record.recorded_at) > timedelta(hours=3):
+                            record = None
                     
                     if record:
                         old_count = record.participants_count

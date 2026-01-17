@@ -2685,12 +2685,12 @@ async def check_staking_pools(callback: CallbackQuery):
                 )
             else:
                 # Фильтруем только стейкинги с данными о заполненности И APR >= 100%
-                # ИСКЛЮЧАЕМ: полностью заполненные пулы и со статусом "Sold Out"
+                # ИСКЛЮЧАЕМ: пулы с заполненностью >= 95% и со статусом "Sold Out"
                 pools_with_fill = [
                     s for s in stakings
                     if s.get('fill_percentage') is not None
                     and s.get('apr', 0) >= 100
-                    and s.get('fill_percentage', 0) < 100  # Не полностью заполненные
+                    and s.get('fill_percentage', 0) < 95  # Не заполненные >= 95%
                     and s.get('status') != 'Sold Out'  # Не проданные
                 ]
 
@@ -2699,7 +2699,7 @@ async def check_staking_pools(callback: CallbackQuery):
                     pools_all = [s for s in stakings if s.get('fill_percentage') is not None]
                     if pools_all:
                         # Проверяем причину отсутствия доступных пулов
-                        pools_sold_out = [s for s in pools_all if s.get('status') == 'Sold Out' or s.get('fill_percentage', 0) >= 100]
+                        pools_sold_out = [s for s in pools_all if s.get('status') == 'Sold Out' or s.get('fill_percentage', 0) >= 95]
                         pools_low_apr = [s for s in pools_all if s.get('apr', 0) < 100]
 
                         message_text = (
@@ -2735,7 +2735,7 @@ async def check_staking_pools(callback: CallbackQuery):
                     )
                     # Добавляем информацию о фильтрации
                     total_with_fill = len([s for s in stakings if s.get('fill_percentage') is not None])
-                    total_sold_out = len([s for s in stakings if s.get('status') == 'Sold Out' or s.get('fill_percentage', 0) >= 100])
+                    total_sold_out = len([s for s in stakings if s.get('status') == 'Sold Out' or s.get('fill_percentage', 0) >= 95])
                     info_parts = []
 
                     # Показываем статистику
@@ -2778,7 +2778,7 @@ async def check_staking_pools(callback: CallbackQuery):
 
 @router.callback_query(F.data == "manage_view_current_stakings")
 async def view_current_stakings(callback: CallbackQuery):
-    """Показать текущие стейкинги (страница 1)"""
+    """Показать текущие стейкинги (страница 1) с автообновлением"""
     logger.info(f"📋 ОТКРЫТИЕ ТЕКУЩИХ СТЕЙКИНГОВ")
     try:
         user_id = callback.from_user.id
@@ -2805,6 +2805,62 @@ async def view_current_stakings(callback: CallbackQuery):
             min_apr = link.min_apr
             page_url = link.page_url
             api_url = link.api_url or link.url
+            exchange = link.exchange
+
+        # Закрываем callback сразу
+        await callback.answer()
+
+        # Отправляем сообщение о загрузке
+        status_msg = await callback.message.answer(
+            f"⏳ <b>Загрузка данных {exchange_name}...</b>\n"
+            f"📊 Получение актуальных стейкинг-продуктов",
+            parse_mode="HTML"
+        )
+
+        # АВТОМАТИЧЕСКИ запускаем парсер для получения свежих данных
+        from bot.parser_service import ParserService
+        from utils.exchange_detector import detect_exchange_from_url
+        import asyncio
+
+        # Автоопределение биржи если не указана
+        if not exchange or exchange in ['Unknown', 'None', '', 'null']:
+            exchange = detect_exchange_from_url(api_url)
+            logger.info(f"🔍 Автоопределение биржи: {exchange}")
+
+        exchange_filter = exchange or exchange_name
+
+        # Запускаем парсер и ЖДЕМ его завершения
+        parser_service = ParserService()
+        loop = asyncio.get_event_loop()
+
+        try:
+            logger.info(f"{'='*60}")
+            logger.info(f"🔄 АВТООБНОВЛЕНИЕ СТЕЙКИНГОВ: {exchange_name}")
+            logger.info(f"   link_id={link_id}")
+            logger.info(f"   api_url={api_url}")
+            logger.info(f"   exchange={exchange}")
+            logger.info(f"{'='*60}")
+
+            # СИНХРОННО выполняем парсинг
+            new_stakings = await loop.run_in_executor(
+                None,
+                parser_service.parse_staking_link,
+                link_id,
+                api_url,
+                exchange,
+                page_url
+            )
+
+            logger.info(f"✅ ПАРСЕР ЗАВЕРШИЛ РАБОТУ: {len(new_stakings) if new_stakings else 0} записей")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга {exchange_name}: {e}", exc_info=True)
+
+        # Удаляем сообщение о статусе
+        try:
+            await status_msg.delete()
+        except:
+            pass
 
         # Нормализуем exchange для правильного поиска в БД
         from utils.exchange_detector import detect_exchange_from_url
@@ -3043,9 +3099,23 @@ async def refresh_current_stakings(callback: CallbackQuery):
         logger.info(f"👤 User ID: {user_id}")
 
         state = current_stakings_state.get(user_id)
+        
+        # Если сессия истекла, пытаемся восстановить из user_selections
         if not state:
-            await callback.answer("❌ Сессия истекла. Откройте раздел заново.", show_alert=True)
-            return
+            link_id = user_selections.get(user_id)
+            if link_id:
+                logger.info(f"🔄 Восстанавливаю сессию из user_selections: link_id={link_id}")
+                state = {
+                    'page': 1,
+                    'link_id': link_id,
+                    'total_pages': 1,
+                    'stakings': [],
+                    'is_okx_flash': False
+                }
+                current_stakings_state[user_id] = state
+            else:
+                await callback.answer("❌ Сессия истекла. Откройте раздел заново.", show_alert=True)
+                return
 
         current_page = state['page']
         link_id = state['link_id']
@@ -3363,6 +3433,7 @@ async def view_current_promos(callback: CallbackQuery):
                 logger.info(f"   ✅ Weex airdrop: {len(promos_data)} промоакций")
             is_okx_boost = False
             is_gate_candy = False
+            is_mexc_airdrop = False
             is_weex = True
             is_weex_rewards_page = is_weex_rewards
         else:
@@ -3444,15 +3515,22 @@ async def view_current_promos(callback: CallbackQuery):
             # Проверяем, является ли это OKX Boost
             is_okx_boost = False
             is_gate_candy = False
+            is_mexc_airdrop = False
             if api_promos and len(api_promos) > 0:
                 first_promo = api_promos[0]
                 is_okx_boost = first_promo.get('promo_type') == 'okx_boost'
+                is_mexc_airdrop = first_promo.get('promo_type') == 'mexc_airdrop'
             
             # Проверяем GateCandy по имени биржи или URL
             if 'gatecandy' in exchange_name.lower().replace(' ', '').replace('.', ''):
                 is_gate_candy = True
             elif api_url and 'candydrop' in api_url.lower():
                 is_gate_candy = True
+            
+            # Проверяем MEXC Airdrop по URL
+            if not is_mexc_airdrop and api_url:
+                if 'eftd' in api_url.lower() or 'token-airdrop' in (page_url or '').lower():
+                    is_mexc_airdrop = True
             
             # Weex уже обработан выше
             is_weex = False
@@ -3464,6 +3542,11 @@ async def view_current_promos(callback: CallbackQuery):
                 active_promos = [p for p in api_promos if p.get('status') in ['ongoing', 'upcoming']]
                 promos_data = active_promos
                 logger.info(f"   🚀 Режим OKX Boost: {len(promos_data)} активных launchpool'ов (отфильтровано из {len(api_promos)})")
+            
+            # Для MEXC Airdrop используем данные напрямую (уже отфильтрованы в парсере)
+            if is_mexc_airdrop:
+                promos_data = api_promos
+                logger.info(f"   🪂 Режим MEXC Airdrop: {len(promos_data)} аирдропов")
 
         # Записываем участников в историю и получаем статистику (для ВСЕХ бирж)
         if promos_data:
@@ -3519,11 +3602,12 @@ async def view_current_promos(callback: CallbackQuery):
             'page_url': page_url,
             'is_okx_boost': is_okx_boost,  # Сохраняем тип для пагинации
             'is_gate_candy': is_gate_candy,  # Сохраняем тип для GateCandy
+            'is_mexc_airdrop': is_mexc_airdrop,  # Сохраняем тип для MEXC Airdrop
             'is_weex': is_weex,  # Сохраняем тип для Weex
             'is_weex_rewards': is_weex_rewards_page if is_weex else False,  # Тип страницы Weex (rewards или airdrop)
             'participants_snapshot': current_participants  # Сохраняем снимок участников
         }
-        logger.info(f"   💾 Состояние сохранено: page={page}, total_pages={total_pages}, is_okx_boost={is_okx_boost}, is_gate_candy={is_gate_candy}, is_weex={is_weex}")
+        logger.info(f"   💾 Состояние сохранено: page={page}, total_pages={total_pages}, is_okx_boost={is_okx_boost}, is_gate_candy={is_gate_candy}, is_mexc_airdrop={is_mexc_airdrop}, is_weex={is_weex}")
 
         # Форматировать сообщение
         notif_service = NotificationService(bot=callback.bot)
@@ -3543,6 +3627,13 @@ async def view_current_promos(callback: CallbackQuery):
                 total_pages=total_pages,
                 page_url=page_url,
                 prev_participants=prev_participants
+            )
+        elif is_mexc_airdrop:
+            message_text = notif_service.format_mexc_airdrop_page(
+                promos=page_promos,
+                page=page,
+                total_pages=total_pages,
+                page_url=page_url or 'https://www.mexc.com/ru-RU/token-airdrop'
             )
         elif is_weex:
             # Используем разные форматтеры для airdrop и rewards
@@ -3629,6 +3720,7 @@ async def navigate_promos_page(callback: CallbackQuery):
         # Проверяем тип для правильной пагинации
         is_okx_boost = state.get('is_okx_boost', False)
         is_gate_candy = state.get('is_gate_candy', False)
+        is_mexc_airdrop = state.get('is_mexc_airdrop', False)
         is_weex = state.get('is_weex', False)
         is_weex_rewards = state.get('is_weex_rewards', False)
         prev_participants = state.get('participants_snapshot', {})
@@ -3671,6 +3763,13 @@ async def navigate_promos_page(callback: CallbackQuery):
                 total_pages=total_pages,
                 page_url=page_url,
                 prev_participants=prev_participants
+            )
+        elif is_mexc_airdrop:
+            message_text = notif_service.format_mexc_airdrop_page(
+                promos=page_promos,
+                page=new_page,
+                total_pages=total_pages,
+                page_url=page_url or 'https://www.mexc.com/ru-RU/token-airdrop'
             )
         elif is_weex:
             # Используем разные форматтеры для airdrop и rewards
