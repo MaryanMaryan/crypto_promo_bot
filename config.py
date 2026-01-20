@@ -31,6 +31,9 @@ else:
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
 
+# Список дополнительных админов (можно добавлять ID через запятую в .env или здесь напрямую)
+ADDITIONAL_ADMINS = [5748499226, 7995846384]  # @sterline_cryptos
+
 # Валидация критичных переменных
 if not BOT_TOKEN:
     raise ValueError(
@@ -50,8 +53,12 @@ try:
 except ValueError:
     raise ValueError(f"❌ ADMIN_CHAT_ID должен быть числом, получено: {ADMIN_CHAT_ID}")
 
+# Список всех админов (основной + дополнительные)
+ADMIN_IDS = [ADMIN_CHAT_ID] + ADDITIONAL_ADMINS
+
 print(f"🚀 Бот инициализирован: {BOT_TOKEN[:15]}...")
 print(f"👤 Admin Chat ID: {ADMIN_CHAT_ID}")
+print(f"👥 Всего админов: {len(ADMIN_IDS)} - {ADMIN_IDS}")
 
 # =============================================================================
 # DATABASE CONFIGURATION
@@ -77,6 +84,73 @@ MAX_POOL_FILL_PERCENTAGE = float(os.getenv('MAX_POOL_FILL_PERCENTAGE', '90.0'))
 # =============================================================================
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FORMAT = os.getenv('LOG_FORMAT', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+LOG_TO_FILE = os.getenv('LOG_TO_FILE', 'true').lower() == 'true'
+LOG_FILE_PATH = os.getenv('LOG_FILE_PATH', 'logs/bot.log')
+LOG_MAX_SIZE_MB = int(os.getenv('LOG_MAX_SIZE_MB', '10'))  # Ротация при 10MB
+LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))  # Хранить 5 старых файлов
+
+# =============================================================================
+# EXECUTOR CONFIGURATION (для параллельного парсинга)
+# =============================================================================
+EXECUTOR_MAX_WORKERS = int(os.getenv('EXECUTOR_MAX_WORKERS', '10'))  # Потоков для парсинга
+
+# =============================================================================
+# BROWSER POOL CONFIGURATION (пул переиспользуемых браузеров)
+# =============================================================================
+BROWSER_POOL_SIZE = int(os.getenv('BROWSER_POOL_SIZE', '3'))  # Количество браузеров в пуле
+BROWSER_MAX_AGE_SECONDS = int(os.getenv('BROWSER_MAX_AGE_SECONDS', '1800'))  # Пересоздавать через 30 мин
+BROWSER_MAX_REQUESTS = int(os.getenv('BROWSER_MAX_REQUESTS', '50'))  # Пересоздавать после 50 запросов
+BROWSER_HEALTH_CHECK_INTERVAL = int(os.getenv('BROWSER_HEALTH_CHECK_INTERVAL', '60'))  # Проверка каждые 60 сек
+BROWSER_POOL_ENABLED = os.getenv('BROWSER_POOL_ENABLED', 'true').lower() == 'true'  # Использовать пул
+
+# =============================================================================
+# DEBOUNCE CONFIGURATION (защита от спама кнопок)
+# =============================================================================
+DEBOUNCE_SECONDS = float(os.getenv('DEBOUNCE_SECONDS', '0.5'))  # Игнорировать повторы 0.5с
+
+# =============================================================================
+# CACHE CONFIGURATION (кэширование для отзывчивого UI)
+# =============================================================================
+CACHE_ENABLED = os.getenv('CACHE_ENABLED', 'true').lower() == 'true'  # Включить кэширование
+CACHE_MAX_SIZE = int(os.getenv('CACHE_MAX_SIZE', '1000'))  # Максимум записей в кэше
+CACHE_DEFAULT_TTL = float(os.getenv('CACHE_DEFAULT_TTL', '30.0'))  # TTL по умолчанию (секунды)
+CACHE_LINKS_TTL = float(os.getenv('CACHE_LINKS_TTL', '30.0'))  # TTL для списка ссылок
+CACHE_PROMOS_TTL = float(os.getenv('CACHE_PROMOS_TTL', '60.0'))  # TTL для промоакций
+CACHE_STAKINGS_TTL = float(os.getenv('CACHE_STAKINGS_TTL', '60.0'))  # TTL для стейкингов
+
+# =============================================================================
+# PARALLEL PARSING CONFIGURATION (параллельный парсинг)
+# =============================================================================
+PARALLEL_PARSING_ENABLED = os.getenv('PARALLEL_PARSING_ENABLED', 'true').lower() == 'true'
+PARALLEL_PARSING_WORKERS = int(os.getenv('PARALLEL_PARSING_WORKERS', '5'))  # Кол-во воркеров
+PARALLEL_PARSING_QUEUE_SIZE = int(os.getenv('PARALLEL_PARSING_QUEUE_SIZE', '100'))  # Размер очереди
+PARALLEL_PARSING_TASK_TIMEOUT = int(os.getenv('PARALLEL_PARSING_TASK_TIMEOUT', '120'))  # Таймаут задачи (сек)
+PARALLEL_PARSING_MAX_RETRIES = int(os.getenv('PARALLEL_PARSING_MAX_RETRIES', '3'))  # Макс. повторов
+
+# =============================================================================
+# CIRCUIT BREAKER CONFIGURATION (защита от недоступных бирж)
+# =============================================================================
+CIRCUIT_BREAKER_ENABLED = os.getenv('CIRCUIT_BREAKER_ENABLED', 'true').lower() == 'true'
+CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv('CIRCUIT_BREAKER_FAILURE_THRESHOLD', '3'))  # Неудач для блокировки
+CIRCUIT_BREAKER_RECOVERY_TIMEOUT = int(os.getenv('CIRCUIT_BREAKER_RECOVERY_TIMEOUT', '300'))  # 5 минут блокировки
+CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS = int(os.getenv('CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS', '1'))  # Пробных запросов
+CIRCUIT_BREAKER_SUCCESS_THRESHOLD = int(os.getenv('CIRCUIT_BREAKER_SUCCESS_THRESHOLD', '2'))  # Успехов для разблокировки
+
+# =============================================================================
+# RESOURCE MONITOR CONFIGURATION (мониторинг ресурсов)
+# =============================================================================
+RESOURCE_MONITOR_ENABLED = os.getenv('RESOURCE_MONITOR_ENABLED', 'true').lower() == 'true'
+RESOURCE_MONITOR_INTERVAL = int(os.getenv('RESOURCE_MONITOR_INTERVAL', '300'))  # Проверка каждые 5 мин
+RESOURCE_RAM_WARNING_PERCENT = float(os.getenv('RESOURCE_RAM_WARNING_PERCENT', '70.0'))  # Предупреждение RAM
+RESOURCE_RAM_CRITICAL_PERCENT = float(os.getenv('RESOURCE_RAM_CRITICAL_PERCENT', '85.0'))  # Критический RAM
+RESOURCE_CPU_WARNING_PERCENT = float(os.getenv('RESOURCE_CPU_WARNING_PERCENT', '70.0'))  # Предупреждение CPU
+RESOURCE_CPU_CRITICAL_PERCENT = float(os.getenv('RESOURCE_CPU_CRITICAL_PERCENT', '90.0'))  # Критический CPU
+
+# =============================================================================
+# GRACEFUL DEGRADATION CONFIGURATION (адаптивное снижение нагрузки)
+# =============================================================================
+GRACEFUL_DEGRADATION_ENABLED = os.getenv('GRACEFUL_DEGRADATION_ENABLED', 'true').lower() == 'true'
+GRACEFUL_DEGRADATION_CHECK_INTERVAL = int(os.getenv('GRACEFUL_DEGRADATION_CHECK_INTERVAL', '60'))  # сек
 
 # =============================================================================
 # TELEGRAM PARSER CONFIGURATION

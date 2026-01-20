@@ -1,6 +1,7 @@
 # bot/parser_service.py
 import logging
 import time
+import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from data.database import get_db, get_db_session, PromoHistory, ApiLink
@@ -9,6 +10,7 @@ from parsers.staking_parser import StakingParser
 from parsers.announcement_parser import AnnouncementParser
 from parsers.weex_parser import WeexParser
 from services.stability_tracker_service import StabilityTrackerService
+from utils.price_fetcher import get_price_fetcher
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,9 @@ class ParserService:
     SPECIAL_PARSERS = {
         'weex': WeexParser,
     }
+    
+    # Стейблкоины для которых цена = 1 USD
+    STABLECOINS = {'USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP', 'USD1', 'USDE'}
 
     def __init__(self):
         self.parsers = {}
@@ -31,6 +36,12 @@ class ParserService:
             'fallback_accepted': 0,
             'last_check_time': None
         }
+        # Инициализируем price_fetcher для обогащения данных USD-эквивалентами
+        try:
+            self.price_fetcher = get_price_fetcher()
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось инициализировать price_fetcher: {e}")
+            self.price_fetcher = None
 
     def _extract_exchange_from_url(self, url: str) -> str:
         """Извлекает название биржи из URL"""
@@ -49,18 +60,41 @@ class ParserService:
         except:
             return ''
 
-    def _select_parser(self, url: str, api_url: Optional[str], html_url: Optional[str], parsing_type: str, special_parser: Optional[str] = None):
-        """Выбирает подходящий парсер на основе URL или явного указания special_parser"""
+    def _select_parser(self, url: str, api_url: Optional[str], html_url: Optional[str], parsing_type: str, special_parser: Optional[str] = None, category: str = None):
+        """
+        Выбирает подходящий парсер на основе:
+        1. Явного указания special_parser (выбор пользователя)
+        2. Категории ссылки
+        3. Автоопределения по URL
+        """
         
-        # Если явно указан специальный парсер - используем его
+        # Если явно указан парсер пользователем - используем его
         if special_parser:
+            logger.info(f"🔧 Выбран парсер пользователем: {special_parser}")
+            
+            # Специальные парсеры (weex, okx_boost)
             if special_parser in self.SPECIAL_PARSERS:
                 parser_class = self.SPECIAL_PARSERS[special_parser]
                 target_url = html_url or url
-                logger.info(f"🔧 Используется ЯВНО УКАЗАННЫЙ специальный парсер: {parser_class.__name__} для {target_url}")
+                logger.info(f"🔧 Используется специальный парсер: {parser_class.__name__} для {target_url}")
                 return parser_class(target_url)
+            
+            # Стейкинг парсер
+            elif special_parser == 'staking':
+                target_url = api_url or url
+                logger.info(f"📊 Используется StakingParser для {target_url}")
+                return StakingParser(api_url=target_url)
+            
+            # Анонс парсер - возвращаем None, обработка будет в check_announcements
+            elif special_parser == 'announcement':
+                logger.info(f"📢 Выбран AnnouncementParser - будет использован в check_announcements")
+                # Возвращаем UniversalFallbackParser как fallback, но announcement будет обработан отдельно
+                return UniversalFallbackParser(url, api_url=api_url, html_url=html_url, parsing_type=parsing_type)
+            
             else:
-                logger.warning(f"⚠️ Указанный special_parser '{special_parser}' не найден, используем автоопределение")
+                logger.warning(f"⚠️ Неизвестный парсер '{special_parser}', используем автоопределение")
+        
+        # АВТООПРЕДЕЛЕНИЕ: если парсер не указан явно
         
         # Определяем биржу из всех доступных URL
         exchange = self._extract_exchange_from_url(url)
@@ -75,18 +109,23 @@ class ParserService:
             if api_url:
                 exchange = self._extract_exchange_from_url(api_url)
         
-        logger.info(f"🔍 Определена биржа: {exchange or 'unknown'}")
+        logger.info(f"🔍 Автоопределение биржи: {exchange or 'unknown'}")
+        
+        # Учитываем категорию при автовыборе
+        if category == 'staking' and api_url:
+            # Для категории staking автоматически используем StakingParser
+            logger.info(f"📊 Автовыбор: StakingParser для категории staking")
+            return StakingParser(api_url=api_url)
         
         # Проверяем, есть ли специальный парсер для этой биржи
         if exchange in self.SPECIAL_PARSERS:
             parser_class = self.SPECIAL_PARSERS[exchange]
-            # Используем html_url если он есть (для browser-only парсинга)
             target_url = html_url or url
-            logger.info(f"🔧 Используется специальный парсер: {parser_class.__name__} для {target_url}")
+            logger.info(f"🔧 Автовыбор: специальный парсер {parser_class.__name__} для биржи {exchange}")
             return parser_class(target_url)
         
         # По умолчанию используем UniversalFallbackParser
-        logger.debug(f"🔧 Создание UniversalFallbackParser")
+        logger.info(f"🌐 Автовыбор: UniversalFallbackParser")
         return UniversalFallbackParser(url, api_url=api_url, html_url=html_url, parsing_type=parsing_type)
 
     def _convert_to_datetime(self, time_value: Any) -> Optional[datetime]:
@@ -202,6 +241,10 @@ class ParserService:
             if new_promos:
                 logger.info(f"🎉 Найдено {len(new_promos)} НОВЫХ промоакций!")
                 
+                # Обогащаем промоакции USD-эквивалентами
+                exchange = self._extract_exchange_from_url(api_url or url)
+                new_promos = self._enrich_promos_with_prices(new_promos, exchange)
+                
                 # Сохраняем в историю
                 saved_count = self._save_to_history(link_id, new_promos)
                 
@@ -241,6 +284,7 @@ class ParserService:
             html_url = None
             parsing_type = 'combined'  # По умолчанию
             special_parser = None  # Специальный парсер
+            category = 'general'  # Категория для автовыбора парсера
 
             with get_db_session() as db:
                 link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
@@ -248,16 +292,18 @@ class ParserService:
                     api_url = link.get_primary_api_url()
                     html_url = link.get_primary_html_url()
                     parsing_type = link.parsing_type or 'combined'
-                    special_parser = link.special_parser  # Получаем специальный парсер
+                    special_parser = link.special_parser  # Получаем выбранный парсер
+                    category = link.category or 'general'
 
             logger.info(f"📡 API URL: {api_url or 'Не указан'}")
             logger.info(f"🌐 HTML URL (fallback): {html_url or 'Не указан'}")
             logger.info(f"🎯 Тип парсинга: {parsing_type}")
+            logger.info(f"🗂️ Категория: {category}")
             if special_parser:
-                logger.info(f"🔧 Специальный парсер: {special_parser}")
+                logger.info(f"🔧 Выбранный парсер: {special_parser}")
 
-            # Выбираем парсер в зависимости от биржи
-            parser = self._select_parser(url, api_url, html_url, parsing_type, special_parser)
+            # Выбираем парсер в зависимости от настроек и категории
+            parser = self._select_parser(url, api_url, html_url, parsing_type, special_parser, category)
 
             logger.info(f"📡 Запуск парсинга...")
             promotions = parser.get_promotions()
@@ -294,6 +340,10 @@ class ParserService:
                 for i, promo in enumerate(new_promos, 1):
                     logger.info(f"   {i}. {promo.get('title', 'Без названия')} (promo_id: {promo.get('promo_id', 'N/A')})")
 
+                # Обогащаем промоакции USD-эквивалентами
+                exchange = self._extract_exchange_from_url(api_url or url)
+                new_promos = self._enrich_promos_with_prices(new_promos, exchange)
+
                 # Сохраняем новые промоакции
                 logger.info(f"💾 Сохранение {len(new_promos)} новых промоакций в базу данных...")
                 saved_count = self._save_to_history(link_id, new_promos)
@@ -317,7 +367,7 @@ class ParserService:
             return []
     
     def _filter_new_promotions(self, link_id: int, promotions: List[Dict]) -> List[Dict]:
-        """Фильтрует только новые промоакции"""
+        """Фильтрует только новые промоакции и удаляет устаревшие"""
         try:
             logger.debug(f"🔍 Начало фильтрации промоакций для ссылки {link_id}")
 
@@ -327,7 +377,8 @@ class ParserService:
                 'existing': 0,
                 'new': 0,
                 'invalid': 0,
-                'fallback_rejected': 0
+                'fallback_rejected': 0,
+                'outdated_removed': 0
             }
 
             with get_db_session() as db:
@@ -342,6 +393,19 @@ class ParserService:
                 logger.info(f"📊 В базе данных уже есть {len(existing_promo_ids)} промоакций для ссылки {link_id}")
                 if existing_promo_ids:
                     logger.debug(f"   Существующие ID: {list(existing_promo_ids)[:10]}{'...' if len(existing_promo_ids) > 10 else ''}")
+
+                # НОВОЕ: Очистка устаревших промо (есть в БД, но нет в API)
+                current_promo_ids = {p.get('promo_id') for p in promotions if p.get('promo_id')}
+                outdated_ids = existing_promo_ids - current_promo_ids
+                
+                if outdated_ids:
+                    # Удаляем устаревшие промо
+                    deleted = db.query(PromoHistory).filter(
+                        PromoHistory.promo_id.in_(outdated_ids)
+                    ).delete(synchronize_session=False)
+                    db.commit()
+                    stats['outdated_removed'] = deleted
+                    logger.info(f"🗑️ Удалено {deleted} устаревших промоакций (нет в API)")
 
                 # Фильтруем только новые промоакции с валидными ID
                 new_promos = []
@@ -371,7 +435,9 @@ class ParserService:
                             continue
 
                     if promo_id in existing_promo_ids:
-                        logger.debug(f"   ⏭️ Пропускаем существующую промоакцию: {promo.get('title', 'Без названия')} ({promo_id})")
+                        # НОВОЕ: Обновляем данные существующей промоакции (winners_count, reward_per_winner и т.д.)
+                        self._update_existing_promo(db, promo_id, promo)
+                        logger.debug(f"   ⏭️ Существующая промоакция (обновлены данные): {promo.get('title', 'Без названия')} ({promo_id})")
                         stats['existing'] += 1
                     else:
                         logger.debug(f"   ✅ НОВАЯ промоакция: {promo.get('title', 'Без названия')} ({promo_id})")
@@ -387,12 +453,365 @@ class ParserService:
                     logger.info(f"   Без promo_id: {stats['invalid']}")
                 if stats['fallback_rejected'] > 0:
                     logger.info(f"   Fallback отклонено (нет данных): {stats['fallback_rejected']}")
+                if stats['outdated_removed'] > 0:
+                    logger.info(f"   🗑️ Устаревших удалено: {stats['outdated_removed']}")
 
                 return new_promos
 
         except Exception as e:
             logger.error(f"❌ Ошибка фильтрации промоакций: {e}", exc_info=True)
             return []  # В случае ошибки возвращаем пустой список
+    
+    def _update_existing_promo(self, db, promo_id: str, promo: Dict):
+        """Обновляет данные существующей промоакции (participants_count, conditions, reward_type, max_reward и т.д.)"""
+        try:
+            logger.debug(f"📝 _update_existing_promo вызван для {promo.get('title')} (ID: {promo_id})")
+            
+            # Получаем все данные из прома
+            winners_count = promo.get('winners_count')
+            reward_per_winner = promo.get('reward_per_winner')
+            participants_count = promo.get('participants_count')
+            conditions = promo.get('conditions')
+            reward_type = promo.get('reward_type')
+            user_max_rewards = promo.get('user_max_rewards')
+            start_time = promo.get('start_time')
+            end_time = promo.get('end_time')
+            total_prize_pool = promo.get('total_prize_pool')
+            
+            # Получаем существующую запись
+            existing = db.query(PromoHistory).filter(PromoHistory.promo_id == promo_id).first()
+            if not existing:
+                return
+            
+            updated = False
+            
+            # ВСЕГДА обновляем participants_count (это динамическое значение)
+            if participants_count:
+                new_count = self._safe_int(participants_count)
+                if new_count and new_count != existing.participants_count:
+                    existing.participants_count = new_count
+                    updated = True
+            
+            # Обновляем только если текущие значения пустые
+            if winners_count and not existing.winners_count:
+                existing.winners_count = self._safe_int(winners_count)
+                updated = True
+                
+            if reward_per_winner and not existing.reward_per_winner:
+                existing.reward_per_winner = str(reward_per_winner)
+                updated = True
+            
+            # Условия - конвертируем массив в строку
+            if conditions and not existing.conditions:
+                if isinstance(conditions, list):
+                    existing.conditions = ', '.join(conditions)
+                else:
+                    existing.conditions = str(conditions)
+                updated = True
+            
+            # Тип награды - конвертируем массив в строку
+            if reward_type and not existing.reward_type:
+                if isinstance(reward_type, list):
+                    existing.reward_type = ', '.join(reward_type)
+                else:
+                    existing.reward_type = str(reward_type)
+                updated = True
+            
+            # Макс награда на юзера
+            if user_max_rewards and not existing.max_reward_per_user:
+                existing.max_reward_per_user = str(user_max_rewards)
+                updated = True
+            
+            # Призовой пул (если пустой)
+            if total_prize_pool and not existing.total_prize_pool:
+                existing.total_prize_pool = str(total_prize_pool)
+                updated = True
+            
+            # Обновляем даты если они появились
+            if start_time and not existing.start_time:
+                existing.start_time = self._convert_to_datetime(start_time)
+                updated = True
+
+            if end_time and not existing.end_time:
+                existing.end_time = self._convert_to_datetime(end_time)
+                updated = True
+
+            # MEXC Airdrop специфичные поля (раздельные пулы)
+            token_pool = promo.get('token_pool')
+            token_pool_currency = promo.get('token_pool_currency')
+            bonus_usdt = promo.get('bonus_usdt')
+
+            if token_pool and not existing.token_pool:
+                existing.token_pool = self._safe_float(token_pool)
+                updated = True
+
+            if token_pool_currency and not existing.token_pool_currency:
+                existing.token_pool_currency = str(token_pool_currency)
+                updated = True
+
+            if bonus_usdt and not existing.bonus_usdt:
+                existing.bonus_usdt = self._safe_float(bonus_usdt)
+                updated = True
+
+            # === РАСЧЁТ ЦЕНЫ ТОКЕНА ДЛЯ MEXC AIRDROP ===
+            # Если есть token_pool_currency - получаем цену токена для расчёта USD эквивалента
+            if token_pool_currency and (not existing.token_price or not hasattr(existing, 'token_price')):
+                try:
+                    clean_token = str(token_pool_currency).upper().strip()
+                    if clean_token in self.STABLECOINS:
+                        existing.token_price = 1.0
+                        updated = True
+                    elif self.price_fetcher:
+                        fetched_price = self.price_fetcher.get_token_price(clean_token, preferred_exchange='MEXC')
+                        if fetched_price:
+                            existing.token_price = fetched_price
+                            updated = True
+                            logger.info(f"💵 Получена цена токена {clean_token}: ${fetched_price:.6f}")
+                except Exception as e:
+                    logger.debug(f"⚠️ Не удалось получить цену {token_pool_currency}: {e}")
+
+            # Gate.io возвращает некорректные USD цены - всегда пересчитываем через price_fetcher
+            force_recalculate = existing.exchange and 'gate' in existing.exchange.lower()
+            
+            # Обновляем USD-эквиваленты если их нет (и не Gate.io)
+            if not force_recalculate:
+                total_prize_pool_usd = promo.get('total_prize_pool_usd')
+                reward_per_winner_usd = promo.get('reward_per_winner_usd')
+                
+                if total_prize_pool_usd and not existing.total_prize_pool_usd:
+                    existing.total_prize_pool_usd = self._safe_float(total_prize_pool_usd)
+                    updated = True
+                
+                if reward_per_winner_usd and not existing.reward_per_winner_usd:
+                    existing.reward_per_winner_usd = self._safe_float(reward_per_winner_usd)
+                    updated = True
+            
+            # Если USD-эквиваленты всё ещё пустые (или Gate.io) - пробуем рассчитать через price_fetcher
+            should_calculate_pool = force_recalculate or not existing.total_prize_pool_usd
+            should_calculate_reward = force_recalculate or not existing.reward_per_winner_usd
+            
+            if (should_calculate_pool or should_calculate_reward) and existing.award_token:
+                # Получаем цену токена один раз для обоих расчётов
+                token_price = None
+                clean_token = existing.award_token.upper().strip()
+                
+                if clean_token in self.STABLECOINS:
+                    token_price = 1.0
+                elif self.price_fetcher:
+                    try:
+                        token_price = self.price_fetcher.get_token_price(clean_token, preferred_exchange=existing.exchange)
+                    except Exception as e:
+                        logger.debug(f"⚠️ Не удалось получить цену {clean_token}: {e}")
+                
+                if token_price:
+                    # Расчёт total_prize_pool_usd
+                    if should_calculate_pool and existing.total_prize_pool:
+                        logger.info(f"💵 Попытка расчёта USD для {promo.get('title')}: pool={existing.total_prize_pool}, token={existing.award_token}")
+                        try:
+                            pool_str = str(existing.total_prize_pool).replace(',', '').replace(' ', '')
+                            pool_num = float(pool_str)
+                            existing.total_prize_pool_usd = pool_num * token_price
+                            updated = True
+                            logger.info(f"💰 Рассчитан total_prize_pool_usd=${existing.total_prize_pool_usd:.2f} для {promo.get('title')}")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"⚠️ Не удалось рассчитать pool USD для {promo.get('title')}: {e}")
+                    
+                    # Расчёт reward_per_winner_usd (из reward_per_winner или max_reward_per_user)
+                    if should_calculate_reward:
+                        # Пробуем reward_per_winner сначала, потом max_reward_per_user
+                        reward_source = existing.reward_per_winner or existing.max_reward_per_user
+                        if reward_source:
+                            try:
+                                # Парсим число из строки типа "2000 SCOR" или "200 ELSA" или просто "54000"
+                                import re
+                                reward_match = re.match(r'([\d,]+(?:\.\d+)?)', str(reward_source).replace(' ', ''))
+                                if reward_match:
+                                    reward_num = float(reward_match.group(1).replace(',', ''))
+                                    existing.reward_per_winner_usd = reward_num * token_price
+                                    updated = True
+                                    logger.info(f"💵 Рассчитан reward_per_winner_usd=${existing.reward_per_winner_usd:.2f} для {promo.get('title')}")
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"⚠️ Не удалось рассчитать reward USD для {promo.get('title')}: {e}")
+                else:
+                    if should_calculate_pool:
+                        logger.warning(f"⚠️ Не удалось получить цену для {promo.get('title')}: {existing.award_token}")
+
+            if updated:
+                existing.last_updated = datetime.utcnow()
+                db.commit()
+                logger.debug(f"📝 Обновлены данные для {promo.get('title')}: participants={participants_count}, conditions={conditions}, reward_type={reward_type}")
+                
+                # Записываем участников в историю для отслеживания изменений
+                if participants_count:
+                    try:
+                        from services.participants_tracker_service import ParticipantsTrackerService
+                        exchange = existing.exchange or promo.get('exchange', 'Unknown')
+                        title = promo.get('title')
+                        p_count = self._safe_int(participants_count)
+                        if p_count:
+                            ParticipantsTrackerService.record_participants(exchange, promo_id, p_count, title)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка записи участников: {e}")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления промоакции {promo_id}: {e}")
+
+    def _enrich_promos_with_prices(self, promotions: List[Dict], exchange: str = None) -> List[Dict]:
+        """
+        Обогащает промоакции USD-эквивалентами используя price_fetcher.
+        Вызывается при сохранении промоакций в БД.
+        
+        Args:
+            promotions: Список промоакций для обогащения
+            exchange: Название биржи (для предпочтительного источника цен)
+            
+        Returns:
+            Список обогащённых промоакций
+        """
+        if not self.price_fetcher:
+            logger.debug("⚠️ price_fetcher недоступен, пропуск обогащения ценами")
+            return promotions
+        
+        # Gate.io возвращает некорректные USD цены - всегда пересчитываем
+        force_recalculate = exchange and 'gate' in exchange.lower()
+        
+        enriched_count = 0
+        
+        for promo in promotions:
+            try:
+                award_token = promo.get('award_token')
+                total_prize_pool = promo.get('total_prize_pool')
+                total_prize_pool_usd = promo.get('total_prize_pool_usd')
+                reward_per_winner = promo.get('reward_per_winner')
+                reward_per_winner_usd = promo.get('reward_per_winner_usd')
+                
+                # Для Gate.io - сбрасываем некорректные USD значения из API
+                if force_recalculate:
+                    total_prize_pool_usd = None
+                    reward_per_winner_usd = None
+                    promo['total_prize_pool_usd'] = None
+                    promo['reward_per_winner_usd'] = None
+                
+                # Пропускаем если нет токена или уже есть USD значения
+                if not award_token:
+                    continue
+                    
+                # Очищаем символ токена (может содержать числа типа "2000 SCOR")
+                clean_token = award_token.upper().strip()
+                # Убираем числа из начала если есть
+                token_match = re.search(r'([A-Z]{2,10})$', clean_token)
+                if token_match:
+                    clean_token = token_match.group(1)
+                
+                # Проверяем на стейблкоин
+                is_stablecoin = clean_token in self.STABLECOINS
+                
+                token_price = None
+                if is_stablecoin:
+                    token_price = 1.0
+                else:
+                    try:
+                        token_price = self.price_fetcher.get_token_price(clean_token, preferred_exchange=exchange)
+                    except Exception as e:
+                        logger.debug(f"⚠️ Не удалось получить цену {clean_token}: {e}")
+                
+                if not token_price:
+                    continue
+                
+                promo_enriched = False
+                
+                # Обогащаем total_prize_pool_usd если отсутствует
+                if not total_prize_pool_usd and total_prize_pool:
+                    try:
+                        pool_str = str(total_prize_pool).replace(',', '').replace(' ', '')
+                        pool_num = float(pool_str)
+                        promo['total_prize_pool_usd'] = pool_num * token_price
+                        promo_enriched = True
+                        logger.debug(f"💰 Обогащено: {promo.get('title')} - pool_usd=${promo['total_prize_pool_usd']:.2f}")
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Обогащаем reward_per_winner_usd если отсутствует
+                if not reward_per_winner_usd and reward_per_winner:
+                    try:
+                        # Парсим число из строки типа "2000 SCOR" или "20 USDT"
+                        reward_match = re.match(r'([\d,]+(?:\.\d+)?)', str(reward_per_winner).replace(' ', ''))
+                        if reward_match:
+                            reward_num = float(reward_match.group(1).replace(',', ''))
+                            promo['reward_per_winner_usd'] = reward_num * token_price
+                            promo_enriched = True
+                    except (ValueError, TypeError):
+                        pass
+                
+                if promo_enriched:
+                    enriched_count += 1
+                
+                # === MEXC AIRDROP: Обогащаем token_price для пула токенов ===
+                token_pool = promo.get('token_pool')
+                token_pool_currency = promo.get('token_pool_currency')
+                if token_pool and token_pool_currency and not promo.get('token_price'):
+                    try:
+                        clean_pool_token = str(token_pool_currency).upper().strip()
+                        if clean_pool_token in self.STABLECOINS:
+                            promo['token_price'] = 1.0
+                            logger.debug(f"💵 MEXC Airdrop: {promo.get('title')} - {clean_pool_token} = стейблкоин")
+                        else:
+                            pool_token_price = self.price_fetcher.get_token_price(clean_pool_token, preferred_exchange='MEXC')
+                            if pool_token_price:
+                                promo['token_price'] = pool_token_price
+                                logger.info(f"💵 MEXC Airdrop: {promo.get('title')} - цена {clean_pool_token} = ${pool_token_price:.6f}")
+                    except Exception as e:
+                        logger.debug(f"⚠️ Не удалось получить цену {token_pool_currency}: {e}")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка обогащения промо {promo.get('title')}: {e}")
+                continue
+        
+        if enriched_count > 0:
+            logger.info(f"💰 Обогащено ценами: {enriched_count}/{len(promotions)} промоакций")
+        
+        return promotions
+
+    def _calculate_usd_value(self, amount: Any, token: str, exchange: str = None) -> Optional[float]:
+        """
+        Рассчитывает USD-эквивалент для суммы токенов.
+        
+        Args:
+            amount: Сумма (число или строка)
+            token: Символ токена
+            exchange: Название биржи (для предпочтительного источника цен)
+            
+        Returns:
+            USD-эквивалент или None
+        """
+        if not self.price_fetcher or not amount or not token:
+            return None
+        
+        try:
+            # Очищаем символ токена
+            clean_token = token.upper().strip()
+            token_match = re.search(r'([A-Z]{2,10})$', clean_token)
+            if token_match:
+                clean_token = token_match.group(1)
+            
+            # Проверяем на стейблкоин
+            if clean_token in self.STABLECOINS:
+                token_price = 1.0
+            else:
+                token_price = self.price_fetcher.get_token_price(clean_token, preferred_exchange=exchange)
+            
+            if not token_price:
+                return None
+            
+            # Парсим сумму
+            amount_str = str(amount).replace(',', '').replace(' ', '')
+            amount_num = float(amount_str)
+            
+            return amount_num * token_price
+            
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка расчёта USD для {amount} {token}: {e}")
+            return None
     
     def _save_to_history(self, link_id: int, promotions: List[Dict]) -> int:
         """Сохраняет промоакции в историю с валидацией"""
@@ -434,10 +853,17 @@ class ParserService:
                             winners_count=self._safe_int(promo.get('winners_count')),
                             reward_per_winner=str(promo.get('reward_per_winner', '')) if promo.get('reward_per_winner') else None,
                             reward_per_winner_usd=self._safe_float(promo.get('reward_per_winner_usd')),
-                            conditions=promo.get('conditions', ''),
-                            reward_type=str(promo.get('reward_type', '')) if promo.get('reward_type') else None,
+                            # Условия и тип награды - конвертируем массивы в строки
+                            conditions=', '.join(promo.get('conditions')) if isinstance(promo.get('conditions'), list) else str(promo.get('conditions', '')) if promo.get('conditions') else None,
+                            reward_type=', '.join(promo.get('reward_type')) if isinstance(promo.get('reward_type'), list) else str(promo.get('reward_type', '')) if promo.get('reward_type') else None,
                             total_prize_pool_usd=self._safe_float(promo.get('total_prize_pool_usd')),
-                            status=str(promo.get('status', '')) if promo.get('status') else None
+                            status=str(promo.get('status', '')) if promo.get('status') else None,
+                            # Gate.io специфичные поля
+                            max_reward_per_user=str(promo.get('user_max_rewards', '')) if promo.get('user_max_rewards') else None,
+                            # MEXC Airdrop специфичные поля (раздельные пулы)
+                            token_pool=self._safe_float(promo.get('token_pool')),
+                            token_pool_currency=str(promo.get('token_pool_currency', '')) if promo.get('token_pool_currency') else None,
+                            bonus_usdt=self._safe_float(promo.get('bonus_usdt'))
                         )
                         db.add(history_item)
                         saved_count += 1
@@ -449,6 +875,18 @@ class ParserService:
                 # Явный commit для уверенности
                 db.commit()
                 logger.info(f"💾 Успешно сохранено {saved_count} промоакций")
+                
+                # Записываем историю участников для отслеживания изменений
+                try:
+                    from services.participants_tracker_service import ParticipantsTrackerService
+                    # Получаем exchange из первой промоакции
+                    if promotions:
+                        exchange = promotions[0].get('exchange', 'Unknown')
+                        recorded = ParticipantsTrackerService.record_batch(exchange, promotions)
+                        if recorded > 0:
+                            logger.debug(f"📊 Записано {recorded} записей в историю участников")
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка записи истории участников: {e}")
 
         except Exception as e:
             logger.error(f"❌ Критическая ошибка сохранения в историю: {e}")
@@ -691,6 +1129,13 @@ class ParserService:
 
                 if link.category != 'announcement':
                     logger.error(f"❌ Ссылка {link_id} не является announcement (category={link.category})")
+                    return None
+
+                # ПРОВЕРКА НА TELEGRAM ТИП: этот метод не предназначен для Telegram ссылок
+                if link.parsing_type == 'telegram':
+                    logger.warning(f"⚠️ Ссылка {link_id} имеет тип 'telegram' - используйте TelegramMonitor для проверки")
+                    logger.info(f"   Telegram канал: {link.telegram_channel}")
+                    logger.info(f"   💡 Для Telegram ссылок используйте принудительную проверку через бота")
                     return None
 
                 # ПРОВЕРЯЕМ СПЕЦИАЛЬНЫЙ ПАРСЕР

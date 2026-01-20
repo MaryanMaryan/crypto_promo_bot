@@ -1711,10 +1711,18 @@ class StakingParser:
         - BFUSD: BFUSD Earn
         - RWUSD: RWUSD Earn
         - ARBITRAGE_BOT: Arbitrage Bot
+        
+        ИСКЛЮЧАЕМЫЕ ПРОДУКТЫ:
+        - DUAL_CURRENCY: Dual Investment (APR часто меняется, не классический стейкинг)
+        - ARBITRAGE_BOT: Арбитражный бот (не является стейкингом)
         """
         try:
             product_type = product.get('productType', 'Unknown')
             product_id = product.get('productId', '')
+            
+            # Пропускаем продукты, которые не являются классическим стейкингом
+            if product_type in ('DUAL_CURRENCY', 'ARBITRAGE_BOT'):
+                return None
             
             # APR
             max_apr = float(product.get('maxApr', 0)) * 100

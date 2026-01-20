@@ -16,4 +16,14 @@ try:
 except ImportError:
     pass
 
-__all__ = ['BaseParser', 'UniversalParser', 'UniversalFallbackParser', 'WeexParser']
+try:
+    from .browser_parser import BrowserParser
+except ImportError:
+    pass
+
+try:
+    from .async_browser_parser import AsyncBrowserParser
+except ImportError:
+    pass
+
+__all__ = ['BaseParser', 'UniversalParser', 'UniversalFallbackParser', 'WeexParser', 'BrowserParser', 'AsyncBrowserParser']

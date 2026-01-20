@@ -199,6 +199,16 @@ class PromoHistory(Base):
     total_prize_pool_usd = Column(Float, nullable=True)  # Призовой пул в USD
     status = Column(String, nullable=True)  # Статус: ongoing, upcoming, ended
     last_updated = Column(DateTime, nullable=True)  # Время последнего обновления данных
+
+    # ПОЛЯ ДЛЯ MEXC AIRDROP (раздельные пулы)
+    token_pool = Column(Float, nullable=True)  # Пул токенов (например 500000.0 COCO)
+    token_pool_currency = Column(String, nullable=True)  # Валюта токен-пула (например "COCO")
+    bonus_usdt = Column(Float, nullable=True)  # Бонусный пул в USDT (например 25000.0)
+    token_price = Column(Float, nullable=True)  # Цена токена в USD (для расчёта эквивалента пула)
+    
+    # ПОЛЯ ДЛЯ MEXC LAUNCHPAD (полные данные API)
+    promo_type = Column(String, nullable=True)  # Тип промо: mexc_launchpad, mexc_airdrop, okx_boost и т.д.
+    raw_data = Column(Text, nullable=True)  # JSON с полными данными из API
     
     api_link = relationship("ApiLink", backref="promos")
     

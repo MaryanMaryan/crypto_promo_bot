@@ -157,6 +157,12 @@ class TelegramParser:
                 logger.error("❌ Telegram API не настроен. Настройте API_ID и API_HASH в разделе 'Обход блокировок'")
                 return False
 
+            # ВАЖНО: Отключаем старые клиенты перед подключением новых
+            if self.clients:
+                logger.info("🔄 Отключение предыдущих соединений перед переподключением...")
+                await self.disconnect()
+                await asyncio.sleep(1)  # Даём время на закрытие соединений
+
             # Загружаем аккаунты из БД
             accounts = self._load_accounts_from_db()
 
@@ -261,37 +267,62 @@ class TelegramParser:
             return False
 
     async def disconnect(self):
-        """Отключение всех аккаунтов от Telegram"""
+        """Отключение всех аккаунтов от Telegram с таймаутом"""
         disconnected_count = 0
+        
         for account_id, client_data in list(self.clients.items()):
             try:
-                if client_data['is_connected']:
-                    await client_data['client'].disconnect()
+                if client_data.get('is_connected') and client_data.get('client'):
+                    client = client_data['client']
+                    account_name = client_data.get('account', {}).get('name', f'ID {account_id}')
+                    
+                    # Отключаем с таймаутом 5 секунд
+                    try:
+                        await asyncio.wait_for(client.disconnect(), timeout=5.0)
+                        logger.info(f"👋 Отключен аккаунт {account_name}")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"⏰ Таймаут отключения аккаунта {account_name}, принудительное закрытие")
+                        # Принудительно закрываем соединение
+                        if hasattr(client, '_sender') and client._sender:
+                            try:
+                                client._sender._transport = None
+                            except:
+                                pass
+                    
                     client_data['is_connected'] = False
                     disconnected_count += 1
-                    logger.info(f"👋 Отключен аккаунт {client_data['account']['name']}")
             except Exception as e:
-                logger.warning(f"⚠️ Ошибка отключения аккаунта {client_data['account']['name']}: {e}")
-
+                logger.warning(f"⚠️ Ошибка отключения аккаунта: {e}")
+                client_data['is_connected'] = False
+        
+        # Очищаем словарь клиентов
+        self.clients.clear()
         self.is_connected = False
         logger.info(f"👋 Отключено {disconnected_count} аккаунтов от Telegram")
 
     def __del__(self):
         """Деструктор для гарантированного закрытия всех клиентов"""
+        # НЕ используем asyncio в деструкторе - это вызывает ошибки "Task was destroyed but it is pending"
+        # Вместо этого просто помечаем клиенты как отключенные
+        # Реальное отключение должно происходить через await disconnect() до уничтожения объекта
         if hasattr(self, 'clients') and self.clients:
-            try:
-                # Получаем event loop
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Если loop уже запущен, создаем задачу на отключение
-                    for client_data in self.clients.values():
-                        if client_data['is_connected']:
-                            asyncio.create_task(client_data['client'].disconnect())
-                else:
-                    # Если loop не запущен, запускаем синхронно
-                    loop.run_until_complete(self.disconnect())
-            except:
-                pass  # Игнорируем ошибки в деструкторе
+            for client_data in list(self.clients.values()):
+                try:
+                    client_data['is_connected'] = False
+                    # Очищаем ссылку на transport для предотвращения утечки ресурсов
+                    client = client_data.get('client')
+                    if client and hasattr(client, '_sender') and client._sender:
+                        try:
+                            if hasattr(client._sender, '_transport'):
+                                client._sender._transport = None
+                        except:
+                            pass
+                except:
+                    pass
+            self.clients.clear()
+        
+        if hasattr(self, 'is_connected'):
+            self.is_connected = False
 
     async def get_channel_info(self, channel_username: str, account_id: Optional[int] = None) -> Optional[Dict]:
         """

@@ -68,7 +68,8 @@
       "Bash(echo:*)",
       "WebFetch(domain:www.gate.com)",
       "Bash(tree:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(test:*)"
     ],
     "deny": [],
     "ask": []

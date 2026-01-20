@@ -4,14 +4,19 @@ import re
 from aiogram import Bot
 from typing import List, Dict, Any, Optional, Tuple
 
+# Универсальный форматтер заголовков
+from utils.promo_formatter import format_promo_header, format_promo_header_simple, get_exchange_icon, get_category_icon
+
 logger = logging.getLogger(__name__)
 
 class NotificationService:
-    def __init__(self, bot: Bot, price_fetcher=None):
+    def __init__(self, bot: Bot, price_fetcher=None, skip_price_fetch: bool = False):
         self.bot = bot
         self.price_fetcher = price_fetcher
+        self.skip_price_fetch = skip_price_fetch
 
-        # Если price_fetcher не передан, создаем его
+        # ИЗМЕНЕНО: Всегда создаём price_fetcher для fallback случаев
+        # skip_price_fetch теперь означает "не запрашивать цены активно, только как fallback"
         if self.price_fetcher is None:
             try:
                 from utils.price_fetcher import get_price_fetcher
@@ -188,14 +193,19 @@ class NotificationService:
     def format_promo_message(self, promo: Dict[str, Any]) -> str:
         """Форматирует сообщение о промоакции в красивый HTML"""
         try:
-            message = "🎉 <b>НОВАЯ ПРОМОАКЦИЯ!</b>\n\n"
-
-            # Биржа
-            message += f"<b>🏢 Биржа:</b> {self.escape_html(promo.get('exchange', 'Unknown'))}\n"
+            # НОВЫЙ УНИВЕРСАЛЬНЫЙ ЗАГОЛОВОК
+            header = format_promo_header(
+                exchange=promo.get('exchange'),
+                promo_type=promo.get('promo_type'),
+                promo_id=promo.get('promo_id'),
+                url=promo.get('link'),
+                is_new=True
+            )
+            message = f"{header}\n\n"
 
             # Название
             if promo.get('title'):
-                message += f"<b>📌 Название:</b> {self.escape_html(promo['title'])}\n"
+                message += f"📛 <b>Название:</b> {self.escape_html(promo['title'])}\n"
             
             # НОВОЕ: Найденные ключевые слова (для Telegram парсера)
             # Определяем Telegram сообщения по promo_id (начинается с 'telegram_')
@@ -576,7 +586,8 @@ class NotificationService:
         total_pages: int,
         exchange_name: str = "OKX Flash Earn",
         min_apr: float = None,
-        page_url: str = None
+        page_url: str = None,
+        last_checked: 'datetime' = None
     ) -> str:
         """
         Форматирует страницу OKX Flash Earn с группировкой по проектам.
@@ -589,22 +600,27 @@ class NotificationService:
             exchange_name: Название биржи
             min_apr: Фильтр APR
             page_url: Ссылка
+            last_checked: Время последней проверки (UTC)
 
         Returns:
             Отформатированное HTML сообщение
         """
         try:
-            from datetime import datetime
+            from datetime import datetime, timedelta
 
-            # Заголовок
-            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+            # Заголовок - используем last_checked если есть, иначе текущее время
+            if last_checked and isinstance(last_checked, datetime):
+                local_time = last_checked + timedelta(hours=2)
+                now = local_time.strftime("%d.%m.%Y %H:%M")
+            else:
+                now = (datetime.utcnow() + timedelta(hours=2)).strftime("%d.%m.%Y %H:%M")
+            
             message = f"📈 <b>ТЕКУЩИЕ СТЕЙКИНГИ</b>\n\n"
             message += f"<b>🏦 Биржа:</b> {self.escape_html(exchange_name)}\n"
-            message += f"<b>🕐 Обновлено:</b> {now}\n\n"
+            message += f"<b>⏱️ Обновлено:</b> {now}\n\n"
 
             if not stakings_with_deltas:
                 message += "📭 <i>Нет активных проектов</i>\n\n"
-                message += f"📄 Страница {page} из {total_pages}\n"
                 return message
 
             # Группируем стейкинги по проектам (reward_coin + start_time + end_time)
@@ -799,9 +815,6 @@ class NotificationService:
                     message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 else:
                     message += "\n"
-
-            # Пагинация
-            message += f"📄 Страница {page} из {total_pages}\n"
 
             # Ссылка
             if page_url:
@@ -1090,7 +1103,8 @@ class NotificationService:
         total_pages: int,
         exchange_name: str,
         min_apr: float = None,
-        page_url: str = None
+        page_url: str = None,
+        last_checked: 'datetime' = None
     ) -> str:
         """
         Форматирует страницу текущих стейкингов с историей изменений
@@ -1105,31 +1119,35 @@ class NotificationService:
             exchange_name: Название биржи
             min_apr: Минимальный APR фильтр (если установлен)
             page_url: Ссылка на страницу стейкингов
+            last_checked: Время последней проверки (UTC)
 
         Returns:
             Отформатированное HTML сообщение
         """
         try:
-            from datetime import datetime
+            from datetime import datetime, timedelta
 
-            # Заголовок
-            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+            # Заголовок - используем last_checked если есть, иначе текущее время
+            if last_checked and isinstance(last_checked, datetime):
+                # Конвертируем UTC в UTC+2
+                local_time = last_checked + timedelta(hours=2)
+                now = local_time.strftime("%d.%m.%Y %H:%M")
+            else:
+                now = (datetime.utcnow() + timedelta(hours=2)).strftime("%d.%m.%Y %H:%M")
+            
             message = f"📈 <b>ТЕКУЩИЕ СТЕЙКИНГИ</b>\n\n"
             message += f"<b>🏦 Биржа:</b> {self.escape_html(exchange_name)}\n"
 
             if min_apr is not None:
                 message += f"<b>🔍 Фильтр APR:</b> ≥ {min_apr}%\n"
 
-            message += f"<b>🕐 Обновлено:</b> {now}\n\n"
+            message += f"<b>⏱️ Обновлено:</b> {now}\n"
             message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
             # Если стейкингов нет
             if not stakings_with_deltas:
                 message += "📭 <i>Нет стейкингов, соответствующих фильтру</i>\n\n"
                 message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-                # Пагинация
-                message += f"📄 Страница {page} из {total_pages}\n"
 
                 if page_url:
                     message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
@@ -1435,9 +1453,6 @@ class NotificationService:
                 else:
                     message += "\n"
 
-            # Пагинация
-            message += f"📄 Страница {page} из {total_pages}\n"
-
             # Ссылка на биржу
             if page_url:
                 message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
@@ -1478,18 +1493,15 @@ class NotificationService:
         try:
             from datetime import datetime, timedelta
 
-            # Заголовок
-            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+            # Заголовок (время обновления добавляется в handlers.py)
             message = f"🎁 <b>ТЕКУЩИЕ ПРОМОАКЦИИ</b>\n\n"
             message += f"<b>🏦 Биржа:</b> {self.escape_html(exchange_name)}\n"
-            message += f"<b>🕐 Обновлено:</b> {now}\n\n"
             message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
             # Если промоакций нет
             if not promos:
                 message += "📭 <i>Нет активных промоакций</i>\n\n"
                 message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                message += f"📄 Страница {page} из {total_pages}\n"
                 if page_url:
                     message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
                 return message
@@ -1524,50 +1536,19 @@ class NotificationService:
                 # Получаем winners_count заранее для секции НАГРАДА
                 winners = promo.get('winners_count')
                 
-                # === АВТОМАТИЧЕСКОЕ ПОЛУЧЕНИЕ ЦЕН ЧЕРЕЗ PRICE_FETCHER ===
-                # Если нет USD эквивалентов, пытаемся получить цену токена
-                token_price = None
-                if self.price_fetcher and award_token:
-                    # Очищаем символ токена (может содержать числа типа "2000 SCOR")
-                    clean_token = award_token.upper().strip()
-                    # Убираем числа из начала если есть
-                    import re
-                    token_match = re.search(r'([A-Z]{2,10})$', clean_token)
-                    if token_match:
-                        clean_token = token_match.group(1)
-                    
-                    try:
-                        token_price = self.price_fetcher.get_token_price(clean_token, preferred_exchange='bybit')
-                    except Exception as e:
-                        logger.debug(f"⚠️ Не удалось получить цену {clean_token}: {e}")
-                
-                # Рассчитываем USD для призового пула если нет
-                if not total_pool_usd and total_pool and token_price:
-                    try:
-                        pool_num = float(str(total_pool).replace(',', '').replace(' ', ''))
-                        total_pool_usd = pool_num * token_price
-                    except (ValueError, TypeError):
-                        pass
-                
-                # Рассчитываем USD для награды на место если нет
-                # ВАЖНО: проверяем, не содержит ли reward_per_winner уже стейблкоин
+                # USD данные берём только из БД - цены обновляются при парсинге
+                # Для стейблкоинов в reward_per_winner - рассчитываем на месте
                 STABLECOINS = {'USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP'}
                 reward_str_upper = str(reward_per_winner).upper() if reward_per_winner else ''
                 reward_is_stablecoin = any(stable in reward_str_upper for stable in STABLECOINS)
                 
-                if not reward_per_winner_usd and reward_per_winner:
+                if not reward_per_winner_usd and reward_per_winner and reward_is_stablecoin:
                     try:
-                        # Парсим число из строки типа "2000 SCOR" или "20 USDT"
+                        # Парсим число из строки типа "20 USDT"
                         reward_match = re.match(r'([\d,]+(?:\.\d+)?)', str(reward_per_winner).replace(' ', ''))
                         if reward_match:
                             reward_num = float(reward_match.group(1).replace(',', ''))
-                            
-                            if reward_is_stablecoin:
-                                # Если это стейблкоин - цена = само число
-                                reward_per_winner_usd = reward_num
-                            elif token_price:
-                                # Иначе умножаем на цену токена
-                                reward_per_winner_usd = reward_num * token_price
+                            reward_per_winner_usd = reward_num
                     except (ValueError, TypeError):
                         pass
                 
@@ -1578,7 +1559,31 @@ class NotificationService:
                 if total_pool or reward_per_winner:
                     message += "\n💰 <b>НАГРАДА:</b>\n"
                     
-                    if total_pool:
+                    # === СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ MEXC AIRDROP ===
+                    # MEXC Airdrop имеет два пула: token_pool (токены) и bonus_usdt (USDT)
+                    token_pool = promo.get('token_pool')
+                    token_pool_currency = promo.get('token_pool_currency')
+                    bonus_usdt = promo.get('bonus_usdt')
+                    token_price = promo.get('token_price')
+                    
+                    if token_pool or bonus_usdt:
+                        # Показываем пулы MEXC Airdrop отдельно
+                        if token_pool and token_pool_currency:
+                            pool_str = f"{token_pool:,.0f} {token_pool_currency}"
+                            # Пытаемся получить USD для токен-пула
+                            token_pool_usd = None
+                            if token_price:
+                                token_pool_usd = token_pool * token_price
+                            if token_pool_usd:
+                                message += f"   • Пул токенов: {self.escape_html(pool_str)} (~${token_pool_usd:,.0f})\n"
+                            else:
+                                message += f"   • Пул токенов: {self.escape_html(pool_str)}\n"
+                        
+                        if bonus_usdt:
+                            # USDT = USD, поэтому не показываем эквивалент
+                            message += f"   • Бонус USDT: {bonus_usdt:,.0f} USDT\n"
+                    elif total_pool:
+                        # Стандартная обработка для других бирж
                         # Форматируем призовой пул с токеном
                         pool_str = str(total_pool)
                         # Добавляем токен если его нет в строке пула
@@ -1685,8 +1690,12 @@ class NotificationService:
                                 message += f"   • Осталось: {minutes} мин.\n"
 
                 # Тип награды (только если это не просто число)
+                # Для MEXC Airdrop не показываем reward_type, т.к. пулы уже детализированы выше
+                token_pool = promo.get('token_pool')
+                bonus_usdt = promo.get('bonus_usdt')
+
                 reward_type = promo.get('reward_type', '')
-                if reward_type:
+                if reward_type and not (token_pool or bonus_usdt):
                     # Пропускаем если это просто число (код типа)
                     try:
                         int(str(reward_type))
@@ -1705,9 +1714,6 @@ class NotificationService:
                     message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 else:
                     message += "\n"
-
-            # Пагинация
-            message += f"📄 Страница {page} из {total_pages}\n"
 
             # Ссылка на биржу
             if page_url:
@@ -1734,74 +1740,168 @@ class NotificationService:
         show_only_active: bool = True
     ) -> str:
         """
-        Форматирует страницу OKX Boost (X Launch) промоакций - табличный формат с датами
+        Форматирует страницу OKX Boost (X Launch) промоакций
+        Формат:
+        🪂 Sport.Fun X Launch (FUN) ⛓ Base
+        📊 Статус: ✅ Активна
+        
+        💰 ОПИСАНИЕ:
+           • Призовой пул: 4,000,000 FUN (~$320,320)
+           • Участников: 24,998
+           • 6 часов: +100 (+0.4%)
+        
+        ⏰ ПЕРИОД АКЦИИ:
+           • Период: 15.01.2026 12:00 / 31.01.2026 14:00
+           • Осталось: 11 дн. 13 ч.
+        
+        🔗 https://web3.okx.com/ua/boost/x-launch/sportfun
         """
         try:
-            from datetime import datetime
+            from datetime import datetime, timedelta
             
-            def fmt_time(ts):
-                if not ts: return ''
+            def fmt_datetime(ts):
+                """Форматирует timestamp в дату-время"""
+                if not ts: 
+                    return ''
                 dt = datetime.fromtimestamp(ts / 1000) if ts > 10**10 else datetime.fromtimestamp(ts)
-                return dt.strftime('%d.%m %H:%M')
+                return dt.strftime('%d.%m.%Y %H:%M')
             
-            # Заголовок
-            message = f"🚀 <b>OKX X LAUNCH</b>\n\n"
+            def get_datetime(ts):
+                """Конвертирует timestamp в datetime объект"""
+                if not ts:
+                    return None
+                return datetime.fromtimestamp(ts / 1000) if ts > 10**10 else datetime.fromtimestamp(ts)
+            
+            # Маппинг chain_id -> короткое название сети
+            chain_short_names = {
+                'Ethereum': 'ETH',
+                'BNB Chain': 'BSC',
+                'Polygon': 'Polygon',
+                'Base': 'Base',
+                'Arbitrum': 'Arbitrum',
+                'Sui': 'Sui',
+                'Solana': 'SOL',
+                'Plasma': 'Plasma',
+                'Linea': 'Linea'
+            }
+            
+            # Заголовок (время обновления добавляется в handlers.py)
+            message = f"🎁 <b>ТЕКУЩИЕ ПРОМОАКЦИИ</b>\n\n"
+            message += f"<b>🏦 Биржа:</b> OKX boost\n"
+            message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             
             # Если промоакций нет
             if not promos:
-                message += "📭 <i>Нет активных launchpool'ов</i>"
+                message += "📭 <i>Нет активных launchpool'ов</i>\n\n"
+                message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 return message
             
             # Форматируем каждый launchpool
             for idx, promo in enumerate(promos):
                 title = promo.get('title', 'Без названия')
-                home_name = promo.get('home_name', '')
                 award_token = promo.get('award_token', '')
                 total_pool = promo.get('total_prize_pool', 0)
+                total_pool_usd = promo.get('total_prize_pool_usd')
                 chain_name = promo.get('chain_name', '')
                 participants = promo.get('participants_count', 0)
                 link = promo.get('link', '')
-                join_end = promo.get('join_end_time')
-                claim_start = promo.get('claim_start_time')
                 
-                # Статус
+                # Времена
+                join_start = promo.get('join_start_time')
+                join_end = promo.get('join_end_time')
+                end_time = promo.get('end_time')
+                
+                # Короткое название сети
+                chain_short = chain_short_names.get(chain_name, chain_name)
+                
+                # === ЗАГОЛОВОК: Название (TOKEN) ⛓ Сеть ===
+                if award_token and award_token not in title:
+                    message += f"🪂 <b>{self.escape_html(title)}</b> ({self.escape_html(award_token)})"
+                else:
+                    message += f"🪂 <b>{self.escape_html(title)}</b>"
+                
+                if chain_short:
+                    message += f" ⛓ {self.escape_html(chain_short)}"
+                message += "\n"
+                
+                # === СТАТУС ===
                 status = promo.get('status', '')
                 if status == 'ongoing':
-                    status_icon = "✅"
+                    message += f"📊 <b>Статус:</b> ✅ Активна\n"
                 elif status == 'upcoming':
-                    status_icon = "🔜"
-                else:
-                    status_icon = "⏹"
+                    message += f"📊 <b>Статус:</b> 🔜 Скоро\n"
+                elif status == 'ended':
+                    message += f"📊 <b>Статус:</b> ⏹ Завершена\n"
                 
-                # Название проекта
-                display_name = home_name if home_name else title.replace(' X Launch', '')
-                message += f"{status_icon} <b>{self.escape_html(display_name)}</b>\n"
+                # === ОПИСАНИЕ (Призовой пул + Участники) ===
+                message += "\n💰 <b>ОПИСАНИЕ:</b>\n"
                 
-                # Призовой пул и сеть
+                # Призовой пул
                 if total_pool and award_token:
-                    message += f"├ 💰 {total_pool:,.0f} {award_token}"
-                    if chain_name:
-                        message += f" ({chain_name})"
-                    message += "\n"
+                    pool_str = f"{total_pool:,.0f} {award_token}"
+                    if total_pool_usd:
+                        message += f"   • Призовой пул: {self.escape_html(pool_str)} (~${total_pool_usd:,.0f})\n"
+                    else:
+                        # USD данные берём только из БД - цены обновляются при парсинге
+                        message += f"   • Призовой пул: {self.escape_html(pool_str)}\n"
                 
                 # Участники
                 if participants:
-                    message += f"├ 👥 {participants:,}\n"
+                    message += f"   • Участников: {participants:,}\n"
                 
-                # Регистрация до
-                if join_end:
-                    message += f"├ 📝 Рег до: {fmt_time(join_end)}\n"
+                # Статистика участников за 6ч/12ч/24ч
+                participants_stats = promo.get('participants_stats', {})
+                has_any_history = any(f'{h}h' in participants_stats for h in [6, 12, 24])
                 
-                # Клейм
-                if claim_start:
-                    message += f"├ 🎁 Клейм: {fmt_time(claim_start)}\n"
+                if has_any_history:
+                    for hours in [6, 12, 24]:
+                        key = f'{hours}h'
+                        if key in participants_stats:
+                            stat = participants_stats[key]
+                            diff = stat.get('diff', 0)
+                            percent = stat.get('percent', 0)
+                            sign = '+' if diff > 0 else ''
+                            message += f"   • {hours} часов: {sign}{diff:,} ({sign}{percent:.0f}%)\n"
                 
-                # Ссылка
+                # === ПЕРИОД АКЦИИ ===
+                start_dt = get_datetime(join_start)
+                end_dt = get_datetime(join_end) or get_datetime(end_time)
+                
+                if start_dt or end_dt:
+                    message += "\n⏰ <b>ПЕРИОД АКЦИИ:</b>\n"
+                    
+                    if start_dt and end_dt:
+                        message += f"   • Период: {start_dt.strftime('%d.%m.%Y %H:%M')} / {end_dt.strftime('%d.%m.%Y %H:%M')}\n"
+                    elif end_dt:
+                        message += f"   • Конец: {end_dt.strftime('%d.%m.%Y %H:%M')}\n"
+                    elif start_dt:
+                        message += f"   • Начало: {start_dt.strftime('%d.%m.%Y %H:%M')}\n"
+                    
+                    # Оставшееся время
+                    if end_dt:
+                        now_dt = datetime.utcnow()
+                        if end_dt > now_dt:
+                            remaining = end_dt - now_dt
+                            days = remaining.days
+                            hours = remaining.seconds // 3600
+                            
+                            if days > 0:
+                                message += f"   • Осталось: {days} дн. {hours} ч.\n"
+                            elif hours > 0:
+                                minutes = (remaining.seconds % 3600) // 60
+                                message += f"   • Осталось: {hours} ч. {minutes} мин.\n"
+                            else:
+                                minutes = remaining.seconds // 60
+                                message += f"   • Осталось: {minutes} мин.\n"
+                
+                # === ССЫЛКА ===
                 if link:
-                    message += f"└ 🔗 {self.escape_html(link)}\n"
+                    message += f"\n🔗 {self.escape_html(link)}\n"
                 
-                # Разделитель
+                # Разделитель между промоакциями
                 if idx < len(promos) - 1:
+                    message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                else:
                     message += "\n"
             
             # Проверяем лимит Telegram
@@ -1859,11 +1959,9 @@ class NotificationService:
                     return ', '.join(reward_type)
                 return str(reward_type)
 
-            # Заголовок
-            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+            # Заголовок (время обновления добавляется в handlers.py)
             message = f"🎁 <b>ТЕКУЩИЕ ПРОМОАКЦИИ</b>\n\n"
             message += f"<b>🏦 Биржа:</b> GateCandy\n"
-            message += f"<b>🕐 Обновлено:</b> {now} UTC\n\n"
             message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
             # Если промоакций нет
@@ -1910,36 +2008,12 @@ class NotificationService:
                 total_pool = promo.get('total_prize_pool')
                 max_reward = promo.get('user_max_rewards')
                 
-                # === АВТОМАТИЧЕСКОЕ ПОЛУЧЕНИЕ ЦЕН ИЗ PRICE_FETCHER ===
-                # Используем price_fetcher для расчёта USD вместо данных Gate API
-                token_price = None
-                total_pool_usd = None
-                max_reward_usd = None
+                # USD данные берём только из БД - цены обновляются при парсинге
+                total_pool_usd = promo.get('total_prize_pool_usd')
+                reward_per_winner_usd = promo.get('reward_per_winner_usd')
                 
-                if self.price_fetcher and award_token:
-                    clean_token = award_token.upper().strip()
-                    token_match = re.search(r'([A-Z]{2,10})$', clean_token)
-                    if token_match:
-                        clean_token = token_match.group(1)
-                    try:
-                        token_price = self.price_fetcher.get_token_price(clean_token, preferred_exchange='gateio')
-                    except:
-                        pass
-                
-                # ВСЕГДА рассчитываем USD через price_fetcher (не используем данные Gate)
-                if total_pool and token_price:
-                    try:
-                        pool_num = float(str(total_pool).replace(',', '').replace(' ', ''))
-                        total_pool_usd = pool_num * token_price
-                    except:
-                        pass
-                
-                if max_reward and token_price:
-                    try:
-                        max_num = float(str(max_reward).replace(',', '').replace(' ', ''))
-                        max_reward_usd = max_num * token_price
-                    except:
-                        pass
+                # Для max_reward_usd используем reward_per_winner_usd если есть (для Gate.io это то же самое)
+                max_reward_usd = reward_per_winner_usd
                 
                 has_reward_info = total_pool or max_reward
                 if has_reward_info:
@@ -1960,10 +2034,6 @@ class NotificationService:
                             message += f"   • Макс. на юзера: {max_str} (~${fmt_number(max_reward_usd)})\n"
                         else:
                             message += f"   • Макс. на юзера: {max_str}\n"
-                    
-                    # Курс токена из price_fetcher (не из Gate)
-                    if token_price and award_token:
-                        message += f"   • Курс: ${token_price:.6g}\n"
                 
                 # Участники с полной статистикой
                 participants = promo.get('participants_count')
@@ -2086,12 +2156,9 @@ class NotificationService:
                     minutes = remaining.seconds // 60
                     return f'{minutes}м'
 
-            # Заголовок
-            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+            # Заголовок (время обновления добавляется в handlers.py)
             message = f"🪂 <b>MEXC AIRDROP</b>\n\n"
             message += f"<b>🏦 Биржа:</b> MEXC\n"
-            message += f"<b>🕐 Обновлено:</b> {now} UTC\n"
-            message += f"<b>📄 Страница:</b> {page}/{total_pages}\n\n"
             message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
             # Если промоакций нет
@@ -2101,9 +2168,9 @@ class NotificationService:
                     message += f"\n🔗 {self.escape_html(page_url)}\n"
                 return message
 
-            # Форматируем каждую промоакцию (компактный формат)
+            # Форматируем каждую промоакцию (чистый формат без дерева)
             for idx, promo in enumerate(promos):
-                title = promo.get('title', 'Без названия')
+                title = promo.get('title', 'Без назви')
                 token = promo.get('award_token', '')
                 status = promo.get('status', '')
                 
@@ -2124,42 +2191,33 @@ class NotificationService:
                 # Только для новых пользователей
                 join_user_type = promo.get('join_user_type')
                 if join_user_type == 'new_users':
-                    message += f"├ 👤 <i>Только для новых пользователей</i>\n"
+                    message += f"   👤 <i>Тільки для нових користувачів</i>\n"
                 
-                # Призовой пул
+                # Призовой пул (BONUS награда)
                 total_pool = promo.get('total_prize_pool')
+                reward_currency = promo.get('reward_currency', 'USDT')
+                participants = promo.get('participants_count') or 0
+                
                 if total_pool and float(total_pool) > 0:
-                    pool_str = f"{fmt_number(total_pool)} {token}" if token else fmt_number(total_pool)
+                    pool_str = f"{fmt_number(total_pool)} {reward_currency}"
+                    message += f"   💰 Пул: <b>{pool_str}</b>\n"
                     
-                    # Пытаемся получить USD цену через price_fetcher
-                    pool_usd = None
-                    if self.price_fetcher and token:
-                        try:
-                            price = self.price_fetcher.get_token_price(token.upper(), preferred_exchange='mexc')
-                            if price:
-                                pool_usd = float(total_pool) * price
-                        except:
-                            pass
-                    
-                    if pool_usd:
-                        message += f"├ 💰 Пул: {pool_str} (~${fmt_number(pool_usd)})\n"
-                    else:
-                        message += f"├ 💰 Пул: {pool_str}\n"
+                    # Рассчитываем награду на аккаунт если есть участники
+                    if participants > 0:
+                        reward_per_account = float(total_pool) / participants
+                        if reward_per_account >= 1:
+                            message += f"   🎁 На акаунт: ~{reward_per_account:,.2f} {reward_currency}\n"
+                        else:
+                            message += f"   🎁 На акаунт: ~{reward_per_account:.4f} {reward_currency}\n"
                 
-                # Победители
-                winners = promo.get('winners_count')
-                if winners and winners > 0:
-                    message += f"├ 🏆 Победителей: {fmt_number(winners)}\n"
+                # Дни до выплаты
+                settle_days = promo.get('settle_days')
+                if settle_days and settle_days > 0:
+                    message += f"   📅 Виплата через: {settle_days} днів\n"
                 
-                # Условия (компактно)
-                conditions = promo.get('conditions')
-                if conditions:
-                    message += f"├ 📋 {self.escape_html(conditions)}\n"
-                
-                # Участники с историей
-                participants = promo.get('participants_count')
-                if participants and participants > 0:
-                    message += f"├ 👥 Участников: {fmt_number(participants)}\n"
+                # Участники
+                if participants > 0:
+                    message += f"   👥 Учасників: {fmt_number(participants)}\n"
                     
                     # Статистика из трекера
                     participants_stats = promo.get('participants_stats', {})
@@ -2173,23 +2231,23 @@ class NotificationService:
                                 stat = participants_stats[key]
                                 diff = stat.get('diff', 0)
                                 if diff > 0:
-                                    stats_parts.append(f"+{fmt_number(diff)} ({hours}ч)")
+                                    stats_parts.append(f"+{fmt_number(diff)} ({hours}г)")
                         
                         if stats_parts:
-                            message += f"├ 📈 {', '.join(stats_parts)}\n"
+                            message += f"   📈 {', '.join(stats_parts)}\n"
                 
                 # Оставшееся время
                 end_time = promo.get('end_time')
                 remaining = fmt_remaining(end_time)
                 if remaining and remaining != 'Завершено':
-                    message += f"├ ⏰ Осталось: {remaining}\n"
+                    message += f"   ⏰ Залишилось: {remaining}\n"
                 
                 # Ссылка на аирдроп
                 link = promo.get('link', '')
                 if link:
-                    message += f"└ 🔗 {self.escape_html(link)}\n"
+                    message += f"   🔗 {self.escape_html(link)}\n"
                 else:
-                    message += f"└ 🔗 https://www.mexc.com/ru-RU/token-airdrop\n"
+                    message += f"   🔗 https://www.mexc.com/ru-RU/token-airdrop\n"
                 
                 # Разделитель между промоакциями
                 if idx < len(promos) - 1:
@@ -2213,6 +2271,306 @@ class NotificationService:
         except Exception as e:
             logger.error(f"❌ Ошибка форматирования MEXC Airdrop: {e}", exc_info=True)
             return f"🪂 <b>MEXC Airdrop</b>\n\n❌ Ошибка форматирования"
+
+    def format_mexc_launchpad_page(
+        self,
+        promos: List[Dict],
+        page: int,
+        total_pages: int,
+        page_url: str = None
+    ) -> str:
+        """
+        Форматирует страницу MEXC Launchpad (IEO/IDO) - покупка токенов со скидкой
+        
+        Данные из API: https://www.mexc.com/api/financialactivity/launchpad/list
+        
+        Структура данных:
+        - activityCoin, activityCoinFullName - токен
+        - activityStatus - UNDERWAY, FINISHED, NOT_STARTED
+        - totalSupply - общее количество токенов
+        - launchpadTakingCoins[] - варианты подписки:
+            - investCurrency - валюта (USDT, USD1)
+            - takingPrice - цена подписки
+            - linePrice - рыночная цена  
+            - label - скидка (70% Off)
+            - supply - выделено токенов
+            - takingAmount - собрано
+            - joinNum - участников
+            - onlyForNewUser - только для новых
+        
+        Args:
+            promos: Список промоакций (raw_data из API)
+            page: Номер страницы
+            total_pages: Всего страниц
+            page_url: URL страницы
+        """
+        try:
+            from datetime import datetime
+
+            def fmt_number(n, decimals=0):
+                """Форматирует число с разделителями"""
+                try:
+                    num = float(str(n).replace(',', '').replace(' ', ''))
+                    if decimals > 0:
+                        return f'{num:,.{decimals}f}'
+                    return f'{num:,.0f}'
+                except:
+                    return str(n)
+
+            def fmt_price(price):
+                """Форматирует цену (убирает лишние нули)"""
+                try:
+                    p = float(price)
+                    if p < 0.01:
+                        return f'{p:.6f}'.rstrip('0').rstrip('.')
+                    elif p < 1:
+                        return f'{p:.4f}'.rstrip('0').rstrip('.')
+                    else:
+                        return f'{p:,.2f}'
+                except:
+                    return str(price)
+
+            def get_remaining_time(end_ts):
+                """Рассчитывает оставшееся время"""
+                if not end_ts:
+                    return None
+                try:
+                    end_dt = datetime.fromtimestamp(end_ts / 1000) if end_ts > 10**10 else datetime.fromtimestamp(end_ts)
+                    now = datetime.now()
+                    if end_dt <= now:
+                        return None
+                    remaining = end_dt - now
+                    days = remaining.days
+                    hours = remaining.seconds // 3600
+                    minutes = (remaining.seconds % 3600) // 60
+                    
+                    if days > 0:
+                        return f'{days} дн. {hours} ч.'
+                    elif hours > 0:
+                        return f'{hours} ч. {minutes} мин.'
+                    else:
+                        return f'{minutes} мин.'
+                except:
+                    return None
+
+            def get_status_emoji(status):
+                """Возвращает эмодзи статуса"""
+                status_map = {
+                    'UNDERWAY': '✅ В процессе',
+                    'ONGOING': '✅ В процессе',
+                    'NOT_STARTED': '🔜 Скоро',
+                    'FINISHED': '⏹ Завершено',
+                    'SETTLED': '⏹ Завершено',
+                    'CANCELLED': '❌ Отменено'
+                }
+                return status_map.get(status, f'❓ {status}')
+
+            # Заголовок
+            message = f"🚀 <b>MEXC LAUNCHPAD</b>\n\n"
+            message += f"<b>🏦 Биржа:</b> MEXC Launchpad\n"
+            message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Если промоакций нет
+            if not promos:
+                message += "📭 <i>Нет активных launchpad проектов</i>\n"
+                if page_url:
+                    message += f"\n🔗 {self.escape_html(page_url)}\n"
+                return message
+
+            # Форматируем каждый проект
+            for idx, promo in enumerate(promos):
+                # Извлекаем raw_data если есть (из БД) или используем сам promo (из API напрямую)
+                raw_data = promo.get('raw_data') or promo
+                if isinstance(raw_data, str):
+                    try:
+                        import json
+                        raw_data = json.loads(raw_data)
+                    except:
+                        raw_data = promo
+                
+                # Основные данные проекта
+                token = raw_data.get('activityCoin', promo.get('award_token', ''))
+                full_name = raw_data.get('activityCoinFullName', promo.get('title', token))
+                status = raw_data.get('activityStatus', promo.get('status', '').upper())
+                total_supply = raw_data.get('totalSupply', promo.get('total_prize_pool', ''))
+                launchpad_id = raw_data.get('launchpadId', raw_data.get('id', ''))
+                
+                # === ЗАГОЛОВОК ПРОЕКТА ===
+                if full_name and full_name != token:
+                    message += f"🪙 <b>{self.escape_html(full_name)} ({token})</b>\n"
+                else:
+                    message += f"🪙 <b>{token}</b>\n"
+                
+                # Статус
+                message += f"📊 <b>Статус:</b> {get_status_emoji(status)}\n"
+                
+                # Общее распределение
+                if total_supply:
+                    message += f"📦 <b>Всего токенов:</b> {fmt_number(total_supply)} {token}\n"
+                
+                # === ВАРИАНТЫ ПОДПИСКИ ===
+                taking_coins = raw_data.get('launchpadTakingCoins', [])
+                
+                if taking_coins:
+                    message += f"\n💰 <b>ВАРИАНТЫ ПОДПИСКИ ({len(taking_coins)}):</b>\n"
+                    
+                    for tc_idx, tc in enumerate(taking_coins, 1):
+                        invest_curr = tc.get('investCurrency', 'USDT')
+                        taking_price = tc.get('takingPrice', '0')
+                        line_price = tc.get('linePrice')  # Рыночная цена
+                        label = tc.get('label', '')  # Скидка (70% Off)
+                        supply = tc.get('supply', '0')
+                        taking_amount = tc.get('takingAmount', '0')
+                        join_num = tc.get('joinNum', 0)
+                        only_new = tc.get('onlyForNewUser', False)
+                        taking_min = tc.get('takingMin', '')
+                        taking_max = tc.get('takingMax', '')
+                        
+                        # Заголовок варианта
+                        message += f"\n   <b>▸ {invest_curr}</b>"
+                        if label:
+                            message += f" 🔥 <b>{label}</b>"
+                        if only_new:
+                            message += " 🆕"
+                        message += "\n"
+                        
+                        if only_new:
+                            message += f"      <i>👤 Только для новых пользователей</i>\n"
+                        
+                        # Цена подписки
+                        message += f"      • Цена: 1 {token} = {fmt_price(taking_price)} {invest_curr}\n"
+                        
+                        # Рыночная цена и экономия
+                        if line_price:
+                            try:
+                                market = float(line_price)
+                                current = float(taking_price)
+                                if market > 0 and current > 0:
+                                    savings_pct = ((market - current) / market) * 100
+                                    message += f"      • Рынок: {fmt_price(line_price)} {invest_curr} "
+                                    message += f"<i>(экономия {savings_pct:.0f}%)</i>\n"
+                            except:
+                                message += f"      • Рынок: {fmt_price(line_price)} {invest_curr}\n"
+                        
+                        # Выделено токенов
+                        message += f"      • Выделено: {fmt_number(supply)} {token}\n"
+                        
+                        # Собрано
+                        try:
+                            amount_num = float(str(taking_amount).replace(',', ''))
+                            if amount_num > 0:
+                                message += f"      • Собрано: {fmt_number(amount_num, 2)} {invest_curr}\n"
+                        except:
+                            pass
+                        
+                        # Лимиты
+                        if taking_min and taking_max:
+                            message += f"      • Лимит: {fmt_number(taking_min)} - {fmt_number(taking_max)} {invest_curr}\n"
+                        
+                        # Участники (выделено)
+                        if join_num:
+                            message += f"      • Участников: <b>{fmt_number(join_num)}</b>\n"
+                        
+                        # === РАСЧЁТ АЛЛОКАЦИИ (компактный формат) ===
+                        try:
+                            supply_num = float(str(supply).replace(',', ''))
+                            amount_num = float(str(taking_amount).replace(',', ''))
+                            price_num = float(str(taking_price).replace(',', ''))
+                            max_limit = float(str(taking_max).replace(',', '')) if taking_max else 5000
+                            
+                            if price_num > 0 and supply_num > 0 and amount_num > 0:
+                                # Сколько токенов забронировано
+                                tokens_booked = amount_num / price_num
+                                
+                                # Коэффициент переподписки
+                                oversubscription = tokens_booked / supply_num
+                                
+                                if oversubscription > 1:
+                                    # Переподписка есть - рассчитываем аллокацию
+                                    allocation_pct = 100 / oversubscription
+                                    
+                                    # При максимальном вкладе
+                                    max_tokens_requested = max_limit / price_num
+                                    tokens_received = max_tokens_requested * (allocation_pct / 100)
+                                    usdt_equivalent = tokens_received * price_num
+                                    
+                                    # Форматируем токены (K для тысяч)
+                                    if tokens_received >= 1000:
+                                        tokens_str = f"{tokens_received/1000:.0f}K"
+                                    else:
+                                        tokens_str = f"{tokens_received:.0f}"
+                                    
+                                    message += f"\n      📊 <b>АЛЛОКАЦИЯ:</b>\n"
+                                    message += f"         • Подписка: {fmt_number(max_limit)}{invest_curr} {oversubscription:.1f}x\n"
+                                    message += f"         • <b>АЛЛОКА: {usdt_equivalent:.0f}$ ({tokens_str} {token})</b>\n"
+                                else:
+                                    # Пока недоподписка - 100% аллокация
+                                    fill_pct = (tokens_booked / supply_num) * 100
+                                    message += f"\n      📊 <b>АЛЛОКАЦИЯ:</b> 100% <i>(заполнено {fill_pct:.0f}%)</i>\n"
+                        except Exception as e:
+                            # Не удалось рассчитать - пропускаем
+                            pass
+                
+                # === ПЕРИОД АКЦИИ ===
+                start_time = raw_data.get('startTime')
+                end_time = raw_data.get('endTime')
+                
+                if start_time or end_time:
+                    message += f"\n⏰ <b>ПЕРИОД:</b>\n"
+                    
+                    if start_time and end_time:
+                        try:
+                            start_dt = datetime.fromtimestamp(start_time / 1000) if start_time > 10**10 else datetime.fromtimestamp(start_time)
+                            end_dt = datetime.fromtimestamp(end_time / 1000) if end_time > 10**10 else datetime.fromtimestamp(end_time)
+                            message += f"   • {start_dt.strftime('%d.%m.%Y %H:%M')} — {end_dt.strftime('%d.%m.%Y %H:%M')}\n"
+                        except:
+                            pass
+                    
+                    # Оставшееся время
+                    if status in ['UNDERWAY', 'ONGOING', 'NOT_STARTED']:
+                        remaining = get_remaining_time(end_time)
+                        if remaining:
+                            message += f"   • Осталось: <b>{remaining}</b>\n"
+                
+                # === ССЫЛКИ ===
+                official_url = raw_data.get('officialUrl', '')
+                twitter_url = raw_data.get('twitterUrl', '')
+                
+                message += f"\n🔗 <b>ССЫЛКИ:</b>\n"
+                
+                # Ссылка на MEXC Launchpad
+                if launchpad_id:
+                    message += f"   • <a href='https://www.mexc.com/ru-RU/launchpad/{launchpad_id}'>Страница на MEXC</a>\n"
+                else:
+                    message += f"   • https://www.mexc.com/ru-RU/launchpad\n"
+                
+                if official_url:
+                    message += f"   • <a href='{official_url}'>Официальный сайт</a>\n"
+                
+                if twitter_url:
+                    message += f"   • <a href='{twitter_url}'>Twitter/X</a>\n"
+                
+                # Разделитель между проектами
+                if idx < len(promos) - 1:
+                    message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                else:
+                    message += "\n"
+            
+            # Футер
+            message += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            message += f"🔗 <b>Все проекты:</b> https://www.mexc.com/ru-RU/launchpad\n"
+
+            # Проверяем лимит Telegram
+            if len(message) > 4090:
+                logger.warning(f"⚠️ MEXC Launchpad: сообщение слишком длинное ({len(message)})")
+                lines = message[:4000].split('\n')
+                message = '\n'.join(lines[:-1]) + "\n\n<i>⚠️ Обрезано</i>"
+
+            return message
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования MEXC Launchpad: {e}", exc_info=True)
+            return f"🚀 <b>MEXC Launchpad</b>\n\n❌ Ошибка форматирования"
 
     def format_weex_airdrop_page(
         self,
@@ -2254,12 +2612,9 @@ class NotificationService:
                 except:
                     return str(timestamp)
 
-            # Заголовок
-            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+            # Заголовок (время обновления добавляется в handlers.py)
             message = f"🎁 <b>WEEX AIRDROP HUB</b>\n\n"
             message += f"<b>🏦 Биржа:</b> Weex\n"
-            message += f"<b>🕐 Обновлено:</b> {now} UTC\n"
-            message += f"<b>📄 Страница:</b> {page}/{total_pages}\n\n"
             message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
             # Если промоакций нет
@@ -2270,7 +2625,7 @@ class NotificationService:
             # Форматируем каждую промоакцию
             for idx, promo in enumerate(promos):
                 title = promo.get('title', 'Без названия')
-                token = promo.get('token', '')
+                token = promo.get('award_token') or promo.get('token', '')
                 promo_id = promo.get('promo_id', '')
                 
                 # Название airdrop
@@ -2293,13 +2648,13 @@ class NotificationService:
                 elif status == 'upcoming':
                     message += f"📊 <b>Статус:</b> 🔜 Скоро\n"
                 
-                # Награда (в Weex награды уже в USDT, не используем price_fetcher)
-                reward = promo.get('reward')
+                # Награда (призовой пул)
+                reward = promo.get('total_prize_pool') or promo.get('reward')
                 if reward:
                     message += f"💰 <b>Награда:</b> {self.escape_html(str(reward))}\n"
                 
                 # Участники с полной статистикой (как в GateCandy)
-                participants = promo.get('participants')
+                participants = promo.get('participants_count') or promo.get('participants')
                 if participants:
                     message += f"\n👥 <b>УЧАСТНИКИ:</b>\n"
                     message += f"   • Всего: {fmt_number(participants)}\n"
@@ -2332,8 +2687,8 @@ class NotificationService:
                             message += f"   • Изменение ({time_ago}): {fmt_number(diff)} 📉\n"
                 
                 # Период акции с оставшимся временем
-                start_time = promo.get('startTime')
-                end_time = promo.get('endTime')
+                start_time = promo.get('start_time') or promo.get('startTime')
+                end_time = promo.get('end_time') or promo.get('endTime')
                 
                 if start_time or end_time:
                     message += "\n⏰ <b>ПЕРИОД АКЦИИ:</b>\n"
@@ -2370,7 +2725,7 @@ class NotificationService:
                             logger.debug(f"Ошибка расчета оставшегося времени: {e}")
                 
                 # Ссылка
-                url = promo.get('url')
+                url = promo.get('link') or promo.get('url')
                 if url:
                     message += f"\n🔗 {url}\n"
                 
@@ -2427,12 +2782,9 @@ class NotificationService:
                 except:
                     return str(timestamp)
 
-            # Заголовок
-            now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+            # Заголовок (время обновления добавляется в handlers.py)
             message = f"🎁 <b>WEEX REWARDS</b>\n\n"
             message += f"<b>🏦 Биржа:</b> WEEX\n"
-            message += f"<b>🕐 Обновлено:</b> {now} UTC\n"
-            message += f"<b>📄 Страница:</b> {page}/{total_pages}\n\n"
             message += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
             # Если промоакций нет

@@ -84,71 +84,71 @@ class UniversalParser(BaseParser):
             return f"{self._extract_domain_name(self.url).lower()}_error_{hash(str(obj))}"
 
     def get_promotions(self) -> List[Dict[str, Any]]:
-        """Получает промоакции из любого JSON API с retry логикой при блокировках"""
+        """Получает промоакции из любого JSON API. Сначала прямой запрос, прокси только при блокировке."""
         import time as time_module
-        max_retries = 3
-        retry_delay = 2  # секунд между попытками
         
-        # Извлекаем exchange из URL для инвалидации кеша
         exchange = self._extract_exchange_from_url(self.url)
+        headers = self._build_headers(exchange)
         
-        # Сначала пробуем с прокси
-        for attempt in range(1, max_retries + 1):
-            try:
-                logger.info(f"🔍 UniversalParser (API): Попытка {attempt}/{max_retries} (с прокси)")
-                logger.info(f"   URL: {self.url}")
-
-                # При повторных попытках принудительно инвалидируем кеш прокси
-                if attempt > 1:
-                    logger.info(f"🔄 Инвалидация кеша прокси для {exchange} перед попыткой {attempt}")
-                    self.rotation_manager.invalidate_cache_for_exchange(exchange)
-
-                headers = self._build_headers(exchange)
-                response = self.make_request(self.url, headers=headers, timeout=(10, 30))
-
-                if response and response.status_code == 200:
-                    logger.info(f"✅ Ответ получен: статус {response.status_code}")
-                    data = response.json()
-                    logger.info(f"✅ JSON успешно распарсен")
-                    return self.parse_json_data(data)
-                
-                # Неуспешный ответ - retry
-                if response:
-                    logger.warning(f"⚠️ Код ответа: {response.status_code}")
-                else:
-                    logger.error(f"❌ Не удалось получить ответ от API")
-                
-                if attempt < max_retries:
-                    logger.info(f"🔄 Повторная попытка через {retry_delay} сек...")
-                    time_module.sleep(retry_delay)
-                    retry_delay *= 1.5
-
-            except Exception as e:
-                logger.error(f"❌ Ошибка при попытке {attempt}: {e}")
-                if attempt < max_retries:
-                    time_module.sleep(retry_delay)
-                    retry_delay *= 1.5
-
-        # Все попытки с прокси неудачны - пробуем FALLBACK без прокси
-        logger.info(f"🔄 Все {max_retries} попыток с прокси неудачны, ждём 3 сек и пробуем БЕЗ прокси...")
-        import time as time_module
-        time_module.sleep(3)  # Пауза перед fallback для сброса rate limiting
-        
+        # ===== ШАГ 1: Сначала пробуем ПРЯМОЙ запрос (быстрее) =====
         try:
-            headers = self._build_headers(exchange)
-            logger.info(f"📡 FALLBACK: Прямой запрос без прокси...")
-            response = requests.get(self.url, headers=headers, timeout=30)
+            logger.info(f"🔍 UniversalParser: Прямой запрос к {exchange}")
+            logger.info(f"   URL: {self.url}")
+            
+            response = requests.get(self.url, headers=headers, timeout=(5, 20))
             
             if response.status_code == 200:
-                logger.info(f"✅ FALLBACK успешен: статус {response.status_code}")
+                logger.info(f"✅ Прямой запрос успешен: статус 200")
                 data = response.json()
                 return self.parse_json_data(data)
+            
+            # Блокировка - нужен прокси
+            if response.status_code in [403, 429]:
+                logger.warning(f"🚫 Прямой запрос заблокирован: {response.status_code}. Пробуем через прокси...")
             else:
-                logger.error(f"❌ FALLBACK неудачен: код {response.status_code}")
-                return []
+                logger.warning(f"⚠️ Прямой запрос: код {response.status_code}")
+                
+        except requests.exceptions.Timeout:
+            logger.warning(f"⏰ Таймаут прямого запроса для {exchange}")
         except Exception as e:
-            logger.error(f"❌ FALLBACK ошибка: {e}")
-            return []
+            logger.error(f"❌ Ошибка прямого запроса: {e}")
+        
+        # ===== ШАГ 2: Пробуем через ПРОКСИ (обход блокировок) =====
+        max_proxy_retries = 2
+        retry_delay = 1
+        
+        for attempt in range(1, max_proxy_retries + 1):
+            try:
+                logger.info(f"🔄 UniversalParser: Попытка {attempt}/{max_proxy_retries} через прокси")
+                
+                # При повторных попытках инвалидируем кеш прокси
+                if attempt > 1:
+                    self.rotation_manager.invalidate_cache_for_exchange(exchange)
+                
+                response = self.make_request(self.url, headers=headers, timeout=(5, 15))
+                
+                if response and response.status_code == 200:
+                    logger.info(f"✅ Запрос через прокси успешен!")
+                    data = response.json()
+                    return self.parse_json_data(data)
+                
+                if response:
+                    logger.warning(f"⚠️ Прокси запрос: код {response.status_code}")
+                else:
+                    logger.error(f"❌ Нет ответа от API через прокси")
+                
+                if attempt < max_proxy_retries:
+                    logger.info(f"🔄 Повтор через {retry_delay} сек...")
+                    time_module.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 1.5, 2)
+                    
+            except Exception as e:
+                logger.error(f"❌ Ошибка прокси попытки {attempt}: {e}")
+                if attempt < max_proxy_retries:
+                    time_module.sleep(retry_delay)
+        
+        logger.error(f"❌ Все попытки неудачны для {exchange}")
+        return []
 
     def _build_headers(self, exchange: str) -> dict:
         """Строит headers для запроса в зависимости от биржи"""
@@ -750,7 +750,7 @@ class UniversalParser(BaseParser):
     
     def _extract_bybit_prizes(self, promo_data: Dict, details: Dict, prize_token: str) -> None:
         """
-        Извлекает данные о призах из деталей проекта Bybit.
+        Извлекает данные о призах и датах из деталей проекта Bybit.
         
         Структура API /project/detail:
         {
@@ -761,6 +761,8 @@ class UniversalParser(BaseParser):
             "oldUserPrize": 500,           # Награда на старого пользователя
             "oldUserPrizeToken": "SCOR",   # Токен награды
             "tradeUserPrizeTotal": ...,    # Пул для торговой конкуренции
+            "depositStart": 1768482000000, # Начало (timestamp в ms)
+            "depositEnd": 1769076000000,   # Конец (timestamp в ms)
         }
         
         Args:
@@ -772,6 +774,20 @@ class UniversalParser(BaseParser):
             total_winners = 0
             rewards_info = []
             
+            # === ИЗВЛЕЧЕНИЕ ДАТ ===
+            # Приоритет: depositStart/depositEnd, затем applyStart/applyEnd
+            deposit_start = details.get('depositStart') or details.get('applyStart')
+            deposit_end = details.get('depositEnd') or details.get('applyEnd')
+            
+            if deposit_start and not promo_data.get('start_time'):
+                promo_data['start_time'] = deposit_start
+                logger.debug(f"📅 Bybit: start_time = {deposit_start}")
+            
+            if deposit_end and not promo_data.get('end_time'):
+                promo_data['end_time'] = deposit_end
+                logger.debug(f"📅 Bybit: end_time = {deposit_end}")
+            
+            # === ИЗВЛЕЧЕНИЕ ПРИЗОВ ===
             # Обрабатываем New Users
             new_user_total = details.get('newUserPrizeTotal')
             new_user_prize = details.get('newUserPrize')
@@ -1090,6 +1106,7 @@ class UniversalParser(BaseParser):
                     # Определяем статус
                     status_map = {
                         'ONGOING': 'ongoing',
+                        'UNDERWAY': 'ongoing',  # Активная подписка
                         'NOT_STARTED': 'upcoming',
                         'FINISHED': 'ended',
                         'SUBSCRIBE': 'ongoing',  # Подписка открыта
@@ -1267,52 +1284,35 @@ class UniversalParser(BaseParser):
         
         API: https://www.mexc.com/api/operateactivity/eftd/list
         
-        Структура API:
-        {
-            "code": 0,
-            "data": [
-                {
-                    "id": 3156,
-                    "activityCurrency": "DN",  // Символ токена
-                    "activityCurrencyFullName": "DeepNode",  // Полное название
-                    "state": "ACTIVE",  // ACTIVE, AWARDED, END
-                    "startTime": 1768190400000,
-                    "endTime": 1768622400000,
-                    "applyNum": 1234,  // Участники
-                    "firstProfitCurrency": "DN",  // Валюта награды 1
-                    "firstProfitCurrencyQuantity": "1000",  // Количество награды 1
-                    "secondProfitCurrency": "MX",  // Валюта награды 2 (опционально)
-                    "secondProfitCurrencyQuantity": "500",  // Количество награды 2
-                    "websiteUrl": "https://...",
-                    "twitterUrl": "https://...",
-                    "eftdVOS": [...]  // Вложенные активности с детальными заданиями
-                }
-            ]
-        }
+        MEXC Airdrop имеет ДВА типа наград:
+        1. LOTTERY pool (rewardPoolVOList) - пул токенов проекта (например 500,000 COCO)
+        2. BONUS pool (taskVOList с type=BONUS) - фиксированный USDT бонус (например 25,000 USDT)
+        
+        На сайте показывается как: "Разделите 500,000 COCO & 25,000 USDT"
         """
         from datetime import datetime
         promotions = []
         
         try:
             items = data.get('data', [])
-            logger.info(f"📊 MEXC Airdrop: найдено {len(items)} аирдропов")
+            total_count = len(items)
             
-            for airdrop in items:
+            # Фильтрация только активных
+            active_states = {'ACTIVE', 'DOING', 'NOT_START'}
+            active_items = [a for a in items if a.get('state') in active_states]
+            
+            logger.info(f"📊 MEXC Airdrop: найдено {total_count} аирдропов, активных: {len(active_items)}")
+            
+            for airdrop in active_items:
                 try:
                     airdrop_id = airdrop.get('id')
                     state = airdrop.get('state', 'UNKNOWN')
-                    
-                    # Пропускаем завершенные
-                    if state in ['AWARDED', 'END']:
-                        continue
                     
                     # Определяем статус
                     status_map = {
                         'ACTIVE': 'ongoing',
                         'DOING': 'ongoing',
                         'NOT_START': 'upcoming',
-                        'AWARDED': 'ended',
-                        'END': 'ended'
                     }
                     status_str = status_map.get(state, 'unknown')
                     
@@ -1320,71 +1320,76 @@ class UniversalParser(BaseParser):
                     token = airdrop.get('activityCurrency', '')
                     token_full_name = airdrop.get('activityCurrencyFullName', token)
                     
-                    # Участники
-                    participants = airdrop.get('applyNum', 0)
+                    # Участники (может быть None)
+                    participants = airdrop.get('applyNum') or 0
                     
-                    # Награды (основные)
-                    first_reward = airdrop.get('firstProfitCurrencyQuantity', '0')
-                    first_currency = airdrop.get('firstProfitCurrency', '')
-                    second_reward = airdrop.get('secondProfitCurrencyQuantity', '0')
-                    second_currency = airdrop.get('secondProfitCurrency', '')
+                    # Дополнительные данные
+                    twitter_url = airdrop.get('twitterUrl', '')
+                    website_url = airdrop.get('websiteUrl', '')
+                    settle_days = airdrop.get('settleDays', 0)  # Дни до выплаты
                     
-                    # Собираем общий призовой пул из вложенных активностей
-                    total_pool = 0
-                    tasks_info = []
-                    winners_count = 0
+                    # === ИЗВЛЕКАЕМ НАГРАДЫ ===
+                    # 1. BONUS pool (USDT) из taskVOList
+                    bonus_usdt = 0
+                    # 2. TOKEN pool из rewardPoolVOList
+                    token_pool = 0
+                    token_pool_currency = token  # Обычно совпадает с токеном акции
+                    total_winners = 0  # Общее количество призовых мест
                     
-                    # Парсим eftdVOS для получения детальных наград
                     eftd_vos = airdrop.get('eftdVOS', [])
-                    for sub in eftd_vos:
-                        # Получаем награды из sub активности
-                        sub_reward = sub.get('firstProfitCurrencyQuantity', '0')
-                        try:
-                            total_pool += float(sub_reward) if sub_reward else 0
-                        except:
-                            pass
-                        
-                        # Парсим задания для информации
-                        main_tasks = sub.get('mainTaskVOList', []) or sub.get('taskVOList', [])
-                        for task in main_tasks:
-                            task_type = task.get('completeType', '')
-                            top_num = task.get('topNum', 0)
+                    for eftd in eftd_vos:
+                        # Извлекаем USDT бонус из tasks
+                        tasks = eftd.get('taskVOList', [])
+                        for task in tasks:
+                            task_type = task.get('firstProfitCurrencyType', '')
+                            task_currency = task.get('firstProfitCurrency', '')
                             task_reward = task.get('firstProfitCurrencyQuantity', '0')
-                            task_reward_total = task.get('firstProfitCurrencyQuantityTotal', '0')
                             
-                            if task_type:
-                                task_info = {
-                                    'type': task_type,
-                                    'top_num': top_num,
-                                    'reward': task_reward,
-                                    'total_reward': task_reward_total
-                                }
-                                tasks_info.append(task_info)
-                                winners_count += top_num if top_num else 0
+                            if task_type == 'BONUS' and task_currency in ('USDT', 'USDC'):
+                                try:
+                                    bonus_usdt += float(task_reward) if task_reward else 0
+                                except (ValueError, TypeError):
+                                    pass
+                        
+                        # Извлекаем токен-пул из rewardPoolVOList
+                        reward_pools = eftd.get('rewardPoolVOList', [])
+                        for pool in reward_pools:
+                            reward_type = pool.get('rewardType', '')
+                            if reward_type == 'THANK':  # "Спасибо за участие" - не награда
+                                continue
                             
-                            # Парсим подзадания
-                            sub_tasks = task.get('subTaskVOList', [])
-                            for st in sub_tasks:
-                                st_type = st.get('completeType', '')
-                                st_top = st.get('topNum', 0)
-                                st_reward = st.get('firstProfitCurrencyQuantity', '0')
-                                st_total = st.get('firstProfitCurrencyQuantityTotal', '0')
-                                
-                                if st_type:
-                                    tasks_info.append({
-                                        'type': st_type,
-                                        'top_num': st_top,
-                                        'reward': st_reward,
-                                        'total_reward': st_total
-                                    })
-                                    winners_count += st_top if st_top else 0
+                            currency = pool.get('rewardCurrency', '')
+                            single_amount = float(pool.get('singleAmount', 0) or 0)
+                            total_stock = int(pool.get('totalStock', 0) or 0)
+                            
+                            if single_amount > 0 and total_stock > 0:
+                                pool_total = single_amount * total_stock
+                                token_pool += pool_total
+                                total_winners += total_stock
+                                if currency:
+                                    token_pool_currency = currency
                     
-                    # Если нет данных из eftdVOS, используем основные
-                    if total_pool == 0:
-                        try:
-                            total_pool = float(first_reward) if first_reward else 0
-                        except:
-                            total_pool = 0
+                    # Формируем данные о наградах
+                    # Основной пул - токены проекта (если есть), иначе USDT бонус
+                    if token_pool > 0:
+                        total_prize_pool = token_pool
+                        award_token_final = token_pool_currency
+                    else:
+                        total_prize_pool = bonus_usdt
+                        award_token_final = 'USDT'
+                    
+                    # Для USD оценки: если есть USDT бонус - это точная сумма в USD
+                    total_prize_pool_usd = bonus_usdt if bonus_usdt > 0 else None
+                    
+                    # Определяем тип награды
+                    if token_pool > 0 and bonus_usdt > 0:
+                        reward_type = 'LOTTERY+BONUS'
+                    elif token_pool > 0:
+                        reward_type = 'LOTTERY'
+                    elif bonus_usdt > 0:
+                        reward_type = 'BONUS'
+                    else:
+                        reward_type = 'UNKNOWN'
                     
                     # Временные метки
                     start_time = airdrop.get('startTime')
@@ -1403,92 +1408,62 @@ class UniversalParser(BaseParser):
                         except:
                             pass
                     
-                    # Ссылки
-                    website_url = airdrop.get('websiteUrl', '')
-                    twitter_url = airdrop.get('twitterUrl', '')
-                    telegram_url = airdrop.get('telegramUrl', '')
-                    
                     # Генерация ссылки на страницу аирдропа
                     link = f"https://www.mexc.com/ru-RU/token-airdrop/rollx/{airdrop_id}" if airdrop_id else ""
                     
                     # Иконка
-                    icon = airdrop.get('activityCurrencyIcon', '')
-                    if not icon:
-                        detail_logo = airdrop.get('detailLogoWeb', '')
-                        if detail_logo:
-                            icon = f"https://static.mexc.com/{detail_logo}"
+                    icon = airdrop.get('activityCurrencyIcon', '') or ''
                     
-                    # Формируем описание с условиями
-                    conditions = []
-                    task_types_map = {
-                        'TRADE': '🔄 Торговля',
-                        'CONTRACT': '📊 Фьючерсы',
-                        'RECHARGE': '💰 Депозит',
-                        'CONTRACT_AMOUNT': '📊 Объём фьючерсов',
-                        'SPOT_AMOUNT': '🔄 Объём спот',
-                        'INVITE': '👥 Приглашение',
-                        'KYC': '🆔 KYC'
-                    }
-                    
-                    seen_types = set()
-                    for ti in tasks_info:
-                        t_type = ti.get('type', '')
-                        if t_type and t_type not in seen_types:
-                            seen_types.add(t_type)
-                            readable = task_types_map.get(t_type, t_type)
-                            top_n = ti.get('top_num', 0)
-                            if top_n:
-                                conditions.append(f"{readable} (топ {top_n})")
-                            else:
-                                conditions.append(readable)
-                    
-                    # Определяем тип пользователей (NEW = только для новых)
-                    join_user_type = None
-                    for sub in eftd_vos:
-                        jut = sub.get('joinUserType', '')
-                        if jut == 'NEW':
-                            join_user_type = 'new_users'
-                            break
-                    
+                    # MEXC Airdrop - это лотерея где пул делится между победителями
                     promo = {
                         'exchange': 'MEXC',
                         'promo_id': f"mexc_airdrop_{airdrop_id}",
-                        'title': f"{token_full_name}" if token_full_name else token,
-                        'award_token': token,
-                        'total_prize_pool': total_pool if total_pool > 0 else None,
-                        'participants_count': participants,
-                        'winners_count': winners_count if winners_count > 0 else None,
+                        'title': token_full_name if token_full_name else token,
+                        'award_token': award_token_final,
+                        'total_prize_pool': total_prize_pool if total_prize_pool > 0 else None,
+                        'total_prize_pool_usd': total_prize_pool_usd,
+                        # Для MEXC Airdrop нет фиксированной награды на победителя - это лотерея
+                        'reward_per_winner': None,
+                        'reward_per_winner_usd': None,
+                        'winners_count': total_winners if total_winners > 0 else None,
+                        'participants_count': participants if participants else None,
                         'status': status_str,
-                        'state': state,  # Оригинальный статус
+                        'state': state,
                         'start_time': start_dt,
                         'end_time': end_dt,
                         'start_timestamp': start_time,
                         'end_timestamp': end_time,
                         'link': link,
                         'icon': icon,
-                        'website_url': website_url,
-                        'twitter_url': twitter_url,
-                        'telegram_url': telegram_url,
-                        'conditions': ', '.join(conditions) if conditions else None,
-                        'tasks_info': tasks_info,
-                        'join_user_type': join_user_type,
-                        'first_reward': first_reward,
-                        'first_currency': first_currency,
-                        'second_reward': second_reward,
-                        'second_currency': second_currency,
+                        'reward_currency': award_token_final,
+                        'reward_type': reward_type,
                         'promo_type': 'mexc_airdrop',
-                        'raw_data': airdrop
+                        # Дополнительные пулы для отображения
+                        'token_pool': token_pool if token_pool > 0 else None,
+                        'token_pool_currency': token_pool_currency if token_pool > 0 else None,
+                        'bonus_usdt': bonus_usdt if bonus_usdt > 0 else None,
+                        # Дополнительные поля
+                        'twitter_url': twitter_url,
+                        'website_url': website_url,
+                        'settle_days': settle_days,
                     }
                     
                     promotions.append(promo)
-                    logger.debug(f"   ✅ {promo['title']} ({status_str}) - {participants} участников")
+                    
+                    # Лог с обоими пулами
+                    pools_str = []
+                    if token_pool > 0:
+                        pools_str.append(f"{token_pool:,.0f} {token_pool_currency}")
+                    if bonus_usdt > 0:
+                        pools_str.append(f"{bonus_usdt:,.0f} USDT")
+                    logger.debug(f"✅ MEXC Airdrop: {token} - {' & '.join(pools_str)}")
                     
                 except Exception as e:
                     logger.warning(f"⚠️ Ошибка парсинга MEXC Airdrop: {e}")
                     continue
             
-            # Сортируем по количеству участников (популярные вверх)
-            promotions.sort(key=lambda x: x.get('participants_count') or 0, reverse=True)
+            # Сортируем по награде (приоритет USD если есть)
+            promotions.sort(key=lambda x: x.get('total_prize_pool_usd') or x.get('total_prize_pool') or 0, reverse=True)
             
             logger.info(f"✅ MEXC Airdrop: успешно распарсено {len(promotions)} активных аирдропов")
             

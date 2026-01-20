@@ -1,7 +1,7 @@
 # data/database.py
 from sqlalchemy import create_engine, Index, text
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import sessionmaker, scoped_session, joinedload
 from sqlalchemy.pool import StaticPool
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -170,7 +170,8 @@ class DatabaseMigration:
             self._migration_009_add_staking_snapshots,
             self._migration_010_add_announcement_fields,
             self._migration_011_add_exchange_credentials,
-            self._migration_012_add_combined_staking_fields
+            self._migration_012_add_combined_staking_fields,
+            self._migration_013_add_promo_raw_data
         ])
 
     def _migration_010_add_announcement_fields(self, session):
@@ -501,6 +502,34 @@ class DatabaseMigration:
             logging.error(f"❌ Ошибка в миграции 012: {e}")
             raise
 
+    def _migration_013_add_promo_raw_data(self, session):
+        """Миграция 013: Добавление полей promo_type и raw_data в promo_history для хранения полных данных API"""
+        try:
+            result = session.execute(text("PRAGMA table_info(promo_history)"))
+            columns = [row[1] for row in result.fetchall()]
+            
+            fields_to_add = {
+                'promo_type': 'TEXT',  # mexc_launchpad, mexc_airdrop, okx_boost, bybit_launchpad и т.д.
+                'raw_data': 'TEXT'  # JSON с полными данными из API
+            }
+            
+            added_count = 0
+            for field_name, field_type in fields_to_add.items():
+                if field_name not in columns:
+                    session.execute(text(f"ALTER TABLE promo_history ADD COLUMN {field_name} {field_type}"))
+                    logging.info(f"✅ Добавлен столбец {field_name} в promo_history")
+                    added_count += 1
+            
+            if added_count > 0:
+                session.commit()
+                logging.info(f"✅ Миграция 013: Добавлено {added_count} полей для raw_data")
+            else:
+                logging.info("ℹ️ Все поля raw_data уже существуют")
+                
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 013: {e}")
+            raise
+
     def run_migrations(self):
         """Запуск всех миграций"""
         logging.info("🔄 Проверка миграций базы данных...")
@@ -574,6 +603,250 @@ def cleanup_old_data():
                     f"архивировано {archived_proxies} прокси и {archived_ua} UA")
     
     atomic_operation(_cleanup)
+
+
+# =============================================================================
+# ASYNC ФУНКЦИИ ДЛЯ ОТЗЫВЧИВОГО UI
+# =============================================================================
+
+import asyncio
+from typing import List, Optional, Any, Callable, TypeVar
+from concurrent.futures import ThreadPoolExecutor
+
+# Глобальный executor для async операций с БД
+_db_executor: Optional[ThreadPoolExecutor] = None
+
+def _get_db_executor() -> ThreadPoolExecutor:
+    """Получить executor для async БД операций"""
+    global _db_executor
+    if _db_executor is None:
+        _db_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="db_async_")
+    return _db_executor
+
+
+async def run_in_db_executor(func: Callable, *args, **kwargs) -> Any:
+    """
+    Выполнить синхронную функцию в отдельном потоке
+    
+    Использование:
+        result = await run_in_db_executor(my_sync_function, arg1, arg2)
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_get_db_executor(), lambda: func(*args, **kwargs))
+
+
+async def get_links_async(
+    category: Optional[str] = None,
+    is_active: Optional[bool] = None
+) -> List[ApiLink]:
+    """
+    Асинхронно получить список ссылок
+    
+    Args:
+        category: Фильтр по категории ('airdrop', 'staking', etc.)
+        is_active: Фильтр по активности
+    
+    Returns:
+        Список ApiLink объектов
+    """
+    from utils.cache import get_cache_manager, CacheKeys
+    
+    # Формируем ключ кэша
+    cache_key = f"links:all:{category or 'all'}:{is_active}"
+    cache = get_cache_manager()
+    
+    # Проверяем кэш
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    
+    def _get_links():
+        with get_db_session() as db:
+            query = db.query(ApiLink).options(
+                joinedload(ApiLink.telegram_account)  # Предзагружаем связанный telegram_account
+            )
+            
+            if category:
+                query = query.filter(ApiLink.category == category)
+            if is_active is not None:
+                query = query.filter(ApiLink.is_active == is_active)
+            
+            # Загружаем связанные объекты (уже включая telegram_account через joinedload)
+            links = query.all()
+            
+            # Детачим объекты от сессии
+            for link in links:
+                # Также детачим telegram_account если загружен
+                if link.telegram_account:
+                    db.expunge(link.telegram_account)
+                db.expunge(link)
+            
+            return links
+    
+    links = await run_in_db_executor(_get_links)
+    
+    # Кэшируем на 30 секунд
+    cache.set(cache_key, links, ttl=30)
+    
+    return links
+
+
+async def get_link_by_id_async(link_id: int) -> Optional[ApiLink]:
+    """
+    Асинхронно получить ссылку по ID
+    
+    Args:
+        link_id: ID ссылки
+    
+    Returns:
+        ApiLink объект или None
+    """
+    from utils.cache import get_cache_manager, CacheKeys
+    
+    cache_key = CacheKeys.link_by_id(link_id)
+    cache = get_cache_manager()
+    
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    
+    def _get_link():
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if link:
+                db.expunge(link)
+            return link
+    
+    link = await run_in_db_executor(_get_link)
+    
+    if link:
+        cache.set(cache_key, link, ttl=30)
+    
+    return link
+
+
+async def get_active_links_count_async() -> int:
+    """Асинхронно получить количество активных ссылок"""
+    from utils.cache import get_cache_manager
+    
+    cache = get_cache_manager()
+    cache_key = "links:active_count"
+    
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    
+    def _count():
+        with get_db_session() as db:
+            return db.query(ApiLink).filter(ApiLink.is_active == True).count()
+    
+    count = await run_in_db_executor(_count)
+    cache.set(cache_key, count, ttl=30)
+    
+    return count
+
+
+async def get_links_by_category_async(category: str) -> List[ApiLink]:
+    """
+    Асинхронно получить ссылки по категории
+    
+    Args:
+        category: Категория ('airdrop', 'staking', 'launchpool', 'announcement')
+    """
+    return await get_links_async(category=category)
+
+
+async def update_link_async(link_id: int, **updates) -> bool:
+    """
+    Асинхронно обновить поля ссылки
+    
+    Args:
+        link_id: ID ссылки
+        **updates: Поля для обновления (например, is_active=False)
+    
+    Returns:
+        True если обновлено успешно
+    """
+    from utils.cache import invalidate_links_cache
+    
+    def _update():
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                return False
+            
+            for key, value in updates.items():
+                if hasattr(link, key):
+                    setattr(link, key, value)
+            
+            return True
+    
+    result = await run_in_db_executor(_update)
+    
+    # Инвалидируем кэш
+    if result:
+        invalidate_links_cache()
+    
+    return result
+
+
+async def delete_link_async(link_id: int) -> bool:
+    """
+    Асинхронно удалить ссылку
+    
+    Args:
+        link_id: ID ссылки
+    
+    Returns:
+        True если удалено успешно
+    """
+    from utils.cache import invalidate_links_cache
+    
+    def _delete():
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                return False
+            
+            db.delete(link)
+            return True
+    
+    result = await run_in_db_executor(_delete)
+    
+    if result:
+        invalidate_links_cache()
+    
+    return result
+
+
+async def create_link_async(**link_data) -> Optional[ApiLink]:
+    """
+    Асинхронно создать новую ссылку
+    
+    Args:
+        **link_data: Поля для новой ссылки
+    
+    Returns:
+        Созданный ApiLink объект или None
+    """
+    from utils.cache import invalidate_links_cache
+    
+    def _create():
+        with get_db_session() as db:
+            link = ApiLink(**link_data)
+            db.add(link)
+            db.flush()
+            db.refresh(link)
+            db.expunge(link)
+            return link
+    
+    link = await run_in_db_executor(_create)
+    
+    if link:
+        invalidate_links_cache()
+    
+    return link
+
 
 # Автоматическая инициализация при импорте
 init_database()

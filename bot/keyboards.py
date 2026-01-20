@@ -282,6 +282,87 @@ def get_cancel_exchange_keyboard():
 
 
 # =============================================================================
+# ТОП АКТИВНОСТИ KEYBOARDS
+# =============================================================================
+
+def get_top_activity_menu_keyboard():
+    """Главное меню раздела ТОП АКТИВНОСТИ"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(text="🔥 Стейкинги", callback_data="top_activity_stakings"))
+    builder.add(InlineKeyboardButton(text="🎁 Промоакции", callback_data="top_activity_promos"))
+    builder.add(InlineKeyboardButton(text="🔄 Обновить", callback_data="top_activity_refresh"))
+    builder.add(InlineKeyboardButton(text="🔙 Меню", callback_data="back_to_main"))
+    
+    builder.adjust(2, 2)
+    return builder.as_markup()
+
+
+def get_top_stakings_keyboard(current_page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Клавиатура для просмотра ТОП стейкингов"""
+    builder = InlineKeyboardBuilder()
+    
+    # Навигация по страницам
+    nav_buttons = []
+    if current_page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data="top_stakings_prev"))
+    
+    nav_buttons.append(InlineKeyboardButton(text=f"📄 {current_page}/{total_pages}", callback_data="top_stakings_info"))
+    
+    if current_page < total_pages:
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data="top_stakings_next"))
+    
+    for btn in nav_buttons:
+        builder.add(btn)
+    
+    # Кнопки действий
+    builder.add(InlineKeyboardButton(text="🔄 Обновить", callback_data="top_activity_stakings"))
+    builder.add(InlineKeyboardButton(text="🔙 ТОП Меню", callback_data="top_activity_menu"))
+    
+    # Расположение: навигация в одну строку, остальное по 2
+    if len(nav_buttons) == 3:
+        builder.adjust(3, 2)
+    elif len(nav_buttons) == 2:
+        builder.adjust(2, 2)
+    else:
+        builder.adjust(1, 2)
+    
+    return builder.as_markup()
+
+
+def get_top_promos_keyboard(current_page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Клавиатура для просмотра ТОП промоакций"""
+    builder = InlineKeyboardBuilder()
+    
+    # Навигация по страницам
+    nav_buttons = []
+    if current_page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data="top_promos_prev"))
+    
+    nav_buttons.append(InlineKeyboardButton(text=f"📄 {current_page}/{total_pages}", callback_data="top_promos_info"))
+    
+    if current_page < total_pages:
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data="top_promos_next"))
+    
+    for btn in nav_buttons:
+        builder.add(btn)
+    
+    # Кнопки действий
+    builder.add(InlineKeyboardButton(text="🔄 Обновить", callback_data="top_activity_promos"))
+    builder.add(InlineKeyboardButton(text="🔙 ТОП Меню", callback_data="top_activity_menu"))
+    
+    # Расположение
+    if len(nav_buttons) == 3:
+        builder.adjust(3, 2)
+    elif len(nav_buttons) == 2:
+        builder.adjust(2, 2)
+    else:
+        builder.adjust(1, 2)
+    
+    return builder.as_markup()
+
+
+# =============================================================================
 # AIRDROP MANAGEMENT KEYBOARDS
 # =============================================================================
 
@@ -300,8 +381,14 @@ def get_airdrop_management_keyboard():
     builder.adjust(1)
     return builder.as_markup()
 
-def get_current_promos_keyboard(current_page: int, total_pages: int) -> InlineKeyboardMarkup:
-    """Клавиатура пагинации для текущих промоакций"""
+def get_current_promos_keyboard(current_page: int, total_pages: int, last_updated: str = None) -> InlineKeyboardMarkup:
+    """Клавиатура пагинации для текущих промоакций
+    
+    Args:
+        current_page: Текущая страница
+        total_pages: Всего страниц
+        last_updated: Время последнего обновления (для отображения)
+    """
     builder = InlineKeyboardBuilder()
     
     # Навигация
@@ -313,8 +400,8 @@ def get_current_promos_keyboard(current_page: int, total_pages: int) -> InlineKe
     if current_page < total_pages:
         builder.add(InlineKeyboardButton(text="Вперед ▶️", callback_data="promos_page_next"))
     
-    # Дополнительные кнопки
-    builder.add(InlineKeyboardButton(text="🔄 Обновить", callback_data="manage_view_current_promos"))
+    # Принудительная проверка (запуск парсера)
+    builder.add(InlineKeyboardButton(text="🔍 Принудительная проверка", callback_data="promos_force_parse"))
     builder.add(InlineKeyboardButton(text="⬅️ К ссылке", callback_data="back_to_link_management"))
     
     builder.adjust(3, 1, 1)

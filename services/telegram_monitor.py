@@ -12,6 +12,7 @@ from telethon.errors import (
 from parsers.telegram_parser import TelegramParser
 from data.database import get_db_session
 from data.models import ApiLink, PromoHistory
+from utils.promo_formatter import format_promo_header
 import config
 
 logger = logging.getLogger(__name__)
@@ -104,12 +105,18 @@ class TelegramMonitor:
                     await self.stop()
 
     async def stop(self):
-        """Остановка мониторинга"""
+        """Остановка мониторинга с корректным отключением клиентов"""
         logger.info("🛑 Остановка Telegram Monitor...")
         self.is_running = False
 
         if self.parser:
-            await self.parser.disconnect()
+            try:
+                # Ждём завершения текущих операций (таймаут 10 сек)
+                await asyncio.wait_for(self.parser.disconnect(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning("⏰ Таймаут остановки парсера, принудительное завершение")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка остановки парсера: {e}")
 
         logger.info("✅ Telegram Monitor остановлен")
 
@@ -302,13 +309,18 @@ class TelegramMonitor:
 
             # Если message - это объект Telethon Message, пересылаем его
             if hasattr(message, 'id') and hasattr(message, 'chat'):
-                # Сначала отправляем заголовок с информацией
-                header = f"🎉 <b>НОВАЯ ПРОМОАКЦИЯ!</b>\n\n"
-                header += f"<b>🏢 Биржа:</b> @{channel_username}\n"
+                # НОВЫЙ УНИВЕРСАЛЬНЫЙ ЗАГОЛОВОК
+                promo_header = format_promo_header(
+                    name=channel_username,
+                    promo_type='telegram',
+                    is_new=True
+                )
+                header = f"{promo_header}\n\n"
+                header += f"📱 <b>Канал:</b> @{channel_username}\n"
 
                 if result.get('matched_keywords'):
                     keywords_str = ", ".join([f"<code>{kw}</code>" for kw in result['matched_keywords']])
-                    header += f"<b>🔑 Найденные ключевые слова:</b> {keywords_str}\n"
+                    header += f"🔑 <b>Триггеры:</b> {keywords_str}\n"
 
                 header += f"━━━━━━━━━━━━━━━━\n"
 
@@ -366,11 +378,17 @@ class TelegramMonitor:
         # Создаем краткую версию текста (максимум 300 символов)
         summary = message_text[:300] + "..." if len(message_text) > 300 else message_text
 
-        message = "🎉 <b>НОВАЯ ПРОМОАКЦИЯ!</b>\n\n"
-        message += f"<b>🏢 Биржа:</b> @{channel_username}\n"
+        # НОВЫЙ УНИВЕРСАЛЬНЫЙ ЗАГОЛОВОК
+        promo_header = format_promo_header(
+            name=channel_username,
+            promo_type='telegram',
+            is_new=True
+        )
+        message = f"{promo_header}\n\n"
+        message += f"📱 <b>Канал:</b> @{channel_username}\n"
 
         keywords_str = ", ".join([f"<code>{kw}</code>" for kw in matched_keywords])
-        message += f"<b>🔑 Найденные ключевые слова:</b> {keywords_str}\n\n"
+        message += f"🔑 <b>Триггеры:</b> {keywords_str}\n\n"
 
         if dates:
             message += f"📅 Период: {dates}\n\n"
@@ -392,3 +410,154 @@ class TelegramMonitor:
         """Перезагрузка списка отслеживаемых каналов"""
         logger.info("🔄 Перезагрузка списка каналов...")
         await self.load_active_channels()
+
+    async def force_check_channel(self, link_id: int) -> Optional[Dict]:
+        """
+        Принудительная проверка конкретного Telegram канала.
+        Получает последние сообщения и проверяет их на ключевые слова.
+        
+        Args:
+            link_id: ID ссылки в БД
+            
+        Returns:
+            Словарь с результатами проверки или None при ошибке
+        """
+        try:
+            logger.info(f"🔍 Принудительная проверка Telegram канала (link_id={link_id})")
+            
+            # Получаем данные ссылки
+            with get_db_session() as db:
+                link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+                
+                if not link:
+                    logger.error(f"❌ Ссылка {link_id} не найдена")
+                    return None
+                
+                if link.parsing_type != 'telegram':
+                    logger.error(f"❌ Ссылка {link_id} не является Telegram ({link.parsing_type})")
+                    return None
+                
+                if not link.telegram_channel:
+                    logger.error(f"❌ Telegram канал не указан для ссылки {link_id}")
+                    return None
+                
+                channel_data = {
+                    'api_link_id': link.id,
+                    'name': link.name,
+                    'telegram_channel': link.telegram_channel,
+                    'keywords': link.get_telegram_keywords(),
+                    'telegram_account_id': link.telegram_account_id
+                }
+            
+            channel_username = channel_data['telegram_channel']
+            if channel_username.startswith('@'):
+                channel_username = channel_username[1:]
+            
+            keywords = channel_data['keywords']
+            
+            logger.info(f"📱 Канал: @{channel_username}")
+            logger.info(f"🔑 Ключевые слова: {', '.join(keywords) if keywords else 'НЕ УКАЗАНЫ'}")
+            
+            # Проверяем, подключен ли парсер
+            if not self.parser or not self.parser.is_configured():
+                logger.error("❌ Telegram парсер не настроен")
+                return {'error': 'Telegram парсер не настроен', 'new_messages': []}
+            
+            # Подключаемся ТОЛЬКО если ещё не подключены
+            if not self.parser.is_connected or self.parser.get_connected_clients_count() == 0:
+                logger.info("🔌 Парсер не подключён, выполняем подключение...")
+                connected = await self.parser.connect_with_retry()
+                if not connected:
+                    logger.error("❌ Не удалось подключиться к Telegram")
+                    return {'error': 'Не удалось подключиться к Telegram', 'new_messages': []}
+            
+            # Получаем последние сообщения из канала
+            new_messages = []
+            
+            # Находим клиента для этого канала
+            client_data = None
+            account_id = channel_data.get('telegram_account_id')
+            
+            if account_id and account_id in self.parser.clients:
+                client_data = self.parser.clients[account_id]
+            else:
+                # Используем первого подключенного клиента
+                for acc_id, data in self.parser.clients.items():
+                    if data.get('is_connected'):
+                        client_data = data
+                        break
+            
+            if not client_data or not client_data.get('is_connected'):
+                logger.error("❌ Нет подключенных Telegram клиентов")
+                return {'error': 'Нет подключенных Telegram клиентов', 'new_messages': []}
+            
+            client = client_data['client']
+            
+            try:
+                # Получаем последние 10 сообщений из канала
+                entity = await client.get_entity(channel_username)
+                messages = await client.get_messages(entity, limit=10)
+                
+                logger.info(f"📥 Получено {len(messages)} последних сообщений")
+                
+                for msg in messages:
+                    if not msg.text:
+                        continue
+                    
+                    # Если нет ключевых слов - показываем все сообщения
+                    if not keywords:
+                        new_messages.append({
+                            'id': msg.id,
+                            'text': msg.text[:200],
+                            'date': msg.date.isoformat() if msg.date else None,
+                            'matched_keywords': []
+                        })
+                        continue
+                    
+                    # Проверяем на ключевые слова
+                    result = await self.parser.process_message(msg.text, keywords)
+                    
+                    if result and result.get('matched_keywords'):
+                        new_messages.append({
+                            'id': msg.id,
+                            'text': msg.text[:200],
+                            'date': msg.date.isoformat() if msg.date else None,
+                            'matched_keywords': result['matched_keywords']
+                        })
+                        
+                        # Отправляем уведомление
+                        await self.send_notification(channel_username, msg, result)
+                        
+                        # Сохраняем в БД
+                        await self.save_message(
+                            channel_data['api_link_id'],
+                            msg.id,
+                            msg.text,
+                            msg.date,
+                            result,
+                            channel_username
+                        )
+                
+                # Обновляем время проверки
+                with get_db_session() as db:
+                    link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+                    if link:
+                        link.last_checked = datetime.utcnow()
+                        db.commit()
+                
+                logger.info(f"✅ Проверка завершена. Найдено совпадений: {len(new_messages)}")
+                
+                return {
+                    'success': True,
+                    'channel': f"@{channel_username}",
+                    'new_messages': new_messages,
+                    'checked_messages': len(messages)
+                }
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка получения сообщений из канала: {e}")
+                return {'error': str(e), 'new_messages': []}
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка принудительной проверки канала: {e}", exc_info=True)
+            return {'error': str(e), 'new_messages': []}

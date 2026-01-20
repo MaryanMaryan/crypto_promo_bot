@@ -1,4 +1,5 @@
-from aiogram import Router, F
+﻿from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 
 # Константы для навигации
 NAV_MANAGEMENT = "NAV_MANAGEMENT"
@@ -9,7 +10,12 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKe
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from data.database import get_db_session, atomic_operation
+from data.database import (
+    get_db_session, atomic_operation,
+    # Новые async функции для отзывчивого UI
+    get_links_async, get_link_by_id_async, get_active_links_count_async,
+    get_links_by_category_async, update_link_async, delete_link_async, create_link_async
+)
 from data.models import ApiLink
 from bot.parser_service import ParserService
 from bot.notification_service import NotificationService
@@ -19,6 +25,9 @@ import asyncio
 from urllib.parse import urlparse
 from datetime import datetime
 
+# Глобальный executor для параллельного парсинга
+from utils.executor import get_executor
+
 # ИМПОРТЫ ДЛЯ НОВЫХ СИСТЕМ
 from utils.proxy_manager import get_proxy_manager
 from utils.user_agent_manager import get_user_agent_manager
@@ -26,6 +35,10 @@ from utils.statistics_manager import get_statistics_manager
 from bot.keyboards import get_airdrop_management_keyboard, get_current_promos_keyboard
 from utils.rotation_manager import get_rotation_manager
 from utils.url_template_builder import URLTemplateAnalyzer, get_url_builder
+
+# ИМПОРТЫ ДЛЯ ОТЗЫВЧИВОГО UI (Фаза 4)
+from utils.cache import get_cache_manager, invalidate_links_cache
+from utils.loading_indicator import LoadingContext, with_loading, LoadingTexts, show_temporary_message
 
 
 navigation_stack = {}
@@ -109,6 +122,8 @@ class AddLinkStates(StatesGroup):
     waiting_for_announcement_selector = State()  # НОВОЕ: Ввод CSS селектора для анонсов
     # Специальный парсер:
     waiting_for_special_parser = State()  # НОВОЕ: Выбор специального парсера
+    # Выбор парсера (новый шаг):
+    waiting_for_parser_selection = State()  # НОВОЕ: Выбор парсера для обработки
 
 class IntervalStates(StatesGroup):
     waiting_for_interval = State()
@@ -145,17 +160,44 @@ class RotationSettingsStates(StatesGroup):
 
 # СТАРЫЕ СОСТОЯНИЯ TelegramAPIStates УДАЛЕНЫ - используется TelegramAccountStates из bot/states.py
 
-# РАСШИРЕННОЕ ГЛАВНОЕ МЕНЮ
-def get_main_menu():
-    builder = ReplyKeyboardBuilder()
-    builder.add(KeyboardButton(text="📊 Список ссылок"))
-    builder.add(KeyboardButton(text="➕ Добавить ссылку"))
-    builder.add(KeyboardButton(text="⚙️ Управление ссылками"))
-    builder.add(KeyboardButton(text="🔄 Проверить всё"))
-    builder.add(KeyboardButton(text="🛡️ Обход блокировок"))
+# РАСШИРЕННОЕ ГЛАВНОЕ МЕНЮ (INLINE VERSION)
+def get_main_menu_inline():
+    """Главное меню с inline-кнопками"""
+    builder = InlineKeyboardBuilder()
+    
+    # Ряд 1: Список ссылок + ТОП Активности
+    builder.add(InlineKeyboardButton(text="📊 Список ссылок", callback_data="main_list_links"))
+    builder.add(InlineKeyboardButton(text="🚀 ТОП Активности", callback_data="top_activity_menu"))
+    
+    # Ряд 2: Добавить + Проверить всё
+    builder.add(InlineKeyboardButton(text="➕ Добавить", callback_data="main_add_link"))
+    builder.add(InlineKeyboardButton(text="🔄 Проверить всё", callback_data="main_check_all"))
+    
+    # Ряд 3: Управление ссылками + Обход блокировок
+    builder.add(InlineKeyboardButton(text="⚙️ Управление ссылками", callback_data="main_manage_links"))
+    builder.add(InlineKeyboardButton(text="🛡️ Обход блокировок", callback_data="main_bypass"))
+    
+    # Ряд 4: Помощь
+    builder.add(InlineKeyboardButton(text="❓ Помощь", callback_data="main_help"))
 
-    builder.adjust(2, 2, 1)
+    # Раскладка: все кнопки по 2 в ряд, последняя одна
+    builder.adjust(2, 2, 2, 1)
+    return builder.as_markup()
+
+
+def get_main_reply_keyboard():
+    """Минимальная клавиатура внизу экрана для быстрого доступа"""
+    builder = ReplyKeyboardBuilder()
+    builder.add(KeyboardButton(text="🏠 Меню"))
+    builder.add(KeyboardButton(text="➕ Добавить ссылку"))
+    builder.add(KeyboardButton(text="🔄 Проверить всё"))
+    builder.adjust(2, 1)  # Первый ряд: 2 кнопки (Меню, Добавить), второй ряд: 1 кнопка (Проверить всё)
     return builder.as_markup(resize_keyboard=True)
+
+
+# Совместимость со старым кодом
+def get_main_menu():
+    return get_main_reply_keyboard()
 
 # СУЩЕСТВУЮЩИЕ КЛАВИАТУРЫ
 def get_management_keyboard(link=None):
@@ -182,7 +224,7 @@ def get_category_management_menu():
     builder.add(InlineKeyboardButton(text="📋 Все ссылки", callback_data="category_all"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="category_staking"))
-    builder.add(InlineKeyboardButton(text="🚀 Лаунчпул", callback_data="category_launchpool"))
+    builder.add(InlineKeyboardButton(text="📝 Общая", callback_data="category_general"))
     builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="category_announcement"))
     builder.add(InlineKeyboardButton(text="❌ Назад", callback_data="back_to_main_menu"))
     builder.adjust(1, 2, 2, 1)
@@ -203,8 +245,14 @@ def get_staking_management_keyboard():
     builder.adjust(1)
     return builder.as_markup()
 
-def get_current_stakings_keyboard(current_page: int, total_pages: int) -> InlineKeyboardMarkup:
-    """Клавиатура навигации для текущих стейкингов"""
+def get_current_stakings_keyboard(current_page: int, total_pages: int, last_updated: str = None) -> InlineKeyboardMarkup:
+    """Клавиатура навигации для текущих стейкингов
+    
+    Args:
+        current_page: Текущая страница
+        total_pages: Всего страниц
+        last_updated: Время последнего обновления (для отображения)
+    """
     builder = InlineKeyboardBuilder()
 
     # Кнопки навигации
@@ -217,9 +265,11 @@ def get_current_stakings_keyboard(current_page: int, total_pages: int) -> Inline
     if nav_buttons:
         builder.row(*nav_buttons)
 
-    # Управление
+    # Принудительная проверка (запуск парсера)
     builder.row(
-        InlineKeyboardButton(text="🔄 Обновить", callback_data="stakings_refresh"),
+        InlineKeyboardButton(text="🔍 Принудительная проверка", callback_data="stakings_force_parse")
+    )
+    builder.row(
         InlineKeyboardButton(text="⚙️ Настройки APR", callback_data="stakings_configure_apr")
     )
 
@@ -318,11 +368,11 @@ def get_links_keyboard(links, action_type="delete"):
 
     # Словарь иконок для категорий
     category_icons = {
+        'general': '📝',
         'airdrop': '🪂',
         'staking': '💰',
         'launchpool': '🚀',
-        'announcement': '📢',
-        'general': '📁'
+        'announcement': '📢'
     }
 
     for link in links:
@@ -414,13 +464,13 @@ def get_configure_parsing_submenu(link_id, parsing_type='combined', category=Non
 def get_category_edit_keyboard(link_id):
     """Клавиатура для выбора категории при редактировании ссылки"""
     builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📝 Общая", callback_data=f"set_category_{link_id}_general"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data=f"set_category_{link_id}_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data=f"set_category_{link_id}_staking"))
-    builder.add(InlineKeyboardButton(text="🚀 Лаунчпул", callback_data=f"set_category_{link_id}_launchpool"))
-    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data=f"set_category_{link_id}_announcement"))
+    builder.add(InlineKeyboardButton(text="� Анонс", callback_data=f"set_category_{link_id}_announcement"))
     builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"show_parsing_config_{link_id}"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
-    builder.adjust(2, 2, 1, 1)
+    builder.adjust(1, 2, 1, 1, 1)
     return builder.as_markup()
 
 def get_parsing_type_keyboard(link_id):
@@ -451,6 +501,136 @@ SPECIAL_PARSERS_CONFIG = {
         'emoji': '🚀'
     }
 }
+
+# КОНФИГУРАЦИЯ ВСЕХ ПАРСЕРОВ - для выбора при добавлении ссылки
+PARSERS_CONFIG = {
+    'auto': {
+        'name': 'Автоматический выбор',
+        'emoji': '🤖',
+        'categories': ['general', 'airdrop', 'staking', 'launchpool', 'announcement'],
+        'domains': [],  # Подходит для всех
+        'priority': 0
+    },
+    'staking': {
+        'name': 'Стейкинг парсер',
+        'emoji': '📊',
+        'categories': ['staking', 'general'],  # Показывается для этих категорий
+        'domains': ['bybit.com', 'kucoin.com', 'okx.com', 'binance.com', 'gate.io', 'mexc.com'],
+        'priority': 1
+    },
+    'announcement': {
+        'name': 'Анонс парсер',
+        'emoji': '📢',
+        'categories': ['announcement', 'general'],
+        'domains': [],  # Подходит для всех
+        'priority': 2
+    },
+    'weex': {
+        'name': 'WEEX парсер',
+        'emoji': '🔧',
+        'categories': ['airdrop', 'launchpool', 'general'],
+        'domains': ['weex.com'],
+        'priority': 3
+    },
+    'okx_boost': {
+        'name': 'OKX Boost парсер',
+        'emoji': '🚀',
+        'categories': ['airdrop', 'launchpool', 'general'],
+        'domains': ['okx.com'],
+        'priority': 4
+    },
+    'universal': {
+        'name': 'Универсальный парсер',
+        'emoji': '🌐',
+        'categories': ['general', 'airdrop', 'staking', 'launchpool', 'announcement'],
+        'domains': [],  # Подходит для всех
+        'priority': 99
+    }
+}
+
+def get_available_parsers_for_context(category: str, url: str = None) -> list:
+    """
+    Возвращает список доступных парсеров для контекста (категория + URL).
+    Парсеры сортируются по приоритету, рекомендуемый парсер отмечается.
+    
+    Returns:
+        list of tuples: [(parser_id, config, is_recommended), ...]
+    """
+    url_lower = (url or '').lower()
+    available = []
+    recommended_parser = None
+    
+    for parser_id, config in PARSERS_CONFIG.items():
+        # Проверяем, подходит ли парсер для этой категории
+        if category not in config['categories']:
+            continue
+        
+        # Проверяем домен (если указан)
+        domains = config.get('domains', [])
+        if domains:
+            # Парсер с ограничением по домену - показываем только если URL подходит
+            domain_match = any(domain in url_lower for domain in domains)
+            if not domain_match:
+                continue
+        
+        available.append((parser_id, config))
+    
+    # Сортируем по приоритету
+    available.sort(key=lambda x: x[1].get('priority', 99))
+    
+    # Определяем рекомендуемый парсер
+    # Логика: если категория совпадает с типом парсера И домен подходит → рекомендуем
+    for parser_id, config in available:
+        if parser_id == 'auto':
+            continue
+        
+        # Для стейкинга
+        if category == 'staking' and parser_id == 'staking':
+            domains = config.get('domains', [])
+            if not domains or any(d in url_lower for d in domains):
+                recommended_parser = parser_id
+                break
+        
+        # Для анонсов
+        if category == 'announcement' and parser_id == 'announcement':
+            recommended_parser = parser_id
+            break
+        
+        # Для airdrop/launchpool со специальными парсерами
+        if category in ['airdrop', 'launchpool'] and parser_id in ['weex', 'okx_boost']:
+            domains = config.get('domains', [])
+            if domains and any(d in url_lower for d in domains):
+                recommended_parser = parser_id
+                break
+    
+    # Формируем результат с флагом рекомендации
+    result = []
+    for parser_id, config in available:
+        is_recommended = (parser_id == recommended_parser)
+        result.append((parser_id, config, is_recommended))
+    
+    return result
+
+def get_parser_selection_keyboard(category: str, url: str = None):
+    """Клавиатура для выбора парсера"""
+    builder = InlineKeyboardBuilder()
+    parsers = get_available_parsers_for_context(category, url)
+    
+    for parser_id, config, is_recommended in parsers:
+        emoji = config['emoji']
+        name = config['name']
+        
+        if is_recommended:
+            btn_text = f"{emoji} {name} ⭐"
+        else:
+            btn_text = f"{emoji} {name}"
+        
+        builder.add(InlineKeyboardButton(text=btn_text, callback_data=f"select_parser_{parser_id}"))
+    
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_input"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(1)
+    return builder.as_markup()
 
 def detect_special_parser_for_url(url: str) -> list:
     """Определяет доступные специальные парсеры для URL"""
@@ -633,13 +813,322 @@ async def cmd_start(message: Message):
     # Очищаем историю навигации при возврате в главное меню
     clear_navigation(message.from_user.id)
 
-    menu = get_main_menu()
+    # Отправляем одно сообщение с inline-меню
     await message.answer(
-        "🤖 Добро пожаловать в Crypto Promo Bot!\n\n"
-        "Я помогу отслеживать промоакции криптобирж.\n\n"
-        "Используйте кнопки ниже для управления:",
-        reply_markup=menu
+        "🤖 <b>Добро пожаловать в Heisenberg pars!</b>\n\n"
+        "Я помогу отслеживать промоакции криптобирж, "
+        "отслеживать страницы анонсов, парсить телеграм каналы и чаты.\n\n"
+        "Prod. @Heisenbergabuz",
+        reply_markup=get_main_menu_inline(),
+        parse_mode="HTML"
     )
+
+# =============================================================================
+# ОБРАБОТЧИКИ INLINE-КНОПОК ГЛАВНОГО МЕНЮ
+# =============================================================================
+
+@router.callback_query(F.data == "main_list_links")
+async def main_list_links_handler(callback: CallbackQuery):
+    """Inline: Список ссылок с пагинацией"""
+    await show_links_page(callback, page=0)
+
+@router.callback_query(F.data.startswith("links_page_"))
+async def links_page_handler(callback: CallbackQuery):
+    """Обработчик пагинации списка ссылок"""
+    page = int(callback.data.split("_")[-1])
+    await show_links_page(callback, page=page)
+
+async def show_links_page(callback: CallbackQuery, page: int = 0):
+    """Показать страницу со списком ссылок"""
+    try:
+        links = await get_links_async()
+
+        if not links:
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="➕ Добавить ссылку", callback_data="main_add_link"))
+            builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+            builder.adjust(1)
+
+            await callback.message.edit_text(
+                "📊 <b>Список ссылок</b>\n\n"
+                "У вас пока нет добавленных ссылок.\n"
+                "Нажмите «Добавить ссылку» чтобы начать.",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+
+        # Группируем ссылки по категориям
+        categories = {}
+        for link in links:
+            category = link.category or 'general'
+            if category not in categories:
+                categories[category] = []
+            categories[category].append(link)
+
+        # Словари для названий категорий
+        category_names = {
+            'general': '📝 ОБЩЕЕ',
+            'staking': '💰 СТЕЙКИНГ',
+            'airdrop': '🪂 АИРДРОП',
+            'launchpool': '🚀 LAUNCHPOOL',
+            'announcement': '📢 АНОНСЫ'
+        }
+
+        # Словари для иконок типов парсинга
+        parsing_icons = {
+            'api': '👾 API',
+            'html': '🌐 HTML',
+            'browser': '🖥 Browser',
+            'telegram': '📱 Telegram',
+            'combined': '🔄 Комбо'
+        }
+
+        # Формируем ответ
+        response = "📊 <b>Список ссылок:</b>\n\n"
+
+        # Сортируем категории по приоритету
+        category_order = ['staking', 'airdrop', 'launchpool', 'announcement', 'general']
+        sorted_categories = [cat for cat in category_order if cat in categories]
+        sorted_categories.extend([cat for cat in categories.keys() if cat not in category_order])
+
+        # Выводим каждую категорию
+        for idx, category in enumerate(sorted_categories):
+            category_name = category_names.get(category, f'📁 {category.upper()}')
+
+            # Добавляем разделитель и заголовок категории
+            response += "━━━━━━━━━━━━━━━━━━━━━━\n"
+            response += f"<b>{category_name}</b>\n"
+            response += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            for link in categories[category]:
+                status_text = "Активна" if link.is_active else "Остановлена"
+                status_emoji = "✅" if link.is_active else "❌"
+                interval_minutes = link.check_interval // 60
+                parsing_type = parsing_icons.get(link.parsing_type, '❓')
+
+                # Формируем блок ссылки без эмодзи статуса в названии
+                response += f"<b>{link.name}</b>\n"
+                response += f"Статус: {status_emoji} {status_text}\n"
+                response += f"Парсинг: {parsing_type}\n"
+                response += f"Интервал: {interval_minutes} мин\n"
+
+                # Добавляем информацию о Telegram аккаунте, если это Telegram ссылка
+                if link.telegram_channel and link.telegram_account:
+                    account_status = "✅" if link.telegram_account.is_active else "❌"
+                    response += f"📱 TG аккаунт: {account_status} {link.telegram_account.name}\n"
+
+                # Формируем URL для отображения
+                if link.telegram_channel:
+                    response += f"URL: {link.telegram_channel}\n"
+                elif link.api_url:
+                    response += f"URL: {link.api_url}\n"
+                elif link.html_url:
+                    response += f"URL: {link.html_url}\n"
+                elif link.page_url:
+                    response += f"URL: {link.page_url}\n"
+                else:
+                    response += f"URL: не указан\n"
+
+                response += "\n"
+
+            # Добавляем пустую строку между категориями, кроме последней
+            if idx < len(sorted_categories) - 1:
+                response += "\n"
+
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="➕ Добавить", callback_data="main_add_link"))
+        builder.add(InlineKeyboardButton(text="⚙️ Управление", callback_data="main_manage_links"))
+        builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+        builder.adjust(2, 1)
+
+        await callback.message.edit_text(
+            response,
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка в show_links_page: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
+    
+    await safe_answer_callback(callback)
+
+
+@router.callback_query(F.data == "main_add_link")
+async def main_add_link_handler(callback: CallbackQuery, state: FSMContext):
+    """Inline: Добавить ссылку - переход к выбору категории"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📝 Общая ссылка", callback_data="add_category_general"))
+    builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
+    builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
+    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+    builder.adjust(1, 2, 1, 1)
+
+    await callback.message.edit_text(
+        "➕ <b>Добавление ссылки</b>\n\n"
+        "Выберите категорию для новой ссылки:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_category)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "main_check_all")
+async def main_check_all_handler(callback: CallbackQuery):
+    """Inline: Проверить всё"""
+    await callback.answer("🔄 Запускаю проверку всех активных ссылок...")
+    
+    # Получаем экземпляр бота
+    bot_instance = bot_manager.get_instance()
+    
+    if not bot_instance:
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+        await callback.message.edit_text(
+            "❌ Бот не инициализирован",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        links = await get_links_async()
+        active_links = [l for l in links if l.is_active]
+        
+        if not active_links:
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+            
+            await callback.message.edit_text(
+                "🔄 <b>Проверка ссылок</b>\n\n"
+                "❌ Нет активных ссылок для проверки.",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            return
+        
+        await callback.message.edit_text(
+            f"🔄 <b>Проверка ссылок</b>\n\n"
+            f"⏳ Проверяю {len(active_links)} активных ссылок...\n"
+            f"Это может занять некоторое время.",
+            parse_mode="HTML"
+        )
+        
+        # Запускаем ручную проверку через экземпляр бота
+        chat_id = callback.message.chat.id
+        await bot_instance.manual_check_all_links(chat_id)
+        
+        # Добавляем кнопки после проверки
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🔄 Повторить", callback_data="main_check_all"))
+        builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+        builder.adjust(2)
+        
+        await callback.message.answer(
+            "✅ Проверка завершена!",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка проверки: {e}")
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+        await callback.message.edit_text(
+            f"❌ Ошибка при проверке: {str(e)[:100]}",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+
+
+@router.callback_query(F.data == "main_manage_links")
+async def main_manage_links_handler(callback: CallbackQuery):
+    """Inline: Управление ссылками - показываем категории"""
+    push_navigation(callback.from_user.id, NAV_MANAGEMENT)
+    
+    await callback.message.edit_text(
+        "⚙️ <b>Управление ссылками</b>\n\n"
+        "Выберите раздел для управления:",
+        reply_markup=get_category_management_menu(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "main_bypass")
+async def main_bypass_handler(callback: CallbackQuery):
+    """Inline: Обход блокировок"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🔧 Прокси", callback_data="bypass_proxy"))
+    builder.add(InlineKeyboardButton(text="👤 User-Agent", callback_data="bypass_ua"))
+    builder.add(InlineKeyboardButton(text="📊 Статистика", callback_data="bypass_stats"))
+    builder.add(InlineKeyboardButton(text="⚙️ Ротация", callback_data="bypass_rotation"))
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+    builder.adjust(2, 2, 1)
+    
+    await callback.message.edit_text(
+        "🛡️ <b>Обход блокировок</b>\n\n"
+        "Настройте параметры для обхода защиты бирж:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "main_categories")
+async def main_categories_handler(callback: CallbackQuery):
+    """Inline: Быстрый переход к категориям"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📋 Все ссылки", callback_data="category_all"))
+    builder.add(InlineKeyboardButton(text="📝 Общая", callback_data="category_general"))
+    builder.add(InlineKeyboardButton(text="🪂 Аирдропы", callback_data="category_airdrop"))
+    builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="category_staking"))
+    builder.add(InlineKeyboardButton(text="📢 Анонсы", callback_data="category_announcement"))
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+    builder.adjust(1, 2, 2, 1)
+    
+    await callback.message.edit_text(
+        "🗂️ <b>Категории</b>\n\n"
+        "Выберите категорию для просмотра:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "main_help")
+async def main_help_handler(callback: CallbackQuery):
+    """Inline: Помощь"""
+    help_text = (
+        "ℹ️ <b>Помощь по боту</b>\n\n"
+        "📊 <b>Список ссылок</b> — просмотр всех добавленных ссылок\n\n"
+        "➕ <b>Добавить</b> — добавление новой ссылки для парсинга\n\n"
+        "🔄 <b>Проверить всё</b> — ручная проверка всех активных ссылок\n\n"
+        "⚙️ <b>Управление</b> — удаление, настройка, переименование ссылок\n\n"
+        "🛡️ <b>Обход блокировок</b> — прокси, User-Agent, ротация\n\n"
+        "🗂️ <b>Категории</b> — быстрый доступ к категориям (Airdrop, Staking и др.)\n\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>Бот автоматически парсит ссылки с заданным интервалом и отправляет уведомления о новых промоакциях.</i>"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+    
+    await callback.message.edit_text(
+        help_text,
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+# =============================================================================
+# КОМАНДЫ ПОМОЩИ
+# =============================================================================
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
@@ -653,7 +1142,7 @@ async def cmd_help(message: Message):
         "• 📈 Статистика системы - общая статистика, статистика по биржам, лучшие комбинации\n"
         "• ⚙️ Настройки ротации - интервал ротации, автооптимизация, очистка данных\n"
         "• 🔄 Проверить всё - ручная проверка ТОЛЬКО АКТИВНЫХ ссылок\n"
-        "• 📋 История промоакций - история\n\n"
+        "• 🗂️ Категории - быстрый доступ к категориям\n\n"
         "Пример API ссылки:\n"
         "https://api.bybit.com/v5/promotion/list"
     )
@@ -666,66 +1155,77 @@ async def menu_help(message: Message):
 # СУЩЕСТВУЮЩИЕ ОБРАБОТЧИКИ МЕНЮ
 @router.message(F.text == "📊 Список ссылок")
 async def menu_list_links(message: Message):
+    """Отображение списка ссылок с использованием async кэширования"""
     try:
-        with get_db_session() as db:
-            links = db.query(ApiLink).all()
+        # Используем async функцию с кэшированием (Фаза 4)
+        links = await get_links_async()
+        
+        if not links:
+            await message.answer("📊 У вас пока нет добавленных ссылок")
+            return
+        
+        response = "📊 Ваши API ссылки:\n\n"
+        for link in links:
+            status = "✅ Активна" if link.is_active else "❌ Остановлена"
+            interval_minutes = link.check_interval // 60
+
+            # Определяем отображение категории
+            category = link.category or 'general'
+            category_icons = {
+                'general': '📝 Общее',
+                'airdrop': '🪂 Аирдроп',
+                'staking': '💰 Стейкинг',
+                'launchpool': '🚀 Лаунчпул',
+                'announcement': '📢 Анонс'
+            }
+            category_display = category_icons.get(category, '📝 Общее')
+
+            # Определяем отображение типа парсинга
+            parsing_type = link.parsing_type or 'combined'
+            parsing_type_icons = {
+                'combined': '🔄 Комбинированный',
+                'api': '👾 API',
+                'html': '🌐 HTML',
+                'browser': '🌐 Browser',
+                'telegram': '📱 Telegram'
+            }
+            parsing_display = parsing_type_icons.get(parsing_type, '🔄 Комбинированный')
+
+            response += f"<b>{link.name}</b>\n"
+            response += f"Категория: {category_display}\n"
+            response += f"Статус: {status}\n"
+            response += f"Парсинг: {parsing_display}\n"
             
-            if not links:
-                await message.answer("📊 У вас пока нет добавленных ссылок")
-                return
+            # НОВОЕ: Отображение выбранного парсера
+            if link.special_parser:
+                parser_info = PARSERS_CONFIG.get(link.special_parser, {})
+                parser_emoji = parser_info.get('emoji', '🔧')
+                parser_name = parser_info.get('name', link.special_parser)
+                response += f"Парсер: {parser_emoji} {parser_name}\n"
+            else:
+                response += f"Парсер: 🤖 Автоматический\n"
             
-            response = "📊 Ваши API ссылки:\n\n"
-            for link in links:
-                status = "✅ Активна" if link.is_active else "❌ Остановлена"
-                interval_minutes = link.check_interval // 60
+            response += f"Интервал: {interval_minutes} мин\n"
 
-                # Определяем отображение категории
-                category = link.category or 'general'
-                category_icons = {
-                    'airdrop': '🪂 Аирдроп',
-                    'staking': '💰 Стейкинг',
-                    'launchpool': '🚀 Лаунчпул',
-                    'announcement': '📢 Анонс',
-                    'general': '📁 Общее'
-                }
-                category_display = category_icons.get(category, '📁 Общее')
+            # НОВОЕ: Отображение Telegram аккаунта
+            if link.parsing_type == 'telegram' and hasattr(link, 'telegram_account') and link.telegram_account:
+                account = link.telegram_account
 
-                # Определяем отображение типа парсинга
-                parsing_type = link.parsing_type or 'combined'
-                parsing_type_icons = {
-                    'combined': '🔄 Комбинированный',
-                    'api': '👾 API',
-                    'html': '🌐 HTML',
-                    'browser': '🌐 Browser',
-                    'telegram': '📱 Telegram'
-                }
-                parsing_display = parsing_type_icons.get(parsing_type, '🔄 Комбинированный')
+                # Иконка статуса аккаунта
+                if account.is_blocked:
+                    account_status = "❌"
+                elif not account.is_active:
+                    account_status = "💤"
+                else:
+                    account_status = "✅"
 
-                response += f"<b>{link.name}</b>\n"
-                response += f"Категория: {category_display}\n"
-                response += f"Статус: {status}\n"
-                response += f"Парсинг: {parsing_display}\n"
-                response += f"Интервал: {interval_minutes} мин\n"
+                # Имя аккаунта (обрезаем если длинное)
+                account_name = account.name[:20] + "..." if len(account.name) > 20 else account.name
+                response += f"📱 TG аккаунт: {account_status} {account_name}\n"
 
-                # НОВОЕ: Отображение Telegram аккаунта
-                if link.parsing_type == 'telegram' and link.telegram_account:
-                    account = link.telegram_account
-
-                    # Иконка статуса аккаунта
-                    if account.is_blocked:
-                        account_status = "❌"
-                    elif not account.is_active:
-                        account_status = "💤"
-                    else:
-                        account_status = "✅"
-
-                    # Имя аккаунта (обрезаем если длинное)
-                    account_name = account.name[:20] + "..." if len(account.name) > 20 else account.name
-                    response += f"📱 TG аккаунт: {account_status} {account_name}\n"
-
-                response += f"URL: <code>{link.url}</code>\n\n"
-            
-            await message.answer(response, parse_mode="HTML")
+            response += f"URL: <code>{link.url}</code>\n\n"
+        
+        await message.answer(response, parse_mode="HTML")
             
     except Exception as e:
         logger.error(f"Ошибка при получении списка ссылок: {e}")
@@ -735,12 +1235,12 @@ async def menu_list_links(message: Message):
 async def menu_add_link(message: Message, state: FSMContext):
     """Начало процесса добавления ссылки - выбор категории"""
     builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📝 Общая ссылка", callback_data="add_category_general"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
-    builder.add(InlineKeyboardButton(text="🚀 Лаунчпул", callback_data="add_category_launchpool"))
-    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
+    builder.add(InlineKeyboardButton(text="� Анонс", callback_data="add_category_announcement"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
-    builder.adjust(2, 2, 1)
+    builder.adjust(1, 2, 1, 1)
 
     await message.answer(
         "🔗 <b>Добавление новой ссылки</b>\n\n"
@@ -759,6 +1259,7 @@ async def handle_category_choice(callback: CallbackQuery, state: FSMContext):
     await state.update_data(category=category)
 
     category_names = {
+        'general': 'Общая ссылка',
         'airdrop': 'Аирдроп',
         'staking': 'Стейкинг',
         'launchpool': 'Лаунчпул',
@@ -1165,93 +1666,54 @@ async def process_api_url_input(message: Message, state: FSMContext):
     # Сохраняем API URL
     await state.update_data(api_url=api_url)
 
-    # Создаем кнопки для выбора
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="➕ Добавить HTML ссылку", callback_data="add_html_url"))
-    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_url"))
-    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
-    builder.adjust(1)
-
-    await message.answer(
-        f"✅ API ссылка сохранена!\n\n"
-        f"🌐 <b>Шаг 4/5:</b> Добавить HTML ссылку?\n\n"
-        f"HTML ссылка используется как резервный метод парсинга, если API не сработает.\n\n"
-        f"Выберите действие:",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-
-# ОБРАБОТЧИКИ ДЛЯ ДОБАВЛЕНИЯ HTML ССЫЛКИ
-
-@router.callback_query(F.data == "add_html_url")
-async def add_html_url(callback: CallbackQuery, state: FSMContext):
-    """Обработчик кнопки 'Добавить HTML ссылку'"""
+    data = await state.get_data()
+    parsing_type = data.get('parsing_type', 'combined')
+    
+    # Для combined - сразу переходим к выбору парсера (пропускаем HTML)
+    if parsing_type == 'combined':
+        custom_name = data.get('custom_name')
+        await state.update_data(html_url=None)
+        # Переходим к выбору интервала (combined пропускает выбор парсера)
+        await _show_interval_selection_msg(message, state, custom_name)
+        return
+    
+    # Для api типа - предлагаем добавить HTML как fallback
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_url"))
     builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_url"))
     builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
     builder.adjust(1)
 
-    await callback.message.edit_text(
-        "🌐 <b>Введите HTML ссылку:</b>\n\n"
-        "Пример:\n"
-        "<code>https://www.bybit.com/en/trade/spot/token-splash</code>\n\n"
-        "HTML используется как резервный метод парсинга.",
+    await message.answer(
+        f"✅ API ссылка сохранена!\n\n"
+        f"🌐 <b>Шаг 4/6:</b> Введите HTML ссылку (опционально)\n\n"
+        f"HTML используется как резервный метод, если API не сработает.\n\n"
+        f"<b>Введите ссылку</b> или нажмите <b>Пропустить</b>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_html_url)
-    await callback.answer()
+
+# ОБРАБОТЧИКИ ДЛЯ ДОБАВЛЕНИЯ HTML ССЫЛКИ
 
 @router.callback_query(F.data == "skip_html_url")
 async def skip_html_url(callback: CallbackQuery, state: FSMContext):
-    """Обработчик кнопки 'Пропустить' HTML"""
+    """Обработчик кнопки 'Пропустить' HTML - переходим к выбору парсера"""
     data = await state.get_data()
-    custom_name = data.get('custom_name')
-    category = data.get('category', 'general')
-
-    # Создаем кнопки для выбора: добавить пример или пропустить
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="➕ Добавить пример ссылки", callback_data="add_example_url"))
-    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
-    builder.add(InlineKeyboardButton(text="❌ Отменить добавление", callback_data="cancel_add_link"))
-    builder.adjust(1)
-
-    # Разный текст для стейкинга и остальных категорий
-    if category == 'staking':
-        message_text = (
-            f"⏭️ HTML ссылка пропущена\n\n"
-            f"🔗 <b>Шаг 4/5: Добавить ссылку на страницу стейкинга?</b>\n\n"
-            f"<b>Имя:</b> {custom_name}\n\n"
-            f"Если вы предоставите ссылку на страницу стейкинга, бот сможет автоматически мониторить новые стейкинг предложения.\n\n"
-            f"<b>Примеры:</b>\n"
-            f"• KuCoin Earn: <code>https://www.kucoin.com/ru/earn</code>\n"
-            f"• Bybit Earn: <code>https://www.bybit.com/en/earn/home</code>\n\n"
-            f"Это опционально, но очень полезно!"
-        )
-    else:
-        message_text = (
-            f"⏭️ HTML ссылка пропущена\n\n"
-            f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
-            f"<b>Имя:</b> {custom_name}\n\n"
-            f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
-            f"<b>Пример:</b>\n"
-            f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
-            f"Это опционально, но очень полезно!"
-        )
-
-    await callback.message.edit_text(
-        message_text,
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-    # ИСПРАВЛЕНИЕ: устанавливаем состояние, чтобы принимать текстовый ввод
-    await state.set_state(AddLinkStates.waiting_for_example_url)
-    await callback.answer()
+    parsing_type = data.get('parsing_type', 'combined')
+    
+    # Для combined и telegram - пропускаем выбор парсера
+    if parsing_type in ['combined', 'telegram']:
+        custom_name = data.get('custom_name')
+        await _show_interval_selection(callback, state, custom_name)
+        return
+    
+    # Для остальных (api, html, browser) - показываем выбор парсера
+    await _show_parser_selection(callback, state)
 
 @router.message(AddLinkStates.waiting_for_html_url)
 async def process_html_url_input(message: Message, state: FSMContext):
-    """Обработка ввода HTML ссылки"""
+    """Обработка ввода HTML ссылки - переходим к выбору парсера"""
     html_url = message.text.strip()
 
     if not html_url.startswith(('http://', 'https://')):
@@ -1262,43 +1724,16 @@ async def process_html_url_input(message: Message, state: FSMContext):
     await state.update_data(html_url=html_url)
 
     data = await state.get_data()
-    custom_name = data.get('custom_name')
-    category = data.get('category', 'general')
-
-    # Создаем кнопки для выбора: добавить пример или пропустить
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="➕ Добавить пример ссылки", callback_data="add_example_url"))
-    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
-    builder.adjust(1)
-
-    # Разный текст для стейкинга и остальных категорий
-    if category == 'staking':
-        message_text = (
-            f"✅ HTML ссылка сохранена!\n\n"
-            f"🔗 <b>Шаг 4/5: Добавить ссылку на страницу стейкинга?</b>\n\n"
-            f"<b>Имя:</b> {custom_name}\n\n"
-            f"Если вы предоставите ссылку на страницу стейкинга, бот сможет автоматически мониторить новые стейкинг предложения.\n\n"
-            f"<b>Примеры:</b>\n"
-            f"• KuCoin Earn: <code>https://www.kucoin.com/ru/earn</code>\n"
-            f"• Bybit Earn: <code>https://www.bybit.com/en/earn/home</code>\n\n"
-            f"Это опционально, но очень полезно!"
-        )
-    else:
-        message_text = (
-            f"✅ HTML ссылка сохранена!\n\n"
-            f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
-            f"<b>Имя:</b> {custom_name}\n\n"
-            f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
-            f"<b>Пример:</b>\n"
-            f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
-            f"Это опционально, но очень полезно!"
-        )
-
-    await message.answer(
-        message_text,
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
+    parsing_type = data.get('parsing_type', 'combined')
+    
+    # Для combined и telegram - пропускаем выбор парсера
+    if parsing_type in ['combined', 'telegram']:
+        custom_name = data.get('custom_name')
+        await _show_interval_selection_msg(message, state, custom_name)
+        return
+    
+    # Для остальных (api, html, browser) - показываем выбор парсера
+    await _show_parser_selection_msg(message, state)
 
 # =============================================================================
 # ОБРАБОТЧИКИ ДЛЯ TELEGRAM ПАРСИНГА
@@ -1574,103 +2009,6 @@ async def back_to_telegram_channel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # =============================================================================
-# НОВЫЕ ОБРАБОТЧИКИ ДЛЯ ПРИМЕРА ССЫЛКИ
-# =============================================================================
-
-@router.callback_query(F.data == "add_example_url")
-async def add_example_url(callback: CallbackQuery, state: FSMContext):
-    """Обработчик кнопки 'Добавить пример ссылки'"""
-    data = await state.get_data()
-    category = data.get('category', 'general')
-
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
-    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
-    builder.adjust(1)
-
-    # Разный текст для стейкинга и остальных категорий
-    if category == 'staking':
-        message_text = (
-            "🔗 <b>Введите ссылку на страницу стейкинга:</b>\n\n"
-            "Примеры:\n"
-            "• KuCoin Earn:\n"
-            "<code>https://www.kucoin.com/ru/earn</code>\n\n"
-            "• Bybit Earn:\n"
-            "<code>https://www.bybit.com/en/earn/home</code>\n\n"
-            "Бот будет мониторить эту страницу на новые стейкинг предложения."
-        )
-    else:
-        message_text = (
-            "🔗 <b>Введите пример ссылки на промоакцию:</b>\n\n"
-            "Примеры:\n"
-            "• MEXC Launchpad:\n"
-            "<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
-            "• Bybit Token Splash:\n"
-            "<code>https://www.bybit.com/en/trade/spot/token-splash/detail?code=20251201080514</code>\n\n"
-            "Бот автоматически проанализирует ссылку и создаст шаблон для генерации ссылок."
-        )
-
-    await callback.message.edit_text(
-        message_text,
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
-    await state.set_state(AddLinkStates.waiting_for_example_url)
-    await callback.answer()
-
-@router.callback_query(F.data == "skip_example_url")
-async def skip_example_url(callback: CallbackQuery, state: FSMContext):
-    """Обработчик кнопки 'Пропустить' пример ссылки"""
-    data = await state.get_data()
-    custom_name = data.get('custom_name')
-    html_url = data.get('html_url')
-    api_url = data.get('api_url')
-    
-    # Проверяем, есть ли специальные парсеры для этого URL
-    url_to_check = html_url or api_url or ''
-    available_parsers = detect_special_parser_for_url(url_to_check)
-    
-    if available_parsers:
-        # Есть специальные парсеры - предлагаем выбор
-        builder = InlineKeyboardBuilder()
-        builder.add(InlineKeyboardButton(text="⚙️ Стандартный парсер", callback_data="special_parser_none"))
-        
-        for parser_id in available_parsers:
-            if parser_id in SPECIAL_PARSERS_CONFIG:
-                config = SPECIAL_PARSERS_CONFIG[parser_id]
-                btn_text = f"{config['emoji']} {config['name']}"
-                builder.add(InlineKeyboardButton(text=btn_text, callback_data=f"special_parser_{parser_id}"))
-        
-        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_html_url"))
-        builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
-        builder.adjust(1)
-        
-        # Формируем описание парсеров
-        parser_descriptions = []
-        for parser_id in available_parsers:
-            if parser_id in SPECIAL_PARSERS_CONFIG:
-                config = SPECIAL_PARSERS_CONFIG[parser_id]
-                parser_descriptions.append(f"{config['emoji']} <b>{config['name']}</b> - {config['description']}")
-        
-        await callback.message.edit_text(
-            f"🔧 <b>Выбор метода парсинга</b>\n\n"
-            f"<b>Имя:</b> {custom_name}\n\n"
-            f"Для этого URL доступны специальные парсеры:\n\n"
-            + "\n".join(parser_descriptions) + "\n\n"
-            f"⚙️ <b>Стандартный парсер</b> - обычный метод парсинга\n\n"
-            f"<i>Специальные парсеры используют продвинутые методы (перехват API, Playwright) "
-            f"для более надежного получения данных.</i>",
-            reply_markup=builder.as_markup(),
-            parse_mode="HTML"
-        )
-        await state.set_state(AddLinkStates.waiting_for_special_parser)
-        await callback.answer()
-        return
-
-    # Нет специальных парсеров - переходим к интервалу
-    await _show_interval_selection(callback, state, custom_name)
-
-# =============================================================================
 # ОБРАБОТЧИКИ "НАЗАД" ДЛЯ ДОБАВЛЕНИЯ ССЫЛКИ
 # =============================================================================
 
@@ -1678,12 +2016,12 @@ async def skip_example_url(callback: CallbackQuery, state: FSMContext):
 async def back_to_category(callback: CallbackQuery, state: FSMContext):
     """Возврат к выбору категории"""
     builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📝 Общая ссылка", callback_data="add_category_general"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
-    builder.add(InlineKeyboardButton(text="🚀 Лаунчпул", callback_data="add_category_launchpool"))
-    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
+    builder.add(InlineKeyboardButton(text="� Анонс", callback_data="add_category_announcement"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
-    builder.adjust(2, 2, 1)
+    builder.adjust(1, 2, 1, 1)
 
     await callback.message.edit_text(
         "🔗 <b>Добавление новой ссылки</b>\n\n"
@@ -1696,7 +2034,12 @@ async def back_to_category(callback: CallbackQuery, state: FSMContext):
 
 
 async def _show_interval_selection(callback: CallbackQuery, state: FSMContext, custom_name: str):
-    """Вспомогательная функция для показа выбора интервала"""
+    """Вспомогательная функция для показа выбора интервала (через callback)"""
+    data = await state.get_data()
+    selected_parser = data.get('selected_parser', 'auto')
+    parser_name = PARSERS_CONFIG.get(selected_parser, {}).get('name', 'Автоматический')
+    parser_emoji = PARSERS_CONFIG.get(selected_parser, {}).get('emoji', '🤖')
+    
     builder = InlineKeyboardBuilder()
     presets = [
         ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
@@ -1706,13 +2049,14 @@ async def _show_interval_selection(callback: CallbackQuery, state: FSMContext, c
 
     for text, seconds in presets:
         builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
-    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_html_url"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parser_selection"))
     builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
     builder.adjust(2, 2, 2, 2, 1, 2)
 
     await callback.message.edit_text(
         f"⏰ <b>Шаг 5/5: Выберите интервал проверки</b>\n\n"
-        f"<b>Имя:</b> {custom_name}\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Парсер:</b> {parser_emoji} {parser_name}\n\n"
         f"Как часто проверять эту ссылку на новые промоакции?",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
@@ -1721,9 +2065,217 @@ async def _show_interval_selection(callback: CallbackQuery, state: FSMContext, c
     await callback.answer()
 
 
+async def _show_interval_selection_msg(message: Message, state: FSMContext, custom_name: str):
+    """Вспомогательная функция для показа выбора интервала (через message)"""
+    data = await state.get_data()
+    selected_parser = data.get('selected_parser', 'auto')
+    parser_name = PARSERS_CONFIG.get(selected_parser, {}).get('name', 'Автоматический')
+    parser_emoji = PARSERS_CONFIG.get(selected_parser, {}).get('emoji', '🤖')
+    
+    builder = InlineKeyboardBuilder()
+    presets = [
+        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+    ]
+
+    for text, seconds in presets:
+        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_url"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2, 2, 2, 2, 1, 2)
+
+    await message.answer(
+        f"⏰ <b>Шаг 5/5: Выберите интервал проверки</b>\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Парсер:</b> {parser_emoji} {parser_name}\n\n"
+        f"Как часто проверять эту ссылку на новые промоакции?",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_interval)
+    await callback.answer()
+
+
+async def _show_parser_selection(callback: CallbackQuery, state: FSMContext):
+    """Вспомогательная функция для показа выбора парсера"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    category = data.get('category', 'general')
+    html_url = data.get('html_url')
+    api_url = data.get('api_url')
+    
+    # URL для определения доступных парсеров
+    url_to_check = html_url or api_url or ''
+    
+    # Получаем список доступных парсеров
+    parsers = get_available_parsers_for_context(category, url_to_check)
+    
+    # Формируем клавиатуру
+    builder = InlineKeyboardBuilder()
+    recommended_text = ""
+    
+    for parser_id, config, is_recommended in parsers:
+        emoji = config['emoji']
+        name = config['name']
+        
+        if is_recommended:
+            btn_text = f"{emoji} {name} ⭐"
+            recommended_text = f"\n\n⭐ <b>Рекомендуется:</b> {emoji} {name}"
+        else:
+            btn_text = f"{emoji} {name}"
+        
+        builder.add(InlineKeyboardButton(text=btn_text, callback_data=f"select_parser_{parser_id}"))
+    
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_input"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(1)
+    
+    # Формируем текст категории
+    category_names = {
+        'general': 'Общая ссылка',
+        'airdrop': 'Аирдроп',
+        'staking': 'Стейкинг',
+        'launchpool': 'Лаунчпул',
+        'announcement': 'Анонс'
+    }
+    category_display = category_names.get(category, category)
+    
+    await callback.message.edit_text(
+        f"🔧 <b>Шаг 4/5: Выберите парсер</b>\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Категория:</b> {category_display}\n"
+        f"<b>URL:</b> <code>{url_to_check[:50]}{'...' if len(url_to_check) > 50 else ''}</code>"
+        f"{recommended_text}\n\n"
+        f"Выберите парсер для обработки данных:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_parser_selection)
+    await callback.answer()
+
+
+async def _show_parser_selection_msg(message: Message, state: FSMContext):
+    """Вспомогательная функция для показа выбора парсера (через message)"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    category = data.get('category', 'general')
+    html_url = data.get('html_url')
+    api_url = data.get('api_url')
+    
+    # URL для определения доступных парсеров
+    url_to_check = html_url or api_url or ''
+    
+    # Получаем список доступных парсеров
+    parsers = get_available_parsers_for_context(category, url_to_check)
+    
+    # Формируем клавиатуру
+    builder = InlineKeyboardBuilder()
+    recommended_text = ""
+    
+    for parser_id, config, is_recommended in parsers:
+        emoji = config['emoji']
+        name = config['name']
+        
+        if is_recommended:
+            btn_text = f"{emoji} {name} ⭐"
+            recommended_text = f"\n\n⭐ <b>Рекомендуется:</b> {emoji} {name}"
+        else:
+            btn_text = f"{emoji} {name}"
+        
+        builder.add(InlineKeyboardButton(text=btn_text, callback_data=f"select_parser_{parser_id}"))
+    
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_url"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(1)
+    
+    # Формируем текст категории
+    category_names = {
+        'general': 'Общая ссылка',
+        'airdrop': 'Аирдроп',
+        'staking': 'Стейкинг',
+        'launchpool': 'Лаунчпул',
+        'announcement': 'Анонс'
+    }
+    category_display = category_names.get(category, category)
+    
+    await message.answer(
+        f"🔧 <b>Шаг 4/5: Выберите парсер</b>\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Категория:</b> {category_display}\n"
+        f"<b>URL:</b> <code>{url_to_check[:50]}{'...' if len(url_to_check) > 50 else ''}</code>"
+        f"{recommended_text}\n\n"
+        f"Выберите парсер для обработки данных:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_parser_selection)
+
+
+@router.callback_query(AddLinkStates.waiting_for_parser_selection, F.data.startswith("select_parser_"))
+async def process_parser_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора парсера"""
+    parser_id = callback.data.replace("select_parser_", "")
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    
+    # Сохраняем выбранный парсер
+    await state.update_data(selected_parser=parser_id)
+    
+    # Для специальных парсеров также сохраняем в special_parser
+    if parser_id in ['weex', 'okx_boost']:
+        await state.update_data(special_parser=parser_id)
+    elif parser_id == 'auto':
+        await state.update_data(special_parser=None)
+    else:
+        # Для staking, announcement, universal - сохраняем в selected_parser
+        await state.update_data(special_parser=None)
+    
+    parser_name = PARSERS_CONFIG.get(parser_id, {}).get('name', parser_id)
+    logger.info(f"🔧 Выбран парсер '{parser_name}' для '{custom_name}'")
+    
+    # Переходим к выбору интервала
+    await _show_interval_selection(callback, state, custom_name)
+
+
+@router.callback_query(F.data == "back_to_parser_selection")
+async def back_to_parser_selection(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору парсера"""
+    data = await state.get_data()
+    parsing_type = data.get('parsing_type', 'combined')
+    
+    # Если combined или telegram - возвращаемся к URL
+    if parsing_type in ['combined', 'telegram']:
+        await callback.answer("Выбор парсера недоступен для этого типа", show_alert=True)
+        return
+    
+    await _show_parser_selection(callback, state)
+
+
+@router.callback_query(F.data == "back_to_url_input")
+async def back_to_url_input(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу HTML URL"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_url"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_url"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        f"🌐 <b>Шаг 4/5:</b> Введите HTML ссылку (опционально)\n\n"
+        f"HTML используется как резервный метод, если API не сработает.\n\n"
+        f"<b>Введите ссылку</b> или нажмите <b>Пропустить</b>",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_html_url)
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("special_parser_"))
 async def process_special_parser_selection(callback: CallbackQuery, state: FSMContext):
-    """Обработка выбора специального парсера"""
+    """Обработка выбора специального парсера (legacy)"""
     parser_id = callback.data.replace("special_parser_", "")
     
     data = await state.get_data()
@@ -1731,11 +2283,11 @@ async def process_special_parser_selection(callback: CallbackQuery, state: FSMCo
     
     if parser_id == "none":
         # Стандартный парсер
-        await state.update_data(special_parser=None)
+        await state.update_data(special_parser=None, selected_parser='auto')
         logger.info(f"📋 Выбран стандартный парсер для '{custom_name}'")
     else:
         # Специальный парсер
-        await state.update_data(special_parser=parser_id)
+        await state.update_data(special_parser=parser_id, selected_parser=parser_id)
         parser_name = SPECIAL_PARSERS_CONFIG.get(parser_id, {}).get('name', parser_id)
         logger.info(f"🔧 Выбран специальный парсер '{parser_name}' для '{custom_name}'")
     
@@ -1750,6 +2302,7 @@ async def back_to_name(callback: CallbackQuery, state: FSMContext):
     category = data.get('category', 'general')
 
     category_names = {
+        'general': 'Общая ссылка',
         'airdrop': 'Аирдроп',
         'staking': 'Стейкинг',
         'launchpool': 'Лаунчпул',
@@ -1851,53 +2404,24 @@ async def back_to_api_url(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "back_to_html_url")
 async def back_to_html_url(callback: CallbackQuery, state: FSMContext):
-    """Возврат к шагу добавления/пропуска HTML ссылки"""
+    """Возврат к шагу ввода HTML ссылки"""
     data = await state.get_data()
-    custom_name = data.get('custom_name')
-    category = data.get('category', 'general')
-    api_url = data.get('api_url')
-    parsing_type = data.get('parsing_type', 'combined')
-
-    # Создаем кнопки для выбора: добавить пример или пропустить
+    
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="➕ Добавить пример ссылки", callback_data="add_example_url"))
-    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_example_url"))
-
-    # Кнопка "Назад" зависит от наличия API URL
-    if api_url:
-        builder.add(InlineKeyboardButton(text="← Назад", callback_data="add_html_url"))
-    else:
-        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parsing_type"))
-
-    builder.add(InlineKeyboardButton(text="❌ Отменить добавление", callback_data="cancel_add_link"))
+    builder.add(InlineKeyboardButton(text="⏭️ Пропустить", callback_data="skip_html_url"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_url"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
     builder.adjust(1)
 
-    # Разный текст для стейкинга и остальных категорий
-    if category == 'staking':
-        message_text = (
-            f"🔗 <b>Шаг 4/5: Добавить ссылку на страницу стейкинга?</b>\n\n"
-            f"<b>Имя:</b> {custom_name}\n\n"
-            f"Если вы предоставите ссылку на страницу стейкинга, бот сможет автоматически мониторить новые стейкинг предложения.\n\n"
-            f"<b>Примеры:</b>\n"
-            f"• KuCoin Earn: <code>https://www.kucoin.com/ru/earn</code>\n"
-            f"• Bybit Earn: <code>https://www.bybit.com/en/earn/home</code>\n\n"
-            f"Это опционально, но очень полезно!"
-        )
-    else:
-        message_text = (
-            f"🔗 <b>Шаг 4/5: Добавить пример ссылки на промоакцию?</b>\n\n"
-            f"<b>Имя:</b> {custom_name}\n\n"
-            f"Если вы предоставите пример ссылки на промоакцию, бот автоматически научится генерировать правильные ссылки для всех будущих промоакций этой биржи.\n\n"
-            f"<b>Пример:</b>\n"
-            f"<code>https://www.mexc.com/ru-RU/launchpad/monad/6912adb5e4b0e60c0ec02d2c</code>\n\n"
-            f"Это опционально, но очень полезно!"
-        )
-
     await callback.message.edit_text(
-        message_text,
+        f"🌐 <b>Шаг 4/5:</b> Введите HTML ссылку (опционально)\n\n"
+        f"HTML используется как резервный метод, если API не сработает.\n\n"
+        f"<b>Введите ссылку</b> или нажмите <b>Пропустить</b>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
+    await state.set_state(AddLinkStates.waiting_for_html_url)
+    await callback.answer()
     await state.set_state(AddLinkStates.waiting_for_example_url)
     await callback.answer()
 
@@ -2061,8 +2585,15 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         announcement_regex = data.get('announcement_regex')
         announcement_css_selector = data.get('announcement_css_selector')
         
-        # СПЕЦИАЛЬНЫЙ ПАРСЕР:
-        special_parser = data.get('special_parser')
+        # СПЕЦИАЛЬНЫЙ ПАРСЕР (новая логика с selected_parser):
+        selected_parser = data.get('selected_parser', 'auto')
+        # Конвертируем selected_parser в special_parser для БД
+        if selected_parser == 'auto':
+            special_parser = None  # Автоматический выбор
+        elif selected_parser == 'universal':
+            special_parser = None  # Универсальный = стандартный
+        else:
+            special_parser = selected_parser  # staking, announcement, weex, okx_boost
 
         def add_link_operation(session):
             # Проверяем дубликаты по URL
@@ -2219,11 +2750,18 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         category_display = category_names.get(category, category)
 
         # Формируем детальное сообщение
+        # Получаем информацию о выбранном парсере
+        selected_parser = data.get('selected_parser', 'auto')
+        parser_info = PARSERS_CONFIG.get(selected_parser, {})
+        parser_emoji = parser_info.get('emoji', '🤖')
+        parser_name = parser_info.get('name', 'Автоматический')
+        
         message_parts = [
             "✅ <b>Ссылка успешно добавлена!</b>\n\n",
             f"<b>Имя:</b> {custom_name}\n",
             f"<b>Категория:</b> {category_display}\n",
             f"<b>Тип парсинга:</b> {parsing_type_display}\n",
+            f"<b>Парсер:</b> {parser_emoji} {parser_name}\n",
             f"<b>Интервал проверки:</b> {interval_minutes} минут\n\n"
         ]
 
@@ -2778,8 +3316,8 @@ async def check_staking_pools(callback: CallbackQuery):
 
 @router.callback_query(F.data == "manage_view_current_stakings")
 async def view_current_stakings(callback: CallbackQuery):
-    """Показать текущие стейкинги (страница 1) с автообновлением"""
-    logger.info(f"📋 ОТКРЫТИЕ ТЕКУЩИХ СТЕЙКИНГОВ")
+    """Показать текущие стейкинги из БД (без принудительного парсинга)"""
+    logger.info(f"📋 ОТКРЫТИЕ ТЕКУЩИХ СТЕЙКИНГОВ (из БД)")
     try:
         user_id = callback.from_user.id
         link_id = user_selections.get(user_id)
@@ -2789,82 +3327,36 @@ async def view_current_stakings(callback: CallbackQuery):
             await callback.answer("❌ Ошибка: ссылка не выбрана", show_alert=True)
             return
 
-        # Получить данные ссылки
-        with get_db_session() as db:
-            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+        # Используем async получение данных ссылки с кэшированием (Фаза 4)
+        link = await get_link_by_id_async(link_id)
+        
+        if not link:
+            await callback.answer("❌ Ссылка не найдена", show_alert=True)
+            return
 
-            if not link:
-                await callback.answer("❌ Ссылка не найдена", show_alert=True)
-                return
+        if link.category != 'staking':
+            await callback.answer("❌ Эта функция доступна только для стейкинг-ссылок", show_alert=True)
+            return
 
-            if link.category != 'staking':
-                await callback.answer("❌ Эта функция доступна только для стейкинг-ссылок", show_alert=True)
-                return
+        exchange_name = link.name
+        min_apr = link.min_apr
+        page_url = link.page_url
+        api_url = link.api_url or link.url
+        exchange = link.exchange
+        last_checked = link.last_checked  # Время последней проверки
 
-            exchange_name = link.name
-            min_apr = link.min_apr
-            page_url = link.page_url
-            api_url = link.api_url or link.url
-            exchange = link.exchange
-
-        # Закрываем callback сразу
+        # Закрываем callback сразу для отзывчивости UI
         await callback.answer()
-
-        # Отправляем сообщение о загрузке
-        status_msg = await callback.message.answer(
-            f"⏳ <b>Загрузка данных {exchange_name}...</b>\n"
-            f"📊 Получение актуальных стейкинг-продуктов",
-            parse_mode="HTML"
-        )
-
-        # АВТОМАТИЧЕСКИ запускаем парсер для получения свежих данных
-        from bot.parser_service import ParserService
-        from utils.exchange_detector import detect_exchange_from_url
-        import asyncio
-
-        # Автоопределение биржи если не указана
-        if not exchange or exchange in ['Unknown', 'None', '', 'null']:
-            exchange = detect_exchange_from_url(api_url)
-            logger.info(f"🔍 Автоопределение биржи: {exchange}")
-
-        exchange_filter = exchange or exchange_name
-
-        # Запускаем парсер и ЖДЕМ его завершения
-        parser_service = ParserService()
-        loop = asyncio.get_event_loop()
-
-        try:
-            logger.info(f"{'='*60}")
-            logger.info(f"🔄 АВТООБНОВЛЕНИЕ СТЕЙКИНГОВ: {exchange_name}")
-            logger.info(f"   link_id={link_id}")
-            logger.info(f"   api_url={api_url}")
-            logger.info(f"   exchange={exchange}")
-            logger.info(f"{'='*60}")
-
-            # СИНХРОННО выполняем парсинг
-            new_stakings = await loop.run_in_executor(
-                None,
-                parser_service.parse_staking_link,
-                link_id,
-                api_url,
-                exchange,
-                page_url
-            )
-
-            logger.info(f"✅ ПАРСЕР ЗАВЕРШИЛ РАБОТУ: {len(new_stakings) if new_stakings else 0} записей")
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга {exchange_name}: {e}", exc_info=True)
-
-        # Удаляем сообщение о статусе
-        try:
-            await status_msg.delete()
-        except:
-            pass
 
         # Нормализуем exchange для правильного поиска в БД
         from utils.exchange_detector import detect_exchange_from_url
-        exchange_filter = detect_exchange_from_url(api_url) if api_url else (link.exchange or link.name)
+        
+        # Автоопределение биржи если не указана
+        if not exchange or exchange in ['Unknown', 'None', '', 'null']:
+            exchange = detect_exchange_from_url(api_url) if api_url else exchange_name
+            logger.info(f"🔍 Автоопределение биржи: {exchange}")
+
+        exchange_filter = exchange or exchange_name
 
         # Получить стейкинги с дельтами
         from services.staking_snapshot_service import StakingSnapshotService
@@ -2922,7 +3414,8 @@ async def view_current_stakings(callback: CallbackQuery):
                 'exchange_name': exchange_name,
                 'min_apr': min_apr,
                 'page_url': page_url,
-                'is_okx_flash': True
+                'is_okx_flash': True,
+                'last_checked': last_checked  # Время последней проверки
             }
         else:
             # Стандартная пагинация по стейкингам
@@ -2942,16 +3435,17 @@ async def view_current_stakings(callback: CallbackQuery):
                 'exchange_name': exchange_name,
                 'min_apr': min_apr,
                 'page_url': page_url,
-                'is_okx_flash': False
+                'is_okx_flash': False,
+                'last_checked': last_checked  # Время последней проверки
             }
 
         logger.info(f"   💾 Состояние сохранено: page={page}, link_id={link_id}, total_pages={total_pages}")
         logger.info(f"   🔑 Текущее состояние в памяти: {current_stakings_state}")
         logger.info(f"   📱 Всего стейкингов: {len(stakings_with_deltas)}, на странице: {len(page_stakings)}")
 
-        # Форматировать сообщение
+        # Форматировать сообщение (skip_price_fetch=True - данные уже в БД, не нужны внешние запросы)
         from bot.notification_service import NotificationService
-        notif_service = NotificationService(bot=callback.bot)
+        notif_service = NotificationService(bot=callback.bot, skip_price_fetch=True)
 
         # Для OKX Flash Earn используем специальный формат с группировкой по проектам
         if is_okx_flash:
@@ -2961,7 +3455,8 @@ async def view_current_stakings(callback: CallbackQuery):
                 total_pages=total_pages,
                 exchange_name=exchange_name,
                 min_apr=min_apr,
-                page_url=page_url
+                page_url=page_url,
+                last_checked=last_checked
             )
         else:
             message_text = notif_service.format_current_stakings_page(
@@ -2970,7 +3465,8 @@ async def view_current_stakings(callback: CallbackQuery):
                 total_pages=total_pages,
                 exchange_name=exchange_name,
                 min_apr=min_apr,
-                page_url=page_url
+                page_url=page_url,
+                last_checked=last_checked
             )
 
         # Отправить с кнопками
@@ -3048,9 +3544,9 @@ async def navigate_stakings_page(callback: CallbackQuery):
             end_idx = start_idx + per_page
             page_stakings = stakings_with_deltas[start_idx:end_idx]
 
-        # Форматировать сообщение
+        # Форматировать сообщение (skip_price_fetch=True - данные уже в БД)
         from bot.notification_service import NotificationService
-        notif_service = NotificationService(bot=callback.bot)
+        notif_service = NotificationService(bot=callback.bot, skip_price_fetch=True)
 
         # Для OKX Flash Earn используем специальный формат
         if is_okx_flash:
@@ -3088,11 +3584,12 @@ async def navigate_stakings_page(callback: CallbackQuery):
         logger.error(f"❌ Ошибка навигации: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
 
-@router.callback_query(F.data == "stakings_refresh")
-async def refresh_current_stakings(callback: CallbackQuery):
-    """Обновить данные текущих стейкингов"""
+
+@router.callback_query(F.data == "stakings_force_parse")
+async def force_parse_stakings(callback: CallbackQuery):
+    """Принудительный парсинг стейкингов (с обновлением БД)"""
     logger.info("="*80)
-    logger.info("🔔 CALLBACK ВЫЗВАН: stakings_refresh")
+    logger.info("🔍 ПРИНУДИТЕЛЬНЫЙ ПАРСИНГ СТЕЙКИНГОВ")
     logger.info("="*80)
     try:
         user_id = callback.from_user.id
@@ -3133,7 +3630,7 @@ async def refresh_current_stakings(callback: CallbackQuery):
             api_url = link.api_url or link.url
             exchange = link.exchange
 
-        # ПРИНУДИТЕЛЬНО запускаем парсер в фоне (НЕ блокируем callback)
+        # ПРИНУДИТЕЛЬНО запускаем парсер
         from bot.parser_service import ParserService
         from utils.exchange_detector import detect_exchange_from_url
         import asyncio
@@ -3143,7 +3640,7 @@ async def refresh_current_stakings(callback: CallbackQuery):
             exchange = detect_exchange_from_url(api_url)
             logger.info(f"🔍 Автоопределение биржи: {exchange}")
 
-        # Используем exchange для поиска стейкингов (не link.name!)
+        # Используем exchange для поиска стейкингов
         exchange_filter = exchange or exchange_name
 
         # Закрываем callback
@@ -3151,7 +3648,7 @@ async def refresh_current_stakings(callback: CallbackQuery):
 
         # Отправляем сообщение о начале обновления
         status_msg = await callback.message.answer(
-            f"⏳ <b>Обновление данных {exchange_name}...</b>\n"
+            f"⏳ <b>Принудительный парсинг {exchange_name}...</b>\n"
             f"📊 Запуск парсера стейкинг-продуктов",
             parse_mode="HTML"
         )
@@ -3162,15 +3659,15 @@ async def refresh_current_stakings(callback: CallbackQuery):
 
         try:
             logger.info(f"{'='*60}")
-            logger.info(f"🔄 ОБНОВЛЕНИЕ СТЕЙКИНГОВ: {exchange_name}")
+            logger.info(f"🔄 ПРИНУДИТЕЛЬНЫЙ ПАРСИНГ СТЕЙКИНГОВ: {exchange_name}")
             logger.info(f"   link_id={link_id}")
             logger.info(f"   api_url={api_url}")
             logger.info(f"   exchange={exchange}")
             logger.info(f"{'='*60}")
 
-            # СИНХРОННО выполняем парсинг (ждем результата)
+            # СИНХРОННО выполняем парсинг
             new_stakings = await loop.run_in_executor(
-                None,
+                get_executor(),
                 parser_service.parse_staking_link,
                 link_id,
                 api_url,
@@ -3182,13 +3679,20 @@ async def refresh_current_stakings(callback: CallbackQuery):
             logger.info(f"   Получено новых записей: {len(new_stakings) if new_stakings else 0}")
             logger.info(f"{'='*60}")
 
+            # Обновляем last_checked для ApiLink
+            with get_db_session() as db:
+                link_record = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+                if link_record:
+                    link_record.last_checked = datetime.utcnow()
+                    db.commit()
+
             # Удаляем сообщение о статусе
             await status_msg.delete()
 
         except Exception as e:
-            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при обновлении {exchange_name}: {e}", exc_info=True)
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при принудительном парсинге {exchange_name}: {e}", exc_info=True)
             await status_msg.edit_text(
-                f"❌ <b>Ошибка при обновлении {exchange_name}</b>\n"
+                f"❌ <b>Ошибка при парсинге {exchange_name}</b>\n"
                 f"Показываю данные из кэша",
                 parse_mode="HTML"
             )
@@ -3200,7 +3704,7 @@ async def refresh_current_stakings(callback: CallbackQuery):
         snapshot_service = StakingSnapshotService()
 
         stakings_with_deltas = snapshot_service.get_stakings_with_deltas(
-            exchange=exchange_filter,  # Используем правильное название биржи
+            exchange=exchange_filter,
             min_apr=min_apr
         )
 
@@ -3226,7 +3730,7 @@ async def refresh_current_stakings(callback: CallbackQuery):
                 projects[project_key].append(item)
 
             project_list = list(projects.values())
-            per_page = 2  # 2 проекта на страницу
+            per_page = 2
             total_pages = max(1, (len(project_list) + per_page - 1) // per_page)
 
             if current_page > total_pages:
@@ -3268,9 +3772,9 @@ async def refresh_current_stakings(callback: CallbackQuery):
         state['min_apr'] = min_apr
         state['page_url'] = page_url
 
-        # Форматировать сообщение
+        # Форматировать сообщение (skip_price_fetch=True - данные уже в БД)
         from bot.notification_service import NotificationService
-        notif_service = NotificationService(bot=callback.bot)
+        notif_service = NotificationService(bot=callback.bot, skip_price_fetch=True)
 
         # Для OKX Flash Earn используем специальный формат
         if is_okx_flash:
@@ -3292,6 +3796,12 @@ async def refresh_current_stakings(callback: CallbackQuery):
                 page_url=page_url
             )
 
+        # Добавляем время парсинга
+        from datetime import timedelta
+        now_local = datetime.utcnow() + timedelta(hours=2)
+        last_updated_str = now_local.strftime("%d.%m.%Y %H:%M")
+        message_text += f"\n\n⏱ <i>Обновлено: {last_updated_str}</i>"
+
         # Отправляем НОВОЕ сообщение с обновленными данными
         keyboard = get_current_stakings_keyboard(current_page, total_pages)
 
@@ -3303,18 +3813,119 @@ async def refresh_current_stakings(callback: CallbackQuery):
         )
 
     except Exception as e:
-        logger.error(f"❌ Ошибка обновления: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка обновления", show_alert=True)
+        logger.error(f"❌ Ошибка принудительного парсинга стейкингов: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка парсинга", show_alert=True)
 
 
 # =============================================================================
 # ОБРАБОТЧИКИ ТЕКУЩИХ ПРОМОАКЦИЙ (AIRDROP)
 # =============================================================================
 
+def get_promos_from_db(link_id: int, exchange_name: str = None) -> list:
+    """
+    Получить промоакции из БД для конкретной ссылки.
+    
+    Args:
+        link_id: ID ссылки в БД
+        exchange_name: Название биржи (для фильтрации)
+    
+    Returns:
+        Список словарей с данными промоакций
+    """
+    from data.models import PromoHistory
+    from sqlalchemy import or_
+    
+    try:
+        now = datetime.utcnow()
+        
+        with get_db_session() as session:
+            # Базовый запрос по link_id
+            query = session.query(PromoHistory).filter(
+                PromoHistory.api_link_id == link_id
+            )
+            
+            # Фильтр по статусу - только активные (включая MEXC статусы и числовые коды Bybit)
+            query = query.filter(
+                or_(
+                    PromoHistory.status.ilike('%ongoing%'),
+                    PromoHistory.status.ilike('%active%'),
+                    PromoHistory.status.ilike('%upcoming%'),
+                    PromoHistory.status.ilike('%underway%'),  # MEXC Launchpad
+                    PromoHistory.status == None,
+                    PromoHistory.status == '0',  # Bybit: 0 = активный (сохраняется как строка)
+                    PromoHistory.status == '1',  # Bybit: 1 = активный
+                    PromoHistory.status == ''    # Пустая строка = активный
+                )
+            )
+            
+            # Фильтр по времени окончания
+            query = query.filter(
+                or_(
+                    PromoHistory.end_time == None,
+                    PromoHistory.end_time > now
+                )
+            )
+            
+            # Сортируем по дате создания (новые первые)
+            query = query.order_by(PromoHistory.created_at.desc())
+            
+            promos = query.all()
+            
+            # Конвертируем в словари, фильтруем пустые промо
+            result = []
+            for promo in promos:
+                # Пропускаем промо без данных (например "Gate.io Promo gate.io_200")
+                # Но НЕ пропускаем если есть нормальный title (для WeexTS, Telegram и других)
+                has_data = promo.total_prize_pool or promo.participants_count
+                has_meaningful_title = promo.title and not promo.title.startswith('Gate.io Promo')
+                if not has_data and not has_meaningful_title:
+                    logger.debug(f"⏭️ Пропускаем пустую промоакцию: {promo.title}")
+                    continue
+                    
+                promo_dict = {
+                    'promo_id': promo.promo_id,
+                    'title': promo.title or 'Без названия',
+                    'description': promo.description,
+                    'award_token': promo.award_token,
+                    'total_prize_pool': promo.total_prize_pool,
+                    'total_prize_pool_usd': promo.total_prize_pool_usd,
+                    'reward_per_winner': promo.reward_per_winner,
+                    'reward_per_winner_usd': promo.reward_per_winner_usd,
+                    'participants_count': promo.participants_count,
+                    'winners_count': promo.winners_count,
+                    'conditions': promo.conditions,
+                    'reward_type': promo.reward_type,
+                    'status': promo.status or 'ongoing',
+                    'start_time': promo.start_time,
+                    'end_time': promo.end_time,
+                    'link': promo.link,
+                    'last_updated': promo.last_updated,
+                    'exchange': promo.exchange,
+                    # Gate.io специфичные поля
+                    'user_max_rewards': promo.max_reward_per_user,
+                    # MEXC Airdrop специфичные поля (раздельные пулы)
+                    'token_pool': promo.token_pool,
+                    'token_pool_currency': promo.token_pool_currency,
+                    'bonus_usdt': promo.bonus_usdt,
+                    'token_price': promo.token_price,
+                    # Для специальных форматов (MEXC Launchpad, OKX Boost и т.д.)
+                    'promo_type': promo.promo_type,
+                    'raw_data': promo.raw_data
+                }
+                result.append(promo_dict)
+            
+            logger.info(f"📊 Получено {len(result)} промоакций из БД для link_id={link_id}")
+            return result
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения промоакций из БД: {e}", exc_info=True)
+        return []
+
+
 @router.callback_query(F.data == "manage_view_current_promos")
 async def view_current_promos(callback: CallbackQuery):
-    """Показать текущие промоакции (свежие данные из API)"""
-    logger.info(f"📋 ОТКРЫТИЕ ТЕКУЩИХ ПРОМОАКЦИЙ")
+    """Показать текущие промоакции из БД (без принудительного парсинга)"""
+    logger.info(f"📋 ОТКРЫТИЕ ТЕКУЩИХ ПРОМОАКЦИЙ (из БД)")
     try:
         user_id = callback.from_user.id
         link_id = user_selections.get(user_id)
@@ -3324,273 +3935,104 @@ async def view_current_promos(callback: CallbackQuery):
             await callback.answer("❌ Ошибка: ссылка не выбрана", show_alert=True)
             return
 
-        # Получить данные ссылки
-        with get_db_session() as db:
-            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
-
-            if not link:
-                await callback.answer("❌ Ссылка не найдена", show_alert=True)
-                return
-
-            if link.category != 'airdrop':
-                await callback.answer("❌ Эта функция доступна только для airdrop-ссылок", show_alert=True)
-                return
-
-            exchange_name = link.name
-            page_url = link.page_url
-            api_url = link.api_url or link.url
-            html_url = link.html_url
-            parsing_type = link.parsing_type or 'api'
-
-        # Закрываем callback сразу
-        await callback.answer("🔄 Загрузка данных...")
-
-        # Отправляем сообщение о загрузке
-        loading_msg = await callback.message.edit_text(
-            f"⏳ <b>Загрузка промоакций {exchange_name}...</b>\n\n"
-            f"🌐 Получаем актуальные данные из API...",
-            parse_mode="HTML"
-        )
-
-        # Получаем СВЕЖИЕ данные через парсер в зависимости от типа
-        from datetime import datetime
-        import asyncio
+        # Используем async получение данных ссылки с кэшированием (Фаза 4)
+        link = await get_link_by_id_async(link_id)
         
-        api_promos = []
-        try:
-            # Определяем биржу из URL для выбора специального парсера
-            def get_exchange_from_url(url: str) -> str:
-                try:
-                    from urllib.parse import urlparse
-                    parsed = urlparse(url)
-                    domain = parsed.netloc.lower()
-                    parts = domain.split('.')
-                    if len(parts) >= 2:
-                        return parts[-2] if parts[-1] in ['com', 'io', 'org', 'net', 'ru'] else parts[-1]
-                    return domain
-                except:
-                    return ''
-            
-            # Проверяем все URL для определения биржи
-            check_url = html_url or api_url or page_url or ''
-            exchange = get_exchange_from_url(check_url)
-            logger.info(f"   🔍 Определена биржа: {exchange}")
-            
-            # Специальные парсеры для конкретных бирж
-            if exchange == 'weex':
-                from parsers.weex_parser import WeexParser
-                
-                def run_weex_parser():
-                    parser = WeexParser(html_url or api_url)
-                    return parser.get_promotions()
-                
-                loop = asyncio.get_event_loop()
-                api_promos = await loop.run_in_executor(None, run_weex_parser)
-                logger.info(f"   📊 Получено через WeexParser: {len(api_promos) if api_promos else 0} промоакций")
-            elif parsing_type == 'browser':
-                # Browser парсер - используем в отдельном потоке чтобы избежать конфликта с asyncio
-                from parsers.browser_parser import BrowserParser
-                
-                def run_browser_parser():
-                    parser = BrowserParser(api_url)
-                    return parser.get_promotions()
-                
-                # Запускаем синхронный код в executor
-                loop = asyncio.get_event_loop()
-                api_promos = await loop.run_in_executor(None, run_browser_parser)
-                logger.info(f"   📊 Получено через Browser: {len(api_promos)} промоакций")
-            else:
-                # API/combined парсер - используем UniversalParser (обычный HTTP)
-                from parsers.universal_parser import UniversalParser
-                parser = UniversalParser(api_url)
-                api_promos = parser.get_promotions()
-                logger.info(f"   📊 Получено через API: {len(api_promos)} промоакций")
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения данных: {e}", exc_info=True)
-            api_promos = []
+        if not link:
+            await callback.answer("❌ Ссылка не найдена", show_alert=True)
+            return
 
-        if not api_promos:
-            await loading_msg.edit_text(
+        if link.category != 'airdrop':
+            await callback.answer("❌ Эта функция доступна только для airdrop-ссылок", show_alert=True)
+            return
+
+        exchange_name = link.name
+        page_url = link.page_url
+        api_url = link.api_url or link.url
+        html_url = link.html_url
+        last_checked = link.last_checked  # Время последней проверки
+
+        # Закрываем callback сразу для отзывчивости UI
+        await callback.answer()
+
+        # Получаем данные из БД (без парсинга)
+        promos_data = get_promos_from_db(link_id, exchange_name)
+        
+        # Форматируем время последнего обновления
+        last_updated_str = ""
+        if last_checked:
+            try:
+                from datetime import timedelta
+                if isinstance(last_checked, datetime):
+                    local_time = last_checked + timedelta(hours=2)
+                    last_updated_str = local_time.strftime("%d.%m.%Y %H:%M")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось отформатировать last_checked: {e}")
+
+        # Если данных нет в БД
+        if not promos_data:
+            message_text = (
                 f"🎁 <b>ТЕКУЩИЕ ПРОМОАКЦИИ</b>\n\n"
-                f"<b>🏦 Биржа:</b> {exchange_name}\n\n"
-                f"📭 <i>Не удалось получить данные из API.\n"
-                f"Попробуйте позже или проверьте подключение.</i>",
+                f"<b>🏦 Биржа:</b> {exchange_name}\n"
+            )
+            if last_updated_str:
+                message_text += f"<b>⏱️ Обновлено:</b> {last_updated_str}\n"
+            message_text += (
+                f"\n📭 <i>Нет данных в базе.</i>\n"
+                f"<i>Используйте \"🔍 Принудительная проверка\" для загрузки данных.</i>"
+            )
+            
+            await callback.message.edit_text(
+                message_text,
                 parse_mode="HTML",
                 reply_markup=get_current_promos_keyboard(1, 1)
             )
             return
 
-        # Для Weex - WeexParser уже возвращает готовые данные с правильной структурой
-        # Пропускаем стандартную фильтрацию и используем данные напрямую
-        if exchange == 'weex':
-            promos_data = api_promos  # WeexParser уже фильтрует активные
-            # Определяем тип страницы Weex (airdrop или rewards)
-            url_to_check = (html_url or page_url or '').lower()
-            is_weex_rewards = '/rewards' in url_to_check
-            if is_weex_rewards:
-                logger.info(f"   ✅ Weex rewards: {len(promos_data)} промоакций")
-            else:
-                logger.info(f"   ✅ Weex airdrop: {len(promos_data)} промоакций")
-            is_okx_boost = False
-            is_gate_candy = False
-            is_mexc_airdrop = False
-            is_weex = True
-            is_weex_rewards_page = is_weex_rewards
-        else:
-            # Фильтруем только активные промоакции (end_time > now)
-            now = datetime.utcnow()
-            promos_data = []
-            
-            for promo in api_promos:
-                # Конвертируем время если нужно
-                start_time = promo.get('start_time')
-                end_time = promo.get('end_time')
-                
-                # Конвертируем timestamp в datetime
-                if isinstance(start_time, (int, float)) and start_time > 0:
-                    if start_time > 10**10:
-                        start_time = datetime.fromtimestamp(start_time / 1000)
-                    else:
-                        start_time = datetime.fromtimestamp(start_time)
-                
-                if isinstance(end_time, (int, float)) and end_time > 0:
-                    if end_time > 10**10:
-                        end_time = datetime.fromtimestamp(end_time / 1000)
-                    else:
-                        end_time = datetime.fromtimestamp(end_time)
-                
-                # Проверяем активность (end_time > now или end_time = None)
-                is_active = True
-                if end_time and isinstance(end_time, datetime):
-                    is_active = end_time > now
-                
-                # Также проверяем статус из API (для GateCandy activity_status)
-                api_status = str(promo.get('status', '')).lower()
-                if api_status == 'ended':
-                    is_active = False
-                
-                if not is_active:
-                    logger.debug(f"   ⏭️ Пропускаем завершенную: {promo.get('title')}")
-                    continue
-                
-                # Проверяем что промо не пустое (есть хотя бы награды или участники)
-                has_data = (
-                    promo.get('total_prize_pool') or 
-                    promo.get('participants_count') or 
-                    promo.get('user_max_rewards') or
-                    promo.get('conditions')
-                )
-                if not has_data:
-                    logger.debug(f"   ⏭️ Пропускаем пустое промо: {promo.get('title')}")
-                    continue
-                
-                promo_id = promo.get('promo_id') or f"{exchange_name}_{promo.get('id', len(promos_data))}"
-                
-                promo_dict = {
-                    'promo_id': promo_id,
-                    'title': promo.get('title', 'Без названия'),
-                    'award_token': promo.get('award_token'),
-                    'total_prize_pool': promo.get('total_prize_pool'),
-                    'total_prize_pool_usd': promo.get('total_prize_pool_usd'),
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'participants_count': promo.get('participants_count'),
-                    'winners_count': promo.get('winners_count'),
-                    'reward_per_winner': promo.get('reward_per_winner'),
-                    'reward_per_winner_usd': promo.get('reward_per_winner_usd'),
-                    'conditions': promo.get('conditions'),
-                    'reward_type': promo.get('reward_type'),
-                    'status': 'ongoing' if is_active else 'ended',
-                    'link': promo.get('link'),
-                    # GateCandy специфичные поля
-                    'user_max_rewards': promo.get('user_max_rewards'),
-                    'user_max_rewards_usd': promo.get('user_max_rewards_usd'),
-                    'exchange_rate': promo.get('exchange_rate'),
-                    'phase': promo.get('phase')
-                }
-                promos_data.append(promo_dict)
-
-            logger.info(f"   ✅ Активных промоакций: {len(promos_data)}")
-
-            # Проверяем, является ли это OKX Boost
-            is_okx_boost = False
-            is_gate_candy = False
-            is_mexc_airdrop = False
-            if api_promos and len(api_promos) > 0:
-                first_promo = api_promos[0]
-                is_okx_boost = first_promo.get('promo_type') == 'okx_boost'
-                is_mexc_airdrop = first_promo.get('promo_type') == 'mexc_airdrop'
-            
-            # Проверяем GateCandy по имени биржи или URL
-            if 'gatecandy' in exchange_name.lower().replace(' ', '').replace('.', ''):
-                is_gate_candy = True
-            elif api_url and 'candydrop' in api_url.lower():
-                is_gate_candy = True
-            
-            # Проверяем MEXC Airdrop по URL
-            if not is_mexc_airdrop and api_url:
-                if 'eftd' in api_url.lower() or 'token-airdrop' in (page_url or '').lower():
-                    is_mexc_airdrop = True
-            
-            # Weex уже обработан выше
-            is_weex = False
-            is_weex_rewards_page = False
-            
-            # Для OKX Boost фильтруем только активные (ongoing + upcoming)
-            if is_okx_boost:
-                # Фильтруем только активные и upcoming
-                active_promos = [p for p in api_promos if p.get('status') in ['ongoing', 'upcoming']]
-                promos_data = active_promos
-                logger.info(f"   🚀 Режим OKX Boost: {len(promos_data)} активных launchpool'ов (отфильтровано из {len(api_promos)})")
-            
-            # Для MEXC Airdrop используем данные напрямую (уже отфильтрованы в парсере)
-            if is_mexc_airdrop:
-                promos_data = api_promos
-                logger.info(f"   🪂 Режим MEXC Airdrop: {len(promos_data)} аирдропов")
-
-        # Записываем участников в историю и получаем статистику (для ВСЕХ бирж)
-        if promos_data:
+        # Определяем тип биржи по URL для правильного форматирования
+        def get_exchange_from_url(url: str) -> str:
             try:
-                from services.participants_tracker_service import get_participants_tracker
-                tracker = get_participants_tracker()
-                
-                # Записываем текущие данные
-                tracker.record_batch(exchange_name, promos_data)
-                
-                # Получаем статистику для каждого промо
-                for promo in promos_data:
-                    promo_id = promo.get('promo_id')
-                    if promo_id:
-                        stats = tracker.get_participants_stats(exchange_name, promo_id)
-                        promo['participants_stats'] = stats
-                
-                logger.info(f"   📊 Статистика участников обновлена для {len(promos_data)} промо ({exchange_name})")
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось обновить статистику участников: {e}")
+                parsed = urlparse(url)
+                domain = parsed.netloc.lower()
+                parts = domain.split('.')
+                if len(parts) >= 2:
+                    return parts[-2] if parts[-1] in ['com', 'io', 'org', 'net', 'ru'] else parts[-1]
+                return domain
+            except:
+                return ''
+        
+        check_url = html_url or api_url or page_url or ''
+        exchange = get_exchange_from_url(check_url)
+        
+        # Определяем тип биржи
+        is_okx_boost = exchange == 'okx' and 'boost' in (page_url or '').lower()
+        is_gate_candy = 'gatecandy' in exchange_name.lower().replace(' ', '').replace('.', '') or (api_url and 'candydrop' in api_url.lower())
+        is_mexc_airdrop = (api_url and 'eftd' in api_url.lower()) or (page_url and 'token-airdrop' in page_url.lower())
+        is_mexc_launchpad = (api_url and 'launchpad/list' in api_url.lower()) or (page_url and '/launchpad' in page_url.lower() and 'mexc' in exchange.lower())
+        is_weex = exchange == 'weex'
+        is_weex_rewards_page = is_weex and '/rewards' in (html_url or page_url or '').lower()
 
-        # Пагинация - для OKX Boost показываем по 5
+        # Пагинация
         page = 1
-        per_page = 5  # По 5 на страницу
+        per_page = 5
         total_pages = max(1, (len(promos_data) + per_page - 1) // per_page)
         start_idx = (page - 1) * per_page
         end_idx = start_idx + per_page
         page_promos = promos_data[start_idx:end_idx]
 
-        # Получаем предыдущие данные о участниках из состояния
-        prev_state = current_promos_state.get(user_id, {})
-        prev_participants = prev_state.get('participants_snapshot', {})
-        
-        # Создаём снимок текущих участников
-        current_participants = {}
-        for p in promos_data:
-            pid = p.get('promo_id')
-            # Поддерживаем оба варианта названия поля (participants_count и participants)
-            pcount = p.get('participants_count') or p.get('participants')
-            if pid and pcount:
-                try:
-                    current_participants[pid] = int(float(str(pcount).replace(',', '').replace(' ', '')))
-                except:
-                    pass
+        # Добавляем статистику участников для ВСЕХ бирж при первом открытии
+        if page_promos:
+            try:
+                from services.participants_tracker_service import get_participants_tracker
+                tracker = get_participants_tracker()
+                
+                for promo in page_promos:
+                    promo_id = promo.get('promo_id')
+                    if promo_id:
+                        stats = tracker.get_participants_stats(exchange_name, promo_id)
+                        promo['participants_stats'] = stats
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка загрузки статистики участников: {e}")
 
         # Сохранить состояние
         current_promos_state[user_id] = {
@@ -3600,57 +4042,44 @@ async def view_current_promos(callback: CallbackQuery):
             'promos': promos_data,
             'exchange_name': exchange_name,
             'page_url': page_url,
-            'is_okx_boost': is_okx_boost,  # Сохраняем тип для пагинации
-            'is_gate_candy': is_gate_candy,  # Сохраняем тип для GateCandy
-            'is_mexc_airdrop': is_mexc_airdrop,  # Сохраняем тип для MEXC Airdrop
-            'is_weex': is_weex,  # Сохраняем тип для Weex
-            'is_weex_rewards': is_weex_rewards_page if is_weex else False,  # Тип страницы Weex (rewards или airdrop)
-            'participants_snapshot': current_participants  # Сохраняем снимок участников
+            'is_okx_boost': is_okx_boost,
+            'is_gate_candy': is_gate_candy,
+            'is_mexc_airdrop': is_mexc_airdrop,
+            'is_mexc_launchpad': is_mexc_launchpad,
+            'is_weex': is_weex,
+            'is_weex_rewards': is_weex_rewards_page,
+            'last_checked': last_checked,
+            'last_updated_str': last_updated_str,
+            'participants_snapshot': {}
         }
-        logger.info(f"   💾 Состояние сохранено: page={page}, total_pages={total_pages}, is_okx_boost={is_okx_boost}, is_gate_candy={is_gate_candy}, is_mexc_airdrop={is_mexc_airdrop}, is_weex={is_weex}")
+        logger.info(f"   💾 Состояние сохранено: page={page}, total_pages={total_pages}")
 
-        # Форматировать сообщение
-        notif_service = NotificationService(bot=callback.bot)
+        # Форматировать сообщение (skip_price_fetch=True - данные уже в БД, не нужны внешние запросы)
+        notif_service = NotificationService(bot=callback.bot, skip_price_fetch=True)
 
-        # Используем специальный форматтер в зависимости от типа биржи
-        if is_okx_boost:
-            message_text = notif_service.format_okx_boost_page(
-                promos=page_promos,
-                page=page,
-                total_pages=total_pages,
-                page_url="https://web3.okx.com/ua/boost"
-            )
-        elif is_gate_candy:
+        # Используем специальный форматтер для каждой биржи
+        if is_gate_candy:
             message_text = notif_service.format_gate_candy_page(
                 promos=page_promos,
                 page=page,
                 total_pages=total_pages,
                 page_url=page_url,
-                prev_participants=prev_participants
+                prev_participants={}
             )
-        elif is_mexc_airdrop:
-            message_text = notif_service.format_mexc_airdrop_page(
+        elif is_weex:
+            message_text = notif_service.format_weex_airdrop_page(
                 promos=page_promos,
                 page=page,
                 total_pages=total_pages,
-                page_url=page_url or 'https://www.mexc.com/ru-RU/token-airdrop'
+                page_url=page_url
             )
-        elif is_weex:
-            # Используем разные форматтеры для airdrop и rewards
-            if is_weex_rewards_page:
-                message_text = notif_service.format_weex_rewards_page(
-                    promos=page_promos,
-                    page=page,
-                    total_pages=total_pages,
-                    page_url=page_url or 'https://www.weex.com/rewards'
-                )
-            else:
-                message_text = notif_service.format_weex_airdrop_page(
-                    promos=page_promos,
-                    page=page,
-                    total_pages=total_pages,
-                    page_url=page_url or 'https://www.weex.com/token-airdrop'
-                )
+        elif is_mexc_launchpad:
+            message_text = notif_service.format_mexc_launchpad_page(
+                promos=page_promos,
+                page=page,
+                total_pages=total_pages,
+                page_url=page_url
+            )
         else:
             message_text = notif_service.format_current_promos_page(
                 promos=page_promos,
@@ -3660,10 +4089,23 @@ async def view_current_promos(callback: CallbackQuery):
                 page_url=page_url
             )
 
+        # Добавляем информацию о времени последнего обновления сразу после "🏦 Биржа:"
+        if last_updated_str:
+            # Вставляем время обновления после строки с биржей
+            if "<b>🏦 Биржа:</b>" in message_text:
+                # Находим позицию после строки с биржей и вставляем время
+                lines = message_text.split('\n')
+                new_lines = []
+                for line in lines:
+                    new_lines.append(line)
+                    if "<b>🏦 Биржа:</b>" in line:
+                        new_lines.append(f"<b>⏱️ Обновлено:</b> {last_updated_str}")
+                message_text = '\n'.join(new_lines)
+
         # Отправить с кнопками
         keyboard = get_current_promos_keyboard(page, total_pages)
 
-        await loading_msg.edit_text(
+        await callback.message.edit_text(
             message_text,
             parse_mode="HTML",
             reply_markup=keyboard,
@@ -3673,6 +4115,202 @@ async def view_current_promos(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"❌ Ошибка просмотра промоакций: {e}", exc_info=True)
         await callback.answer("❌ Ошибка загрузки данных", show_alert=True)
+
+
+@router.callback_query(F.data == "promos_force_parse")
+async def force_parse_promos(callback: CallbackQuery):
+    """Принудительный парсинг промоакций (с обновлением БД)"""
+    logger.info("🔍 ПРИНУДИТЕЛЬНЫЙ ПАРСИНГ ПРОМОАКЦИЙ")
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ошибка: ссылка не выбрана", show_alert=True)
+            return
+        
+        # Получаем данные ссылки
+        link = await get_link_by_id_async(link_id)
+        
+        if not link:
+            await callback.answer("❌ Ссылка не найдена", show_alert=True)
+            return
+        
+        if link.category != 'airdrop':
+            await callback.answer("❌ Эта функция доступна только для airdrop-ссылок", show_alert=True)
+            return
+        
+        exchange_name = link.name
+        page_url = link.page_url
+        api_url = link.api_url or link.url
+        html_url = link.html_url
+        parsing_type = link.parsing_type or 'api'
+        
+        # Закрываем callback сразу
+        await callback.answer()
+        
+        # Используем LoadingContext для индикации загрузки
+        async with LoadingContext(
+            callback,
+            f"⏳ <b>Принудительный парсинг {exchange_name}...</b>\n\n🌐 Получаем актуальные данные из API...",
+            delete_on_complete=True,
+            edit_original=True
+        ) as loading:
+            # Получаем СВЕЖИЕ данные через парсер
+            api_promos = []
+            try:
+                # Определяем биржу из URL
+                def get_exchange_from_url(url: str) -> str:
+                    try:
+                        parsed = urlparse(url)
+                        domain = parsed.netloc.lower()
+                        parts = domain.split('.')
+                        if len(parts) >= 2:
+                            return parts[-2] if parts[-1] in ['com', 'io', 'org', 'net', 'ru'] else parts[-1]
+                        return domain
+                    except:
+                        return ''
+                
+                check_url = html_url or api_url or page_url or ''
+                exchange = get_exchange_from_url(check_url)
+                logger.info(f"   🔍 Определена биржа: {exchange}")
+                
+                await loading.update(f"🔄 <b>Парсинг {exchange_name}...</b>\n📊 Обработка данных")
+                
+                # Специальные парсеры для конкретных бирж
+                if exchange == 'weex':
+                    from parsers.weex_parser import WeexParser
+                    
+                    def run_weex_parser():
+                        parser = WeexParser(html_url or api_url)
+                        return parser.get_promotions()
+                    
+                    loop = asyncio.get_event_loop()
+                    api_promos = await loop.run_in_executor(get_executor(), run_weex_parser)
+                    logger.info(f"   📊 Получено через WeexParser: {len(api_promos) if api_promos else 0} промоакций")
+                elif parsing_type == 'browser':
+                    from parsers.browser_parser import BrowserParser
+                    
+                    def run_browser_parser():
+                        parser = BrowserParser(api_url)
+                        return parser.get_promotions()
+                    
+                    loop = asyncio.get_event_loop()
+                    api_promos = await loop.run_in_executor(get_executor(), run_browser_parser)
+                    logger.info(f"   📊 Получено через Browser: {len(api_promos)} промоакций")
+                else:
+                    from parsers.universal_parser import UniversalParser
+                    parser = UniversalParser(api_url)
+                    api_promos = parser.get_promotions()
+                    logger.info(f"   📊 Получено через API: {len(api_promos)} промоакций")
+            except Exception as e:
+                logger.error(f"❌ Ошибка получения данных: {e}", exc_info=True)
+                api_promos = []
+        
+        # После LoadingContext - используем ParserService для обогащения и сохранения уже полученных данных
+        if api_promos:
+            try:
+                from bot.parser_service import ParserService
+                
+                # ParserService правильно обогащает данные USD и обновляет БД
+                parser_service = ParserService()
+                
+                # Определяем биржу для обогащения ценами
+                check_url = html_url or api_url or page_url or ''
+                exchange = parser_service._extract_exchange_from_url(check_url)
+                
+                # Обогащаем уже полученные данные USD ценами
+                enriched_promos = parser_service._enrich_promos_with_prices(api_promos, exchange)
+                
+                # Фильтруем и обновляем существующие записи (это также сохраняет USD)
+                new_promos = parser_service._filter_new_promotions(link_id, enriched_promos)
+                
+                # Сохраняем новые промоакции если есть
+                if new_promos:
+                    parser_service._save_to_history(link_id, new_promos)
+                    logger.info(f"💾 Сохранено {len(new_promos)} новых промоакций")
+                
+                # Записываем историю участников для отслеживания изменений
+                try:
+                    from services.participants_tracker_service import ParticipantsTrackerService
+                    recorded = ParticipantsTrackerService.record_batch(exchange_name, api_promos)
+                    if recorded > 0:
+                        logger.info(f"📊 Записано {recorded} записей в историю участников")
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка записи истории участников: {e}")
+                
+                logger.info(f"✅ Принудительный парсинг: обновлено {len(api_promos)} промоакций")
+            except Exception as e:
+                logger.error(f"❌ Ошибка сохранения промоакций в БД: {e}", exc_info=True)
+        
+        # Теперь показываем данные из БД (уже обновлённые)
+        try:
+            await view_current_promos(callback)
+        except TelegramBadRequest as e:
+            # Callback устарел - отправляем результат в новом сообщении
+            if "query is too old" in str(e):
+                logger.warning(f"⚠️ Callback устарел, отправляем результат в новом сообщении")
+                try:
+                    # Получаем данные из БД для нового сообщения
+                    promos_data = get_promos_from_db(link_id, exchange_name)
+                    if promos_data:
+                        # Форматируем сообщение
+                        notif_service = NotificationService(bot=callback.bot, skip_price_fetch=True)
+                        
+                        # Определяем тип биржи
+                        check_url = html_url or api_url or page_url or ''
+                        is_mexc_airdrop = (api_url and 'eftd' in api_url.lower()) or (page_url and 'token-airdrop' in page_url.lower())
+                        is_mexc_launchpad = (api_url and 'launchpad/list' in api_url.lower()) or (page_url and '/launchpad' in page_url.lower())
+                        is_gate_candy = 'gatecandy' in exchange_name.lower().replace(' ', '').replace('.', '') or (api_url and 'candydrop' in api_url.lower())
+                        is_weex = 'weex' in (check_url or '').lower()
+                        
+                        page = 1
+                        per_page = 5
+                        total_pages = max(1, (len(promos_data) + per_page - 1) // per_page)
+                        page_promos = promos_data[:per_page]
+                        
+                        if is_gate_candy:
+                            message_text = notif_service.format_gate_candy_page(promos=page_promos, page=page, total_pages=total_pages, page_url=page_url, prev_participants={})
+                        elif is_weex:
+                            message_text = notif_service.format_weex_airdrop_page(promos=page_promos, page=page, total_pages=total_pages, page_url=page_url)
+                        elif is_mexc_launchpad:
+                            message_text = notif_service.format_mexc_launchpad_page(promos=page_promos, page=page, total_pages=total_pages, page_url=page_url)
+                        else:
+                            message_text = notif_service.format_current_promos_page(promos=page_promos, page=page, total_pages=total_pages, exchange_name=exchange_name, page_url=page_url)
+                        
+                        # Добавляем информацию о том, что это результат долгой проверки
+                        message_text = f"⏰ <i>Результат принудительной проверки (callback устарел):</i>\n\n" + message_text
+                        
+                        keyboard = get_current_promos_keyboard(page, total_pages)
+                        await callback.message.answer(message_text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
+                        logger.info(f"✅ Результат отправлен в новом сообщении")
+                    else:
+                        await callback.message.answer(f"✅ Принудительная проверка {exchange_name} завершена.\n📭 Активных промоакций не найдено.", parse_mode="HTML")
+                except Exception as send_err:
+                    logger.error(f"❌ Ошибка отправки нового сообщения: {send_err}")
+            else:
+                raise
+        
+    except TelegramBadRequest as e:
+        if "query is too old" not in str(e):
+            logger.error(f"❌ Ошибка Telegram: {e}")
+        else:
+            # Callback устарел на уровне принудительного парсинга - тоже отправляем новое сообщение
+            logger.warning(f"⚠️ Callback устарел на этапе парсинга")
+            try:
+                await callback.message.answer(f"⏰ <i>Принудительная проверка завершена, но callback устарел.</i>\n\n<b>Данные обновлены!</b> Используйте '📋 Текущие промоакции' чтобы увидеть результат.", parse_mode="HTML")
+            except:
+                pass
+    except Exception as e:
+        logger.error(f"❌ Ошибка принудительного парсинга промоакций: {e}", exc_info=True)
+        try:
+            await callback.answer("❌ Ошибка парсинга", show_alert=True)
+        except TelegramBadRequest:
+            # Callback устарел - отправляем ошибку в новом сообщении
+            try:
+                await callback.message.answer(f"❌ Ошибка принудительного парсинга: {str(e)[:100]}", parse_mode="HTML")
+            except:
+                pass
 
 
 @router.callback_query(F.data.startswith("promos_page_"))
@@ -3721,6 +4359,7 @@ async def navigate_promos_page(callback: CallbackQuery):
         is_okx_boost = state.get('is_okx_boost', False)
         is_gate_candy = state.get('is_gate_candy', False)
         is_mexc_airdrop = state.get('is_mexc_airdrop', False)
+        is_mexc_launchpad = state.get('is_mexc_launchpad', False)
         is_weex = state.get('is_weex', False)
         is_weex_rewards = state.get('is_weex_rewards', False)
         prev_participants = state.get('participants_snapshot', {})
@@ -3745,18 +4384,11 @@ async def navigate_promos_page(callback: CallbackQuery):
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка обновления статистики при пагинации: {e}")
 
-        # Форматировать сообщение
-        notif_service = NotificationService(bot=callback.bot)
+        # Форматировать сообщение (skip_price_fetch=True - данные уже в БД)
+        notif_service = NotificationService(bot=callback.bot, skip_price_fetch=True)
 
-        # Используем специальный форматтер в зависимости от типа биржи
-        if is_okx_boost:
-            message_text = notif_service.format_okx_boost_page(
-                promos=page_promos,
-                page=new_page,
-                total_pages=total_pages,
-                page_url="https://web3.okx.com/ua/boost"
-            )
-        elif is_gate_candy:
+        # Используем специальный форматтер для каждой биржи
+        if is_gate_candy:
             message_text = notif_service.format_gate_candy_page(
                 promos=page_promos,
                 page=new_page,
@@ -3764,29 +4396,20 @@ async def navigate_promos_page(callback: CallbackQuery):
                 page_url=page_url,
                 prev_participants=prev_participants
             )
-        elif is_mexc_airdrop:
-            message_text = notif_service.format_mexc_airdrop_page(
+        elif is_weex:
+            message_text = notif_service.format_weex_airdrop_page(
                 promos=page_promos,
                 page=new_page,
                 total_pages=total_pages,
-                page_url=page_url or 'https://www.mexc.com/ru-RU/token-airdrop'
+                page_url=page_url
             )
-        elif is_weex:
-            # Используем разные форматтеры для airdrop и rewards
-            if is_weex_rewards:
-                message_text = notif_service.format_weex_rewards_page(
-                    promos=page_promos,
-                    page=new_page,
-                    total_pages=total_pages,
-                    page_url=page_url or 'https://www.weex.com/rewards'
-                )
-            else:
-                message_text = notif_service.format_weex_airdrop_page(
-                    promos=page_promos,
-                    page=new_page,
-                    total_pages=total_pages,
-                    page_url=page_url or 'https://www.weex.com/token-airdrop'
-                )
+        elif is_mexc_launchpad:
+            message_text = notif_service.format_mexc_launchpad_page(
+                promos=page_promos,
+                page=new_page,
+                total_pages=total_pages,
+                page_url=page_url
+            )
         else:
             message_text = notif_service.format_current_promos_page(
                 promos=page_promos,
@@ -3795,6 +4418,18 @@ async def navigate_promos_page(callback: CallbackQuery):
                 exchange_name=exchange_name,
                 page_url=page_url
             )
+
+        # Добавляем время обновления сразу после "🏦 Биржа:"
+        last_updated_str = state.get('last_updated_str', '')
+        if last_updated_str:
+            if "<b>🏦 Биржа:</b>" in message_text:
+                lines = message_text.split('\n')
+                new_lines = []
+                for line in lines:
+                    new_lines.append(line)
+                    if "<b>🏦 Биржа:</b>" in line:
+                        new_lines.append(f"<b>⏱️ Обновлено:</b> {last_updated_str}")
+                message_text = '\n'.join(new_lines)
 
         # Отправить с обновленными кнопками
         keyboard = get_current_promos_keyboard(new_page, total_pages)
@@ -4462,11 +5097,11 @@ async def process_cancel(callback: CallbackQuery):
     else:
         # Если нет контекста управления - возвращаемся в главное меню
         clear_navigation(user_id)
-        await callback.message.delete()
-        await callback.message.answer(
-            "🏠 Главное меню\n\n"
-            "Используйте кнопки меню ниже для выбора действия",
-            reply_markup=get_main_menu()
+        await callback.message.edit_text(
+            "🏠 <b>Меню</b>\n\n"
+            "📌 <i>Выберите действие:</i>",
+            reply_markup=get_main_menu_inline(),
+            parse_mode="HTML"
         )
 
     await callback.answer()
@@ -4506,22 +5141,22 @@ async def nav_back_handler(callback: CallbackQuery):
         else:
             # Если контекст неизвестен, возвращаемся в главное меню
             clear_navigation(user_id)
-            await callback.message.delete()
-            await callback.message.answer(
-                "🏠 Главное меню\n\n"
-                "Используйте кнопки меню ниже для выбора действия",
-                reply_markup=get_main_menu()
+            await callback.message.edit_text(
+                "🏠 <b>Меню</b>\n\n"
+                "📌 <i>Выберите действие:</i>",
+                reply_markup=get_main_menu_inline(),
+                parse_mode="HTML"
             )
             await callback.answer()
             return
     else:
         # Если стек пустой, возвращаемся в главное меню
         clear_navigation(user_id)
-        await callback.message.delete()
-        await callback.message.answer(
-            "🏠 Главное меню\n\n"
-            "Используйте кнопки меню ниже для выбора действия",
-            reply_markup=get_main_menu()
+        await callback.message.edit_text(
+            "🏠 <b>Меню</b>\n\n"
+            "📌 <i>Выберите действие:</i>",
+            reply_markup=get_main_menu_inline(),
+            parse_mode="HTML"
         )
         await callback.answer()
         return
@@ -4547,14 +5182,12 @@ async def back_to_main_menu_handler(callback: CallbackQuery):
     """Возврат в главное меню"""
     clear_navigation(callback.from_user.id)
 
-    # Удаляем inline сообщение
-    await callback.message.delete()
-
-    # Отправляем новое сообщение с ReplyKeyboard
-    await callback.message.answer(
-        "🏠 Главное меню\n\n"
-        "Используйте кнопки меню ниже для выбора действия",
-        reply_markup=get_main_menu()
+    # Редактируем текущее сообщение на главное меню
+    await callback.message.edit_text(
+        "🏠 <b>Меню</b>\n\n"
+        "📌 <i>Выберите действие:</i>",
+        reply_markup=get_main_menu_inline(),
+        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -6331,6 +6964,19 @@ async def menu_check_all(message: Message):
     else:
         await message.answer("❌ Бот не инициализирован")
 
+
+@router.message(F.text == "🏠 Меню")
+async def menu_show_main(message: Message):
+    """Показать главное меню с inline-кнопками"""
+    clear_navigation(message.from_user.id)
+
+    await message.answer(
+        "🏠 <b>Меню</b>\n\n"
+        "📌 <i>Выберите действие:</i>",
+        reply_markup=get_main_menu_inline(),
+        parse_mode="HTML"
+    )
+
 @router.message(F.text == "🛡️ Обход блокировок")
 async def menu_bypass(message: Message):
     """Показать подменю обхода блокировок"""
@@ -7506,4 +8152,445 @@ def _format_timestamp(timestamp: float) -> str:
         return "никогда"
     dt = datetime.fromtimestamp(timestamp)
     return dt.strftime("%d.%m.%Y %H:%M:%S")
+
+
+# =============================================================================
+# ТОП АКТИВНОСТИ - ОБРАБОТЧИКИ
+# =============================================================================
+
+# Состояние пагинации для ТОП АКТИВНОСТИ
+top_activity_state = {}
+
+@router.callback_query(F.data == "top_activity_menu")
+async def show_top_activity_menu(callback: CallbackQuery):
+    """Показать главное меню ТОП АКТИВНОСТИ"""
+    try:
+        from services.top_activity_service import get_top_activity_service
+        from bot.keyboards import get_top_activity_menu_keyboard
+        
+        service = get_top_activity_service()
+        stats = service.get_statistics()
+        
+        now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+        
+        message = (
+            f"📊 <b>ТОП АКТИВНОСТИ</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🕐 <b>Обновлено:</b> {now} UTC\n\n"
+            f"📈 <b>Статистика:</b>\n"
+            f"├─ 🔥 Стейкингов: {stats.get('active_stakings', 0)} активных\n"
+            f"├─ 🎁 Промоакций: {stats.get('active_promos', 0)} активных\n"
+            f"├─ 🏦 Бирж (стейкинг): {stats.get('staking_exchanges', 0)}\n"
+            f"└─ 🏦 Бирж (промо): {stats.get('promo_exchanges', 0)}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Выберите раздел:"
+        )
+        
+        await callback.message.edit_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=get_top_activity_menu_keyboard()
+        )
+        await safe_answer_callback(callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка открытия ТОП АКТИВНОСТИ: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка загрузки", show_alert=True)
+
+
+@router.callback_query(F.data == "top_activity_refresh")
+async def refresh_top_activity(callback: CallbackQuery):
+    """Обновить данные ТОП АКТИВНОСТИ"""
+    await show_top_activity_menu(callback)
+
+
+@router.callback_query(F.data == "top_activity_stakings")
+async def show_top_stakings(callback: CallbackQuery):
+    """Показать ТОП стейкингов со всех бирж"""
+    try:
+        from services.top_activity_service import get_top_activity_service
+        from bot.keyboards import get_top_stakings_keyboard
+        
+        user_id = callback.from_user.id
+        
+        # Используем LoadingContext для отзывчивого UI
+        async with LoadingContext(
+            callback,
+            "⏳ <b>Загрузка ТОП стейкингов...</b>\n\n🔄 Агрегируем данные со всех бирж...",
+            delete_on_complete=True,
+            edit_original=True
+        ) as loading:
+            service = get_top_activity_service()
+            stakings = service.get_top_stakings(limit=50)  # Получаем больше для пагинации
+        
+        if not stakings:
+            await callback.message.edit_text(
+                "📊 <b>ТОП СТЕЙКИНГОВ</b>\n\n"
+                "📭 <i>Нет активных стейкингов в базе данных.\n"
+                "Убедитесь что добавлены ссылки на биржи с категорией 'staking'.</i>",
+                parse_mode="HTML",
+                reply_markup=get_top_stakings_keyboard(1, 1)
+            )
+            return
+        
+        # Сохраняем состояние пагинации
+        items_per_page = 5
+        total_pages = max(1, (len(stakings) + items_per_page - 1) // items_per_page)
+        
+        top_activity_state[user_id] = {
+            'stakings': stakings,
+            'page': 1,
+            'items_per_page': items_per_page,
+            'total_pages': total_pages
+        }
+        
+        # Форматируем первую страницу
+        message = format_top_stakings_page(stakings, 1, total_pages, items_per_page)
+        
+        await callback.message.edit_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=get_top_stakings_keyboard(1, total_pages)
+        )
+        await safe_answer_callback(callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки ТОП стейкингов: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка загрузки", show_alert=True)
+
+
+@router.callback_query(F.data.in_(["top_stakings_prev", "top_stakings_next"]))
+async def navigate_top_stakings(callback: CallbackQuery):
+    """Навигация по страницам ТОП стейкингов"""
+    try:
+        from bot.keyboards import get_top_stakings_keyboard
+        
+        user_id = callback.from_user.id
+        state = top_activity_state.get(user_id)
+        
+        if not state or 'stakings' not in state:
+            await callback.answer("❌ Данные устарели, обновите список", show_alert=True)
+            return
+        
+        # Изменяем страницу
+        current_page = state['page']
+        total_pages = state['total_pages']
+        
+        if callback.data == "top_stakings_prev" and current_page > 1:
+            current_page -= 1
+        elif callback.data == "top_stakings_next" and current_page < total_pages:
+            current_page += 1
+        
+        state['page'] = current_page
+        
+        # Форматируем страницу
+        message = format_top_stakings_page(
+            state['stakings'], 
+            current_page, 
+            total_pages, 
+            state['items_per_page']
+        )
+        
+        await callback.message.edit_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=get_top_stakings_keyboard(current_page, total_pages)
+        )
+        await safe_answer_callback(callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка навигации ТОП стейкингов: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "top_activity_promos")
+async def show_top_promos(callback: CallbackQuery):
+    """Показать ТОП промоакций со всех бирж"""
+    try:
+        from services.top_activity_service import get_top_activity_service
+        from bot.keyboards import get_top_promos_keyboard
+        
+        user_id = callback.from_user.id
+        
+        # Используем LoadingContext для отзывчивого UI
+        async with LoadingContext(
+            callback,
+            "⏳ <b>Загрузка ТОП промоакций...</b>\n\n🔄 Агрегируем данные со всех бирж...",
+            delete_on_complete=True,
+            edit_original=True
+        ) as loading:
+            service = get_top_activity_service()
+            promos = service.get_top_promos(limit=50)  # Получаем больше для пагинации
+        
+        if not promos:
+            await callback.message.edit_text(
+                "📊 <b>ТОП ПРОМОАКЦИЙ</b>\n\n"
+                "📭 <i>Нет активных промоакций в базе данных.\n"
+                "Убедитесь что добавлены ссылки на биржи с категорией 'airdrop'.</i>",
+                parse_mode="HTML",
+                reply_markup=get_top_promos_keyboard(1, 1),
+                disable_web_page_preview=True
+            )
+            return
+        
+        # Сохраняем состояние пагинации
+        items_per_page = 5
+        total_pages = max(1, (len(promos) + items_per_page - 1) // items_per_page)
+        
+        top_activity_state[user_id] = {
+            'promos': promos,
+            'page': 1,
+            'items_per_page': items_per_page,
+            'total_pages': total_pages,
+            'type': 'promos'
+        }
+        
+        # Форматируем первую страницу
+        message = format_top_promos_page(promos, 1, total_pages, items_per_page)
+        
+        await callback.message.edit_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=get_top_promos_keyboard(1, total_pages),
+            disable_web_page_preview=True
+        )
+        await safe_answer_callback(callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки ТОП промоакций: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка загрузки", show_alert=True)
+
+
+@router.callback_query(F.data.in_(["top_promos_prev", "top_promos_next"]))
+async def navigate_top_promos(callback: CallbackQuery):
+    """Навигация по страницам ТОП промоакций"""
+    try:
+        from bot.keyboards import get_top_promos_keyboard
+        
+        user_id = callback.from_user.id
+        state = top_activity_state.get(user_id)
+        
+        if not state or 'promos' not in state:
+            await callback.answer("❌ Данные устарели, обновите список", show_alert=True)
+            return
+        
+        # Изменяем страницу
+        current_page = state['page']
+        total_pages = state['total_pages']
+        
+        if callback.data == "top_promos_prev" and current_page > 1:
+            current_page -= 1
+        elif callback.data == "top_promos_next" and current_page < total_pages:
+            current_page += 1
+        
+        state['page'] = current_page
+        
+        # Форматируем страницу
+        message = format_top_promos_page(
+            state['promos'], 
+            current_page, 
+            total_pages, 
+            state['items_per_page']
+        )
+        
+        await callback.message.edit_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=get_top_promos_keyboard(current_page, total_pages),
+            disable_web_page_preview=True
+        )
+        await safe_answer_callback(callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка навигации ТОП промоакций: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.in_(["top_stakings_info", "top_promos_info"]))
+async def top_activity_page_info(callback: CallbackQuery):
+    """Информация о текущей странице"""
+    await callback.answer("📄 Текущая страница")
+
+
+def format_top_stakings_page(stakings: list, page: int, total_pages: int, items_per_page: int) -> str:
+    """Форматирует страницу ТОП стейкингов"""
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+    
+    message = (
+        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔥 <b>СТЕЙКИНГИ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    # Вычисляем срез для текущей страницы
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    page_stakings = stakings[start_idx:end_idx]
+    
+    # Номера для рейтинга
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for idx, staking in enumerate(page_stakings):
+        global_idx = start_idx + idx
+        number = number_emojis[global_idx] if global_idx < 10 else f"{global_idx + 1}."
+        
+        coin = staking.get('coin', 'N/A')
+        exchange = staking.get('exchange', 'N/A')
+        apr = staking.get('apr', 0) or 0
+        
+        # Определяем тип (Fixed/Flexible)
+        staking_type = staking.get('type', '') or ''
+        is_flexible = staking.get('is_flexible', False)
+        term_days = staking.get('term_days')
+        
+        if is_flexible or 'flex' in staking_type.lower():
+            type_str = "Flexible"
+        elif term_days:
+            type_str = f"Fixed {term_days}д"
+        else:
+            type_str = staking_type[:20] if staking_type else "N/A"
+        
+        # Заработок
+        profit_display = staking.get('profit_display', 'N/A')
+        
+        # Макс сумма и заполненность
+        user_limit = staking.get('user_limit_usd', 0)
+        fill_pct = staking.get('fill_percentage')
+        
+        if user_limit:
+            limit_str = f"${user_limit:,.0f}"
+        else:
+            limit_str = "нет данных"
+        
+        if fill_pct is not None:
+            fill_str = f"({fill_pct:.0f}% заполнено)"
+        else:
+            fill_str = ""
+        
+        # Оставшееся время
+        time_remaining = staking.get('time_remaining', 'нет данных')
+        
+        # Формируем карточку
+        message += f"{number} <b>{coin}</b> ({exchange}) • {type_str}\n"
+        message += f"🚀 APR: {apr:.1f}%\n"
+        message += f"💸 Заработок: {profit_display}\n"
+        message += f"🏦 Макс: {limit_str} {fill_str}\n"
+        message += f"⏰ Осталось: {time_remaining}\n\n"
+    
+    message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += f"📄 {page}/{total_pages}"
+    
+    return message
+
+
+def format_top_promos_page(promos: list, page: int, total_pages: int, items_per_page: int) -> str:
+    """Форматирует страницу ТОП промоакций"""
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+    
+    message = (
+        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎁 <b>ПРОМОАКЦИИ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    # Вычисляем срез для текущей страницы
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    page_promos = promos[start_idx:end_idx]
+    
+    # Номера для рейтинга
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for idx, promo in enumerate(page_promos):
+        global_idx = start_idx + idx
+        number = number_emojis[global_idx] if global_idx < 10 else f"{global_idx + 1}."
+        
+        title = promo.get('title', 'N/A')
+        exchange = promo.get('exchange', 'N/A')
+        
+        # Токен награды
+        award_token = promo.get('award_token', '')
+        if award_token:
+            title_display = f"{title[:35]} ({award_token})"
+        else:
+            title_display = title[:40]
+        
+        # Заработок (награда)
+        reward_display = promo.get('reward_display')
+        reward_usd_display = promo.get('reward_usd_display')  # USD эквивалент
+        
+        # Места / участники
+        winners = promo.get('winners', 0) or 0
+        participants = promo.get('participants', 0) or 0
+        
+        if winners and participants:
+            places_str = f"{winners:,} ({participants:,})"
+        elif participants:
+            places_str = f"{participants:,}"
+        elif winners:
+            places_str = f"{winners:,} мест"
+        else:
+            places_str = None
+        
+        # Даты
+        time_data = promo.get('time_remaining', {})
+        if isinstance(time_data, dict):
+            start_str = time_data.get('start_str', '')
+            end_str = time_data.get('end_str', '')
+            remaining_str = time_data.get('remaining_str', '')
+            
+            if start_str and end_str:
+                dates_str = f"{start_str} → {end_str}"
+            elif end_str:
+                dates_str = f"До {end_str}"
+            else:
+                dates_str = None
+        else:
+            dates_str = None
+            remaining_str = str(time_data) if time_data else None
+        
+        # Статус
+        status = promo.get('status', '')
+        status_emoji = ""
+        if status:
+            if 'ongoing' in status.lower() or 'active' in status.lower():
+                status_emoji = "🟢 "
+            elif 'upcoming' in status.lower():
+                status_emoji = "🟡 "
+        
+        # Ссылка
+        link = promo.get('link', '')
+        
+        # Формируем карточку
+        message += f"{number} {status_emoji}<b>{title_display}</b> ({exchange})\n"
+        
+        if reward_display:
+            if reward_usd_display:
+                message += f"💰 Награда: {reward_display} ({reward_usd_display})\n"
+            else:
+                message += f"💰 Награда: {reward_display}\n"
+        
+        if places_str:
+            message += f"👥 Участники: {places_str}\n"
+        
+        if dates_str:
+            if remaining_str:
+                message += f"📅 {dates_str} ({remaining_str})\n"
+            else:
+                message += f"📅 {dates_str}\n"
+        elif remaining_str:
+            message += f"⏳ {remaining_str}\n"
+        
+        if link:
+            message += f"🔗 <a href=\"{link}\">Открыть</a>\n"
+        
+        message += "\n"
+    
+    message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += f"📄 {page}/{total_pages}"
+    
+    return message
+
 
