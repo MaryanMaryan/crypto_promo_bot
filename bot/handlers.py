@@ -11260,13 +11260,13 @@ def format_airdrop_page(
     total_pages: int, 
     items_per_page: int,
     category_icon: str = "🪂",
-    category_name: str = "Аірдропи"
+    category_name: str = "Аирдропы"
 ) -> str:
-    """Форматує сторінку аірдропів"""
+    """Форматирует страницу аирдропов"""
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
     
     message = (
-        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{category_icon} <b>{category_name.upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -11286,25 +11286,25 @@ def format_airdrop_page(
         award_token = promo.get('award_token', '')
         title = promo.get('title', 'N/A')
         
-        # Формуємо назву
+        # Формируем название
         if award_token and award_token not in title:
             title_display = f"{exchange} | {award_token}"
         else:
             title_display = f"{exchange} | {title[:25]}"
         
-        # Нагорода
+        # Награда
         reward_display = promo.get('reward_per_user_display') or promo.get('reward_display')
         reward_usd = promo.get('reward_usd_display')
         expected_reward = promo.get('expected_reward', 0)
         
-        # Умови
+        # Условия
         conditions = promo.get('conditions', '')
         
-        # Учасники / переможці
+        # Участники / победители
         participants = promo.get('participants_count') or promo.get('participants', 0)
         winners = promo.get('winners_count') or promo.get('winners', 0)
         
-        # Час
+        # Время
         time_data = promo.get('time_remaining', {})
         if isinstance(time_data, dict):
             remaining_str = time_data.get('remaining_str', '')
@@ -11313,42 +11313,42 @@ def format_airdrop_page(
         
         link = promo.get('link', '')
         
-        # Формуємо картку
+        # Формируем карточку
         message += f"{number} <b>{title_display}</b>\n"
         
-        # 💰 Нагорода
+        # 💰 Награда
         if reward_display:
             if reward_usd:
-                message += f"   💰 Нагорода: {reward_display} ({reward_usd})\n"
+                message += f"   💰 Награда: {reward_display} ({reward_usd})\n"
             elif expected_reward > 0:
-                message += f"   💰 Нагорода: {reward_display} (~${expected_reward:,.2f})\n"
+                message += f"   💰 Награда: {reward_display} (~${expected_reward:,.2f})\n"
             else:
-                message += f"   💰 Нагорода: {reward_display}\n"
+                message += f"   💰 Награда: {reward_display}\n"
         elif expected_reward > 0:
-            message += f"   💰 Нагорода: ~${expected_reward:,.2f}\n"
+            message += f"   💰 Награда: ~${expected_reward:,.2f}\n"
         
-        # 📋 Умови
+        # 📋 Условия
         if conditions:
-            message += f"   📋 Умови: {conditions[:50]}\n"
+            message += f"   📋 Условия: {conditions[:50]}\n"
         
-        # 👥 Учасники
+        # 👥 Участники
         if participants and winners:
-            message += f"   👥 Учасників: {participants:,} | 🏆 Місць: {winners:,}\n"
+            message += f"   👥 Участников: {participants:,} | 🏆 Мест: {winners:,}\n"
         elif participants:
-            message += f"   👥 Учасників: {participants:,}\n"
+            message += f"   👥 Участников: {participants:,}\n"
         
-        # ⏰ Час
+        # ⏰ Время
         if remaining_str:
             message += f"   ⏰ {remaining_str}\n"
         
-        # 🔗 Посилання
+        # 🔗 Ссылка
         if link:
-            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+            message += f"   🔗 <a href=\"{link}\">Участвовать</a>\n"
         
         message += "\n"
     
     if not page_promos:
-        message += "📭 <i>Немає активних аірдропів</i>\n\n"
+        message += "📭 <i>Нет активных аирдропов</i>\n\n"
     
     message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     message += f"📄 {page}/{total_pages}"
@@ -11362,13 +11362,13 @@ def format_candybomb_page(
     total_pages: int, 
     items_per_page: int,
     category_icon: str = "🍬",
-    category_name: str = "Кендибомби"
+    category_name: str = "Кендибомбы"
 ) -> str:
-    """Форматує сторінку кендибомбів"""
+    """Форматирует страницу кендибомбов"""
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
     
     message = (
-        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{category_icon} <b>{category_name.upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -11433,31 +11433,31 @@ def format_candybomb_page(
             else:
                 message += f"   🎁 Пул: {total_pool} {award_token}\n"
         
-        # 🎯 На переможця
+        # 🎯 На победителя
         if reward_per_winner:
             if reward_per_winner_usd:
-                message += f"   🎯 На переможця: ~{reward_per_winner:,.0f} {award_token} (~${reward_per_winner_usd:,.2f})\n"
+                message += f"   🎯 На победителя: ~{reward_per_winner:,.0f} {award_token} (~${reward_per_winner_usd:,.2f})\n"
             else:
-                message += f"   🎯 На переможця: ~{reward_per_winner:,.0f} {award_token}\n"
+                message += f"   🎯 На победителя: ~{reward_per_winner:,.0f} {award_token}\n"
         
         # 🎲 Шанс
         if win_chance > 0:
-            message += f"   🎲 Шанс: {win_chance:.1f}% ({winners:,} місць з {participants:,})\n"
+            message += f"   🎲 Шанс: {win_chance:.1f}% ({winners:,} мест из {participants:,})\n"
         elif participants:
-            message += f"   👥 Учасників: {participants:,}\n"
+            message += f"   👥 Участников: {participants:,}\n"
         
-        # ⏰ Час
+        # ⏰ Время
         if remaining_str:
             message += f"   ⏰ {remaining_str}\n"
         
-        # 🔗 Посилання
+        # 🔗 Ссылка
         if link:
-            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+            message += f"   🔗 <a href=\"{link}\">Участвовать</a>\n"
         
         message += "\n"
     
     if not page_promos:
-        message += "📭 <i>Немає активних кендибомбів</i>\n\n"
+        message += "📭 <i>Нет активных кендибомбов</i>\n\n"
     
     message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     message += f"📄 {page}/{total_pages}"
@@ -11471,13 +11471,13 @@ def format_launchpad_page(
     total_pages: int, 
     items_per_page: int,
     category_icon: str = "🚀",
-    category_name: str = "Лаунчпади"
+    category_name: str = "Лаунчпады"
 ) -> str:
-    """Форматує сторінку лаунчпадів"""
+    """Форматирует страницу лаунчпадов"""
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
     
     message = (
-        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{category_icon} <b>{category_name.upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -11515,39 +11515,39 @@ def format_launchpad_page(
         
         link = promo.get('link', '')
         
-        # Формуємо картку
+        # Формируем карточку
         message += f"{number} <b>{title_display}</b>\n"
         
-        # 💵 Ціна
+        # 💵 Цена
         if taking_price:
             if market_price:
                 price_change = ((market_price - taking_price) / taking_price) * 100 if taking_price > 0 else 0
                 sign = "+" if price_change > 0 else ""
-                message += f"   💵 Ціна: ${taking_price:.4f} за токен\n"
-                message += f"   📈 Ринкова: ${market_price:.4f} ({sign}{price_change:.1f}%)\n"
+                message += f"   💵 Цена: ${taking_price:.4f} за токен\n"
+                message += f"   📈 Рыночная: ${market_price:.4f} ({sign}{price_change:.1f}%)\n"
             else:
-                message += f"   💵 Ціна: ${taking_price:.4f} за токен\n"
+                message += f"   💵 Цена: ${taking_price:.4f} за токен\n"
         
-        # 📊 Аллокація
+        # 📊 Аллокация
         if max_allocation:
-            message += f"   📊 Аллокація: до {max_allocation:,.0f} USDT\n"
+            message += f"   📊 Аллокация: до {max_allocation:,.0f} USDT\n"
         
-        # 💰 Потенційний профіт
+        # 💰 Потенциальный профит
         if expected_reward > 0:
-            message += f"   💰 Потенц. профіт: {profit_display or f'~${expected_reward:,.2f}'}\n"
+            message += f"   💰 Потенц. профит: {profit_display or f'~${expected_reward:,.2f}'}\n"
         
-        # ⏰ Час
+        # ⏰ Время
         if remaining_str:
             message += f"   ⏰ {remaining_str}\n"
         
-        # 🔗 Посилання
+        # 🔗 Ссылка
         if link:
-            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+            message += f"   🔗 <a href=\"{link}\">Участвовать</a>\n"
         
         message += "\n"
     
     if not page_promos:
-        message += "📭 <i>Немає активних лаунчпадів</i>\n\n"
+        message += "📭 <i>Нет активных лаунчпадов</i>\n\n"
     
     message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     message += f"📄 {page}/{total_pages}"
@@ -11561,13 +11561,13 @@ def format_launchpool_page(
     total_pages: int, 
     items_per_page: int,
     category_icon: str = "🌊",
-    category_name: str = "Лаунчпули"
+    category_name: str = "Лаунчпулы"
 ) -> str:
-    """Форматує сторінку лаунчпулів"""
+    """Форматирует страницу лаунчпулов"""
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
     
     message = (
-        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{category_icon} <b>{category_name.upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -11618,44 +11618,44 @@ def format_launchpool_page(
         
         link = promo.get('link', '')
         
-        # Формуємо картку
+        # Формируем карточку
         message += f"{number} <b>{title_display}</b>\n"
         
-        # 🪙 Стейк пули
+        # 🪙 Стейк пулы
         if pools_str:
             message += f"   🪙 Стейк: {pools_str}\n"
         elif max_apr:
             message += f"   📈 APR: {max_apr:.0f}%\n"
         
-        # 🎁 Пул нагород
+        # 🎁 Пул наград
         total_pool = promo.get('total_prize_pool')
         if total_pool:
-            message += f"   🎁 Пул нагород: {total_pool} {award_token}\n"
+            message += f"   🎁 Пул наград: {total_pool} {award_token}\n"
         
-        # 💰 Заробіток
+        # 💰 Заработок
         if expected_reward > 0:
-            message += f"   💰 Заробіток: {earnings_display or f'~${expected_reward:,.2f}'}\n"
+            message += f"   💰 Заработок: {earnings_display or f'~${expected_reward:,.2f}'}\n"
         elif earnings_display:
-            message += f"   💰 Заробіток: {earnings_display}\n"
+            message += f"   💰 Заработок: {earnings_display}\n"
         
-        # 👥 Учасники
+        # 👥 Участники
         if total_participants:
-            message += f"   👥 Учасників: {total_participants:,}\n"
+            message += f"   👥 Участников: {total_participants:,}\n"
         
-        # ⏰ Час
+        # ⏰ Время
         if remaining_str:
-            message += f"   ⏰ Фармінг: {remaining_str}\n"
+            message += f"   ⏰ Фарминг: {remaining_str}\n"
         elif days_left:
-            message += f"   ⏰ Фармінг: {days_left}д залишилось\n"
+            message += f"   ⏰ Фарминг: {days_left}д осталось\n"
         
-        # 🔗 Посилання
+        # 🔗 Ссылка
         if link:
-            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+            message += f"   🔗 <a href=\"{link}\">Участвовать</a>\n"
         
         message += "\n"
     
     if not page_promos:
-        message += "📭 <i>Немає активних лаунчпулів</i>\n\n"
+        message += "📭 <i>Нет активных лаунчпулов</i>\n\n"
     
     message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     message += f"📄 {page}/{total_pages}"
@@ -11669,13 +11669,13 @@ def format_other_page(
     total_pages: int, 
     items_per_page: int,
     category_icon: str = "🗂️",
-    category_name: str = "Інші"
+    category_name: str = "Другие"
 ) -> str:
-    """Форматує сторінку інших промоакцій"""
+    """Форматирует страницу других промоакций"""
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
     
     message = (
-        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{category_icon} <b>{category_name.upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -11711,31 +11711,31 @@ def format_other_page(
         
         link = promo.get('link', '')
         
-        # Формуємо картку
+        # Формируем карточку
         message += f"{number} <b>{title_display}</b>\n"
         
         # 📌 Тип
         if promo_type and promo_type != 'other':
             message += f"   📌 Тип: {promo_type.replace('_', ' ').title()}\n"
         
-        # 💰 Нагорода
+        # 💰 Награда
         if expected_reward > 0:
-            message += f"   💰 Нагорода: ~${expected_reward:,.2f}\n"
+            message += f"   💰 Награда: ~${expected_reward:,.2f}\n"
         elif reward_display:
-            message += f"   💰 Нагорода: {reward_display}\n"
+            message += f"   💰 Награда: {reward_display}\n"
         
-        # ⏰ Час
+        # ⏰ Время
         if remaining_str:
             message += f"   ⏰ {remaining_str}\n"
         
-        # 🔗 Посилання
+        # 🔗 Ссылка
         if link:
-            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+            message += f"   🔗 <a href=\"{link}\">Участвовать</a>\n"
         
         message += "\n"
     
     if not page_promos:
-        message += "📭 <i>Немає інших промоакцій</i>\n\n"
+        message += "📭 <i>Нет других промоакций</i>\n\n"
     
     message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     message += f"📄 {page}/{total_pages}"

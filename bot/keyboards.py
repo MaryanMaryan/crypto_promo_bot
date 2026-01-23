@@ -368,24 +368,24 @@ def get_top_promos_keyboard(current_page: int, total_pages: int) -> InlineKeyboa
 
 def get_promo_categories_keyboard(counts: dict) -> InlineKeyboardMarkup:
     """
-    Клавіатура вибору категорії промоакцій.
+    Клавиатура выбора категории промоакций.
     
     Args:
-        counts: dict з кількістю промо в кожній категорії
+        counts: dict с количеством промо в каждой категории
                 {'airdrop': 5, 'candybomb': 3, 'launchpad': 2, 'launchpool': 1, 'other': 10}
     """
     builder = InlineKeyboardBuilder()
     
-    # Категорії з іконками
+    # Категории с иконками
     categories = [
-        ("airdrop", "🪂", "Аірдропи"),
-        ("candybomb", "🍬", "Кендибомби"),
-        ("launchpad", "🚀", "Лаунчпади"),
-        ("launchpool", "🌊", "Лаунчпули"),
-        ("other", "🗂️", "Інші"),
+        ("airdrop", "🪂", "Аирдропы"),
+        ("candybomb", "🍬", "Кендибомбы"),
+        ("launchpad", "🚀", "Лаунчпады"),
+        ("launchpool", "🌊", "Лаунчпулы"),
+        ("other", "🗂️", "Другие"),
     ]
     
-    # Створюємо кнопки в сітці 2x2 + 1
+    # Создаём кнопки в сетке 2x2 + 1
     for cat_key, icon, name in categories:
         count = counts.get(cat_key, 0)
         builder.add(InlineKeyboardButton(
@@ -393,11 +393,11 @@ def get_promo_categories_keyboard(counts: dict) -> InlineKeyboardMarkup:
             callback_data=f"top_promos_{cat_key}"
         ))
     
-    # Кнопки навігації
-    builder.add(InlineKeyboardButton(text="🔄 Оновити", callback_data="top_promos_categories_refresh"))
+    # Кнопки навигации
+    builder.add(InlineKeyboardButton(text="🔄 Обновить", callback_data="top_promos_categories_refresh"))
     builder.add(InlineKeyboardButton(text="🔙 ТОП Меню", callback_data="top_activity_menu"))
     
-    # Розташування: 2-2-1-2
+    # Расположение: 2-2-1-2
     builder.adjust(2, 2, 1, 2)
     
     return builder.as_markup()
@@ -409,16 +409,16 @@ def get_category_promos_keyboard(
     total_pages: int
 ) -> InlineKeyboardMarkup:
     """
-    Клавіатура для перегляду промоакцій конкретної категорії.
+    Клавиатура для просмотра промоакций конкретной категории.
     
     Args:
-        category: ключ категорії (airdrop, candybomb, launchpad, launchpool, other)
-        current_page: поточна сторінка
-        total_pages: всього сторінок
+        category: ключ категории (airdrop, candybomb, launchpad, launchpool, other)
+        current_page: текущая страница
+        total_pages: всего страниц
     """
     builder = InlineKeyboardBuilder()
     
-    # Навігація по сторінках
+    # Навигация по страницам
     nav_buttons = []
     if current_page > 1:
         nav_buttons.append(InlineKeyboardButton(
@@ -440,17 +440,17 @@ def get_category_promos_keyboard(
     for btn in nav_buttons:
         builder.add(btn)
     
-    # Кнопки дій
+    # Кнопки действий
     builder.add(InlineKeyboardButton(
-        text="🔄 Оновити", 
+        text="🔄 Обновить", 
         callback_data=f"top_promos_{category}"
     ))
     builder.add(InlineKeyboardButton(
-        text="🔙 Категорії", 
+        text="🔙 Категории", 
         callback_data="top_promos_categories_menu"
     ))
     
-    # Розташування
+    # Расположение
     if len(nav_buttons) == 3:
         builder.adjust(3, 2)
     elif len(nav_buttons) == 2:
