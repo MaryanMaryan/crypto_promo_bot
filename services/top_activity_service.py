@@ -97,6 +97,7 @@ class TopActivityService:
         winners = promo.get('winners_count', 0) or 0
         total_pool_usd = promo.get('total_prize_pool_usd', 0) or 0
         exchange = promo.get('exchange', '').lower()
+        promo_type = promo.get('promo_type', '').lower()
         
         # Пытаемся получить total_prize_pool как число (может быть не в USD)
         total_pool_raw = promo.get('total_prize_pool')
@@ -134,32 +135,44 @@ class TopActivityService:
         reward_per_user = 0
         reward_per_user_display = None
         reward_usd_display = None  # Для показа USD эквивалента
+        token_price_usd = None  # Инициализируем здесь
         
-        # Получаем цену токена через price fetcher
-        token_price_usd = None
-        if reward_token_symbol and reward_token_symbol not in ('USDT', 'USDC', 'USD'):
-            try:
-                price_fetcher = get_price_fetcher()
-                token_price_usd = price_fetcher.get_token_price(reward_token_symbol, exchange)
-                if token_price_usd:
-                    logger.debug(f"💰 Price fetcher: {reward_token_symbol} = ${token_price_usd:.6f}")
-            except Exception as e:
-                logger.debug(f"⚠️ Ошибка получения цены {reward_token_symbol}: {e}")
+        # ОПТИМИЗАЦИЯ: Сначала проверяем есть ли reward_per_winner_usd в БД
+        # Если есть - не нужно запрашивать price_fetcher!
+        # Проверяем ВСЕ случаи где USD уже известен
+        use_cached_usd = reward_usd > 0 or total_pool_usd > 0
         
-        # Приоритет 1: если есть reward_per_winner (строка типа "2,000 SCOR") - используем напрямую
-        if promo.get('reward_per_winner'):
+        if not use_cached_usd:
+            # Нет USD в БД - получаем цену токена через price fetcher
+            if reward_token_symbol and reward_token_symbol not in ('USDT', 'USDC', 'USD'):
+                try:
+                    price_fetcher = get_price_fetcher()
+                    token_price_usd = price_fetcher.get_token_price(reward_token_symbol, exchange)
+                    if token_price_usd:
+                        logger.debug(f"💰 Price fetcher: {reward_token_symbol} = ${token_price_usd:.6f}")
+                except Exception as e:
+                    logger.debug(f"⚠️ Ошибка получения цены {reward_token_symbol}: {e}")
+        
+        # Приоритет 1: есть reward_per_winner И reward_per_winner_usd - используем кэш
+        if promo.get('reward_per_winner') and reward_usd > 0:
+            reward_per_user_display = promo.get('reward_per_winner')
+            reward_per_user = reward_per_winner_tokens or reward_usd
+            reward_usd_display = f"~${reward_usd:,.2f}"
+            logger.debug(f"💾 Кэш: {reward_per_user_display} ({reward_usd_display})")
+        
+        # Приоритет 2: есть reward_per_winner но нет USD - рассчитываем через price_fetcher
+        elif promo.get('reward_per_winner'):
             reward_per_user_display = promo.get('reward_per_winner')
             reward_per_user = reward_per_winner_tokens or reward_usd
             
-            # Рассчитываем USD эквивалент через price fetcher
             if token_price_usd and reward_per_winner_tokens:
                 usd_value = reward_per_winner_tokens * token_price_usd
                 reward_usd_display = f"~${usd_value:,.2f}"
-                reward_usd = usd_value  # Обновляем для сортировки
+                reward_usd = usd_value
             elif reward_usd:
                 reward_usd_display = f"~${reward_usd:,.2f}"
                 
-        # Приоритет 2: если есть reward_per_winner_usd но нет reward_per_winner
+        # Приоритет 3: только reward_per_winner_usd без строки
         elif reward_usd:
             reward_per_user = reward_usd
             reward_per_user_display = f"${reward_usd:,.2f}"
@@ -180,26 +193,13 @@ class TopActivityService:
             elif total_pool_usd and winners:
                 reward_usd_display = f"~${total_pool_usd / winners:,.2f}"
                 
-        # Приоритет 4: Bybit Token Splash - стандартно 1000 мест если нет данных
-        elif total_pool_tokens and 'bybit' in exchange and not winners and not participants:
-            # Для Bybit Token Splash типичное кол-во мест = 1000
+        # Приоритет 4: Bybit Token Splash - оценка если нет winners_count
+        # Для Bybit если есть пул но нет winners - используем оценку 1000 мест
+        elif total_pool_tokens and 'bybit' in exchange.lower() and not winners:
+            # Для Bybit Token Splash типичное кол-во мест = 1000-5000
+            # Используем консервативную оценку 1000
             estimated_winners = 1000
             reward_per_user = total_pool_tokens / estimated_winners
-            if award_token:
-                reward_per_user_display = f"~{reward_per_user:,.0f} {award_token}"
-            else:
-                reward_per_user_display = f"~{reward_per_user:,.0f}"
-            winners = estimated_winners  # Для шанса выигрыша
-            
-            # Рассчитываем USD эквивалент через price fetcher
-            if token_price_usd:
-                usd_value = reward_per_user * token_price_usd
-                reward_usd_display = f"~${usd_value:,.2f}"
-                reward_usd = usd_value
-                
-        # Приоритет 5: если есть пул и участники - считаем среднюю награду (менее точно)
-        elif total_pool_tokens and participants:
-            reward_per_user = total_pool_tokens / participants
             if award_token:
                 reward_per_user_display = f"≈{reward_per_user:,.0f} {award_token}"
             else:
@@ -210,16 +210,63 @@ class TopActivityService:
                 usd_value = reward_per_user * token_price_usd
                 reward_usd_display = f"~${usd_value:,.2f}"
                 reward_usd = usd_value
-            elif total_pool_usd and participants:
-                reward_usd_display = f"~${total_pool_usd / participants:,.2f}"
+            elif total_pool_usd:
+                reward_usd_display = f"~${total_pool_usd / estimated_winners:,.2f}"
+        
+        # Приоритет 4.5: OKX Boost (X-Launch) - ВСЕ участники получают награду пропорционально
+        # В OKX X-Launch пул делится между всеми участниками (нет понятия "победителей")
+        elif (promo_type == 'okx_boost' or 'okx' in exchange) and participants and (total_pool_usd or total_pool_tokens):
+            # Делим пул на всех участников
+            if total_pool_usd and participants:
+                reward_per_user_usd = total_pool_usd / participants
+                reward_usd = reward_per_user_usd
+                reward_usd_display = f"~${reward_per_user_usd:,.2f}"
+            
+            if total_pool_tokens and participants:
+                reward_per_user = total_pool_tokens / participants
+                if award_token:
+                    reward_per_user_display = f"~{reward_per_user:,.0f} {award_token}"
+                else:
+                    reward_per_user_display = f"~{reward_per_user:,.0f}"
+            elif reward_usd:
+                reward_per_user = reward_usd
+                reward_per_user_display = reward_usd_display
+                
+        # Приоритет 5: если есть пул, победители и участники - считаем награду на победителя
+        # НЕ делим на participants - это даёт нереалистичные значения!
+        elif total_pool_tokens and winners and participants:
+            reward_per_user = total_pool_tokens / winners
+            if award_token:
+                reward_per_user_display = f"{reward_per_user:,.0f} {award_token}"
+            else:
+                reward_per_user_display = f"{reward_per_user:,.0f}"
+            
+            # Рассчитываем USD эквивалент через price fetcher
+            if token_price_usd:
+                usd_value = reward_per_user * token_price_usd
+                reward_usd_display = f"~${usd_value:,.2f}"
+                reward_usd = usd_value
+            elif total_pool_usd and winners:
+                reward_usd_display = f"~${total_pool_usd / winners:,.2f}"
+        
+        # Приоритет 6: Fallback - пул есть, но нет данных о победителях
+        # НЕ используем total_pool для сортировки - это вводит в заблуждение
+        elif total_pool_tokens:
+            # Не рассчитываем reward_per_user - нет данных для корректного расчёта
+            reward_per_user = 0
+            reward_per_user_display = None  # Не показываем некорректную награду
         
         # Рассчитываем шанс выигрыша
         win_chance = 0
         if winners and participants:
             win_chance = min((winners / participants) * 100, 100)
         
+        # OKX Boost: все участники - победители (100% шанс)
+        if promo_type == 'okx_boost' or ('okx' in exchange and participants and not winners):
+            win_chance = 100.0
+        
         return {
-            'expected_reward': reward_usd or reward_per_user or total_pool_tokens or 0,  # Для сортировки (в USD если есть)
+            'expected_reward': reward_usd or reward_per_user or 0,  # Для сортировки (НЕ используем total_pool!)
             'reward_per_user': reward_per_user,
             'reward_per_user_display': reward_per_user_display,  # Главное поле для отображения
             'reward_usd_display': reward_usd_display,  # USD эквивалент награды
@@ -636,6 +683,393 @@ class TopActivityService:
         except Exception as e:
             self.logger.error(f"❌ Ошибка получения статистики: {e}")
             return {}
+    
+    # =========================================================================
+    # МЕТОДИ ДЛЯ КАТЕГОРІЙ ПРОМОАКЦІЙ
+    # =========================================================================
+    
+    # Маппінг категорій
+    PROMO_CATEGORIES = {
+        'airdrop': {
+            'name': 'Аірдропи',
+            'icon': '🪂',
+            'promo_types': ['airdrop', 'okx_boost'],  # okx_boost теж аірдроп
+        },
+        'candybomb': {
+            'name': 'Кендибомби',
+            'icon': '🍬',
+            'promo_types': ['candybomb', 'candy', 'candydrop'],
+        },
+        'launchpad': {
+            'name': 'Лаунчпади',
+            'icon': '🚀',
+            'promo_types': ['launchpad'],
+        },
+        'launchpool': {
+            'name': 'Лаунчпули',
+            'icon': '🌊',
+            'promo_types': ['launchpool'],
+        },
+        'other': {
+            'name': 'Інші',
+            'icon': '🗂️',
+            'promo_types': ['other', 'rewards', 'flash_earn', 'boost'],
+        },
+    }
+    
+    # Категорії, що виключаються з ТОП
+    EXCLUDED_PROMO_TYPES = ['announcement', 'staking']
+    
+    def get_promo_counts_by_category(self) -> Dict[str, int]:
+        """
+        Отримує кількість активних промо в кожній категорії.
+        
+        Returns:
+            Словник {category: count}
+        """
+        try:
+            now = datetime.utcnow()
+            
+            with get_db_session() as session:
+                # Отримуємо всі активні промо
+                active_promos = session.query(PromoHistory.promo_type).filter(
+                    or_(
+                        PromoHistory.end_time == None,
+                        PromoHistory.end_time > now
+                    ),
+                    ~PromoHistory.promo_type.in_(self.EXCLUDED_PROMO_TYPES)
+                ).all()
+                
+                # Рахуємо по категоріях
+                counts = {cat: 0 for cat in self.PROMO_CATEGORIES.keys()}
+                
+                for (promo_type,) in active_promos:
+                    category = self._get_category_for_promo_type(promo_type)
+                    counts[category] = counts.get(category, 0) + 1
+                
+                return counts
+                
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка подсчёта категорий: {e}")
+            return {cat: 0 for cat in self.PROMO_CATEGORIES.keys()}
+    
+    def _get_category_for_promo_type(self, promo_type: str) -> str:
+        """Визначає категорію для promo_type"""
+        if not promo_type:
+            return 'other'
+        
+        promo_type_lower = promo_type.lower()
+        
+        for category, config in self.PROMO_CATEGORIES.items():
+            if promo_type_lower in config['promo_types']:
+                return category
+        
+        # Fallback - шукаємо за частковим збігом
+        for category, config in self.PROMO_CATEGORIES.items():
+            for pt in config['promo_types']:
+                if pt in promo_type_lower or promo_type_lower in pt:
+                    return category
+        
+        return 'other'
+    
+    def get_top_promos_by_category(
+        self,
+        category: str,
+        limit: int = 50
+    ) -> List[Dict]:
+        """
+        Отримує ТОП промоакцій конкретної категорії.
+        
+        Args:
+            category: Категорія (airdrop, candybomb, launchpad, launchpool, other)
+            limit: Максимальна кількість
+            
+        Returns:
+            Список промоакцій з розрахунками
+        """
+        try:
+            now = datetime.utcnow()
+            
+            # Отримуємо promo_types для категорії
+            config = self.PROMO_CATEGORIES.get(category)
+            if not config:
+                self.logger.warning(f"⚠️ Невідома категорія: {category}")
+                return []
+            
+            promo_types = config['promo_types']
+            
+            with get_db_session() as session:
+                # Базовий запит - активні промо потрібної категорії
+                if category == 'other':
+                    # Для "Інші" беремо все що не входить в основні категорії
+                    main_types = []
+                    for cat, cfg in self.PROMO_CATEGORIES.items():
+                        if cat != 'other':
+                            main_types.extend(cfg['promo_types'])
+                    
+                    query = session.query(PromoHistory).filter(
+                        or_(
+                            PromoHistory.end_time == None,
+                            PromoHistory.end_time > now
+                        ),
+                        ~PromoHistory.promo_type.in_(main_types + self.EXCLUDED_PROMO_TYPES)
+                    )
+                else:
+                    query = session.query(PromoHistory).filter(
+                        or_(
+                            PromoHistory.end_time == None,
+                            PromoHistory.end_time > now
+                        ),
+                        PromoHistory.promo_type.in_(promo_types)
+                    )
+                
+                promos = query.all()
+                
+                # Конвертуємо в словники і розраховуємо
+                result = []
+                for promo in promos:
+                    promo_dict = self._promo_to_dict(promo)
+                    
+                    # Розраховуємо нагороду в залежності від категорії
+                    if category == 'launchpad':
+                        reward_data = self._calculate_launchpad_profit(promo_dict)
+                    elif category == 'launchpool':
+                        reward_data = self._calculate_launchpool_earnings(promo_dict)
+                    else:
+                        reward_data = self.calculate_promo_reward(promo_dict)
+                    
+                    promo_dict.update(reward_data)
+                    promo_dict['category'] = category
+                    promo_dict['category_icon'] = config['icon']
+                    promo_dict['category_name'] = config['name']
+                    
+                    # Час до закінчення
+                    promo_dict['time_remaining'] = self._calculate_promo_time_remaining(
+                        promo.start_time, promo.end_time
+                    )
+                    
+                    result.append(promo_dict)
+                
+                # Сортування: спочатку з USD, потім за датою
+                result = self._sort_promos_by_reward_and_date(result)
+                
+                return result[:limit]
+                
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка получения ТОП {category}: {e}", exc_info=True)
+            return []
+    
+    def _promo_to_dict(self, promo: PromoHistory) -> Dict:
+        """Конвертує PromoHistory в словник"""
+        import json
+        
+        raw_data = None
+        if promo.raw_data:
+            try:
+                raw_data = json.loads(promo.raw_data)
+            except:
+                pass
+        
+        return {
+            'id': promo.id,
+            'promo_id': promo.promo_id,
+            'exchange': promo.exchange,
+            'title': promo.title,
+            'description': promo.description,
+            'award_token': promo.award_token,
+            'total_prize_pool': promo.total_prize_pool,
+            'total_prize_pool_usd': promo.total_prize_pool_usd,
+            'reward_per_winner': promo.reward_per_winner,
+            'reward_per_winner_usd': promo.reward_per_winner_usd,
+            'participants_count': promo.participants_count,
+            'winners_count': promo.winners_count,
+            'conditions': promo.conditions,
+            'status': promo.status,
+            'promo_type': promo.promo_type,
+            'start_time': promo.start_time,
+            'end_time': promo.end_time,
+            'link': promo.link,
+            'created_at': promo.created_at,
+            'last_updated': promo.last_updated,
+            'raw_data': raw_data,
+        }
+    
+    def _calculate_launchpad_profit(self, promo: Dict) -> Dict:
+        """
+        Розраховує потенційний профіт для лаунчпаду.
+        
+        Формула: profit = (takingMax / takingPrice) * (marketPrice - takingPrice)
+        """
+        result = {
+            'expected_reward': 0,
+            'profit_display': None,
+            'taking_price': None,
+            'market_price': None,
+            'max_allocation': None,
+            'has_user_reward': False,
+        }
+        
+        try:
+            raw_data = promo.get('raw_data', {})
+            if not raw_data:
+                return result
+            
+            # Шукаємо дані в launchpadTakingCoins (MEXC формат)
+            taking_coins = raw_data.get('launchpadTakingCoins', [])
+            if not taking_coins:
+                # Можливо дані безпосередньо в raw_data
+                taking_coins = [raw_data]
+            
+            best_profit = 0
+            for coin in taking_coins:
+                taking_price = self._safe_float(coin.get('takingPrice') or coin.get('price'))
+                market_price = self._safe_float(coin.get('marketPrice'))
+                max_allocation = self._safe_float(coin.get('takingMax') or coin.get('personTakingLimit'))
+                
+                if taking_price and market_price and max_allocation and taking_price > 0:
+                    tokens = max_allocation / taking_price
+                    profit = tokens * (market_price - taking_price)
+                    
+                    if profit > best_profit:
+                        best_profit = profit
+                        result['taking_price'] = taking_price
+                        result['market_price'] = market_price
+                        result['max_allocation'] = max_allocation
+                        result['expected_reward'] = profit
+                        result['profit_display'] = f"~${profit:,.2f}"
+                        result['has_user_reward'] = True
+            
+        except Exception as e:
+            self.logger.debug(f"⚠️ Помилка розрахунку launchpad profit: {e}")
+        
+        return result
+    
+    def _calculate_launchpool_earnings(self, promo: Dict) -> Dict:
+        """
+        Розраховує заробіток з лаунчпулу.
+        
+        Формула: earnings = max_stake * (apr / 100) * (days_left / 365) * token_price
+        """
+        result = {
+            'expected_reward': 0,
+            'earnings_display': None,
+            'max_apr': 0,
+            'best_pool': None,
+            'days_left': 0,
+            'has_user_reward': False,
+        }
+        
+        try:
+            raw_data = promo.get('raw_data', {})
+            if not raw_data:
+                return result
+            
+            pools = raw_data.get('pools', [])
+            days_left = raw_data.get('days_left', 0)
+            token_symbol = raw_data.get('token_symbol', promo.get('award_token', ''))
+            
+            if not pools or not days_left:
+                return result
+            
+            # Отримуємо ціну токена
+            token_price = None
+            exchange = promo.get('exchange', '').lower()
+            if token_symbol:
+                try:
+                    price_fetcher = get_price_fetcher()
+                    token_price = price_fetcher.get_token_price(token_symbol, exchange)
+                except:
+                    pass
+            
+            # Знаходимо найкращий пул
+            best_earnings = 0
+            for pool in pools:
+                apr = pool.get('apr', 0) or 0
+                max_stake = pool.get('max_stake', 0) or 0
+                stake_coin = pool.get('stake_coin', '')
+                
+                if apr > 0 and max_stake > 0 and days_left > 0:
+                    # Розрахунок заробітку в токенах
+                    earnings_tokens = max_stake * (apr / 100) * (days_left / 365)
+                    
+                    # Конвертуємо в USD якщо є ціна
+                    if token_price:
+                        earnings_usd = earnings_tokens * token_price
+                    else:
+                        # Якщо ціни немає, показуємо в токенах
+                        earnings_usd = 0
+                    
+                    if earnings_usd > best_earnings or (earnings_usd == 0 and apr > result['max_apr']):
+                        best_earnings = earnings_usd
+                        result['max_apr'] = apr
+                        result['best_pool'] = stake_coin
+                        result['days_left'] = days_left
+                        result['expected_reward'] = earnings_usd
+                        
+                        if earnings_usd > 0:
+                            result['earnings_display'] = f"~${earnings_usd:,.2f}"
+                            result['has_user_reward'] = True
+                        else:
+                            result['earnings_display'] = f"~{earnings_tokens:,.2f} {token_symbol}"
+                            result['has_user_reward'] = False
+            
+        except Exception as e:
+            self.logger.debug(f"⚠️ Помилка розрахунку launchpool earnings: {e}")
+        
+        return result
+    
+    def _sort_promos_by_reward_and_date(self, promos: List[Dict]) -> List[Dict]:
+        """
+        Сортує промо: спочатку з USD (за спаданням), потім без USD (за датою закінчення).
+        """
+        with_usd = []
+        without_usd = []
+        
+        for p in promos:
+            if p.get('expected_reward', 0) > 0:
+                with_usd.append(p)
+            else:
+                without_usd.append(p)
+        
+        # Сортуємо з USD за нагородою
+        with_usd.sort(key=lambda x: x.get('expected_reward', 0), reverse=True)
+        
+        # Сортуємо без USD за датою закінчення
+        def get_end_time_sort_key(p):
+            end_time = p.get('end_time')
+            if end_time is None:
+                return datetime.max
+            if isinstance(end_time, datetime):
+                return end_time
+            return datetime.max
+        
+        without_usd.sort(key=get_end_time_sort_key)
+        
+        return with_usd + without_usd
+    
+    def _safe_float(self, value) -> float:
+        """Безпечне перетворення в float"""
+        if value is None:
+            return 0.0
+        try:
+            return float(str(value).replace(',', ''))
+        except (ValueError, TypeError):
+            return 0.0
+    
+    def get_extended_statistics(self) -> Dict:
+        """
+        Отримує розширену статистику з розбивкою по категоріях.
+        
+        Returns:
+            Словник зі статистикою включаючи категорії
+        """
+        stats = self.get_statistics()
+        
+        # Додаємо статистику по категоріях
+        category_counts = self.get_promo_counts_by_category()
+        stats['promo_categories'] = category_counts
+        
+        return stats
 
 
 # Глобальный экземпляр сервиса

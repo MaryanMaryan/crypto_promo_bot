@@ -363,6 +363,105 @@ def get_top_promos_keyboard(current_page: int, total_pages: int) -> InlineKeyboa
 
 
 # =============================================================================
+# PROMO CATEGORIES KEYBOARDS
+# =============================================================================
+
+def get_promo_categories_keyboard(counts: dict) -> InlineKeyboardMarkup:
+    """
+    Клавіатура вибору категорії промоакцій.
+    
+    Args:
+        counts: dict з кількістю промо в кожній категорії
+                {'airdrop': 5, 'candybomb': 3, 'launchpad': 2, 'launchpool': 1, 'other': 10}
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Категорії з іконками
+    categories = [
+        ("airdrop", "🪂", "Аірдропи"),
+        ("candybomb", "🍬", "Кендибомби"),
+        ("launchpad", "🚀", "Лаунчпади"),
+        ("launchpool", "🌊", "Лаунчпули"),
+        ("other", "🗂️", "Інші"),
+    ]
+    
+    # Створюємо кнопки в сітці 2x2 + 1
+    for cat_key, icon, name in categories:
+        count = counts.get(cat_key, 0)
+        builder.add(InlineKeyboardButton(
+            text=f"{icon} {name} ({count})",
+            callback_data=f"top_promos_{cat_key}"
+        ))
+    
+    # Кнопки навігації
+    builder.add(InlineKeyboardButton(text="🔄 Оновити", callback_data="top_promos_categories_refresh"))
+    builder.add(InlineKeyboardButton(text="🔙 ТОП Меню", callback_data="top_activity_menu"))
+    
+    # Розташування: 2-2-1-2
+    builder.adjust(2, 2, 1, 2)
+    
+    return builder.as_markup()
+
+
+def get_category_promos_keyboard(
+    category: str,
+    current_page: int, 
+    total_pages: int
+) -> InlineKeyboardMarkup:
+    """
+    Клавіатура для перегляду промоакцій конкретної категорії.
+    
+    Args:
+        category: ключ категорії (airdrop, candybomb, launchpad, launchpool, other)
+        current_page: поточна сторінка
+        total_pages: всього сторінок
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Навігація по сторінках
+    nav_buttons = []
+    if current_page > 1:
+        nav_buttons.append(InlineKeyboardButton(
+            text="◀️", 
+            callback_data=f"top_promos_{category}_prev"
+        ))
+    
+    nav_buttons.append(InlineKeyboardButton(
+        text=f"📄 {current_page}/{total_pages}", 
+        callback_data=f"top_promos_{category}_info"
+    ))
+    
+    if current_page < total_pages:
+        nav_buttons.append(InlineKeyboardButton(
+            text="▶️", 
+            callback_data=f"top_promos_{category}_next"
+        ))
+    
+    for btn in nav_buttons:
+        builder.add(btn)
+    
+    # Кнопки дій
+    builder.add(InlineKeyboardButton(
+        text="🔄 Оновити", 
+        callback_data=f"top_promos_{category}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🔙 Категорії", 
+        callback_data="top_promos_categories_menu"
+    ))
+    
+    # Розташування
+    if len(nav_buttons) == 3:
+        builder.adjust(3, 2)
+    elif len(nav_buttons) == 2:
+        builder.adjust(2, 2)
+    else:
+        builder.adjust(1, 2)
+    
+    return builder.as_markup()
+
+
+# =============================================================================
 # AIRDROP MANAGEMENT KEYBOARDS (LEGACY - использует унифицированную клавиатуру из handlers.py)
 # =============================================================================
 

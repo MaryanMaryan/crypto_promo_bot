@@ -855,6 +855,23 @@ class UniversalParser(BaseParser):
                 except (ValueError, TypeError):
                     pass
             
+            # Обрабатываем Trade Competition (taskType=4)
+            trade_prize_total = details.get('tradeUserPrizeTotal')
+            trade_airdrop_top = details.get('tradeAirdropTop')
+            trade_prize_token = details.get('tradePrizeToken') or prize_token
+            
+            if trade_prize_total and trade_airdrop_top:
+                try:
+                    total = float(str(trade_prize_total).replace(',', ''))
+                    top_count = int(str(trade_airdrop_top).replace(',', ''))
+                    if top_count > 0 and total > 0:
+                        prize = total / top_count
+                        total_winners += top_count
+                        rewards_info.append(('Trade Competition', top_count, prize, trade_prize_token))
+                        logger.debug(f"📊 Bybit Trade Competition: ТОП {top_count} получат по {prize:.0f} {trade_prize_token}")
+                except (ValueError, TypeError):
+                    pass
+            
             # Устанавливаем результаты
             if total_winners > 0:
                 promo_data['winners_count'] = total_winners

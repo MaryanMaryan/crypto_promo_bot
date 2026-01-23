@@ -380,10 +380,14 @@ class LaunchpoolBaseParser(ABC):
                     'type': self.EXCHANGE_TYPE,
                     'max_apr': max_apr,
                     'pools_count': len(project.pools),
+                    'promo_type': self.EXCHANGE_TYPE,  # 'launchpool' або 'launchpad'
                     
                     # Флаг что это launchpool (для особой обработки)
                     'is_launchpool': True,
                     'formatted_message': formatted_text,  # Готовое сообщение для Telegram
+                    
+                    # RAW DATA для ТОП активностей - дані про пули для розрахунку заробітку
+                    'raw_data': self._serialize_project_for_storage(project),
                 }
                 
                 promotions.append(promo)
@@ -447,3 +451,43 @@ class LaunchpoolBaseParser(ABC):
             return int(float(str(value).replace(',', '')))
         except (ValueError, TypeError):
             return default
+    
+    def _serialize_project_for_storage(self, project: LaunchpoolProject) -> Dict[str, Any]:
+        """
+        Серіалізує LaunchpoolProject в словник для збереження в raw_data.
+        Зберігає всі дані про пули для розрахунку заробітку в ТОП активностях.
+        """
+        pools_data = []
+        for pool in project.pools:
+            pools_data.append({
+                'stake_coin': pool.stake_coin,
+                'apr': pool.apr,
+                'apy': pool.apy,
+                'min_stake': pool.min_stake,
+                'max_stake': pool.max_stake,
+                'max_stake_vip': pool.max_stake_vip,
+                'total_staked': pool.total_staked,
+                'pool_reward': pool.pool_reward,
+                'participants': pool.participants,
+                'is_new_user_only': pool.is_new_user_only,
+                'labels': pool.labels,
+            })
+        
+        return {
+            'project_id': project.id,
+            'exchange': project.exchange,
+            'type': project.type,
+            'token_symbol': project.token_symbol,
+            'token_name': project.token_name,
+            'status': project.status,
+            'total_pool_usd': project.total_pool_usd,
+            'total_pool_tokens': project.total_pool_tokens,
+            'start_time': project.start_time.isoformat() if project.start_time else None,
+            'end_time': project.end_time.isoformat() if project.end_time else None,
+            'days_left': project.days_left,
+            'max_apr': project.max_apr,
+            'total_participants': project.total_participants,
+            'project_url': project.project_url,
+            'pools': pools_data,
+        }
+

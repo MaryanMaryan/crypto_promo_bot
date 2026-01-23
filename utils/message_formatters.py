@@ -1190,13 +1190,24 @@ class AirdropFormatter:
         start_str = AirdropFormatter._format_datetime(start_time)
         end_str = AirdropFormatter._format_datetime(end_time)
         
+        # Базовый период
         if start_str and end_str:
-            return f"{start_str} / {end_str}"
+            period = f"{start_str} - {end_str}"
         elif end_str:
-            return f"до {end_str}"
+            period = f"до {end_str}"
         elif start_str:
-            return f"с {start_str}"
-        return ""
+            period = f"с {start_str}"
+        else:
+            return ""
+        
+        # Добавляем оставшееся время
+        remaining = format_time_remaining(end_time)
+        if remaining and remaining != "Завершено":
+            period += f" (⏳ {remaining})"
+        elif remaining == "Завершено":
+            period += " (⏳ Завершено)"
+        
+        return period
     
     @staticmethod
     def _format_datetime(dt: Any) -> str:
@@ -1546,13 +1557,24 @@ class CandybombFormatter:
         start_str = CandybombFormatter._format_datetime(start)
         end_str = CandybombFormatter._format_datetime(end)
         
+        # Базовий період
         if start_str and end_str:
-            return f"{start_str} / {end_str}"
+            period = f"{start_str} - {end_str}"
         elif end_str:
-            return f"до {end_str}"
+            period = f"до {end_str}"
         elif start_str:
-            return f"з {start_str}"
-        return ""
+            period = f"з {start_str}"
+        else:
+            return ""
+        
+        # Додаємо час, що залишився
+        remaining = format_time_remaining(end)
+        if remaining and remaining != "Завершено":
+            period += f" (⏳ {remaining})"
+        elif remaining == "Завершено":
+            period += " (⏳ Завершено)"
+        
+        return period
     
     @staticmethod
     def _format_datetime(dt: Any) -> str:

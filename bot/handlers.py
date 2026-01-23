@@ -10799,63 +10799,199 @@ async def navigate_top_stakings(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "top_activity_promos")
-async def show_top_promos(callback: CallbackQuery):
-    """Показать ТОП промоакций со всех бирж"""
+async def show_promo_categories(callback: CallbackQuery):
+    """Показати меню категорій промоакцій"""
     try:
         from services.top_activity_service import get_top_activity_service
-        from bot.keyboards import get_top_promos_keyboard
+        from bot.keyboards import get_promo_categories_keyboard
         
-        user_id = callback.from_user.id
+        # Отримуємо кількість по категоріях
+        service = get_top_activity_service()
+        counts = service.get_promo_counts_by_category()
         
-        # Используем LoadingContext для отзывчивого UI
-        async with LoadingContext(
-            callback,
-            "⏳ <b>Загрузка ТОП промоакций...</b>\n\n🔄 Агрегируем данные со всех бирж...",
-            delete_on_complete=True,
-            edit_original=True
-        ) as loading:
-            service = get_top_activity_service()
-            promos = service.get_top_promos(limit=50)  # Получаем больше для пагинации
+        # Загальна кількість
+        total = sum(counts.values())
         
-        if not promos:
-            await callback.message.edit_text(
-                "📊 <b>ТОП ПРОМОАКЦИЙ</b>\n\n"
-                "📭 <i>Нет активных промоакций в базе данных.\n"
-                "Убедитесь что добавлены ссылки на биржи с категорией 'airdrop'.</i>",
-                parse_mode="HTML",
-                reply_markup=get_top_promos_keyboard(1, 1),
-                disable_web_page_preview=True
-            )
-            return
+        # Формуємо повідомлення
+        now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+        message = (
+            f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎁 <b>ПРОМОАКЦІЇ</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📈 Всього активних: <b>{total}</b>\n\n"
+        )
         
-        # Сохраняем состояние пагинации
-        items_per_page = 5
-        total_pages = max(1, (len(promos) + items_per_page - 1) // items_per_page)
+        # Показуємо кількість по категоріях
+        category_info = [
+            ("🪂", "Аірдропи", counts.get('airdrop', 0)),
+            ("🍬", "Кендибомби", counts.get('candybomb', 0)),
+            ("🚀", "Лаунчпади", counts.get('launchpad', 0)),
+            ("🌊", "Лаунчпули", counts.get('launchpool', 0)),
+            ("🗂️", "Інші", counts.get('other', 0)),
+        ]
         
-        top_activity_state[user_id] = {
-            'promos': promos,
-            'page': 1,
-            'items_per_page': items_per_page,
-            'total_pages': total_pages,
-            'type': 'promos'
-        }
+        for icon, name, count in category_info:
+            message += f"{icon} {name}: {count}\n"
         
-        # Форматируем первую страницу
-        message = format_top_promos_page(promos, 1, total_pages, items_per_page)
+        message += "\n<i>Оберіть категорію для перегляду:</i>"
         
         await callback.message.edit_text(
             message,
             parse_mode="HTML",
-            reply_markup=get_top_promos_keyboard(1, total_pages),
+            reply_markup=get_promo_categories_keyboard(counts),
             disable_web_page_preview=True
         )
         await safe_answer_callback(callback)
         
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки ТОП промоакций: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка загрузки", show_alert=True)
+        logger.error(f"❌ Помилка завантаження категорій промо: {e}", exc_info=True)
+        await callback.answer("❌ Помилка завантаження", show_alert=True)
 
 
+# Альас для назад до категорій
+@router.callback_query(F.data.in_(["top_promos_categories_menu", "top_promos_categories_refresh"]))
+async def back_to_promo_categories(callback: CallbackQuery):
+    """Повернутися до меню категорій промоакцій"""
+    await show_promo_categories(callback)
+
+
+@router.callback_query(F.data.regexp(r"^top_promos_(airdrop|candybomb|launchpad|launchpool|other)$"))
+async def show_category_promos(callback: CallbackQuery):
+    """Показати промоакції конкретної категорії"""
+    try:
+        from services.top_activity_service import get_top_activity_service
+        from bot.keyboards import get_category_promos_keyboard
+        
+        # Визначаємо категорію з callback_data
+        category = callback.data.replace("top_promos_", "")
+        user_id = callback.from_user.id
+        
+        # Отримуємо конфіг категорії
+        CATEGORY_CONFIG = {
+            'airdrop': {'icon': '🪂', 'name': 'Аірдропи'},
+            'candybomb': {'icon': '🍬', 'name': 'Кендибомби'},
+            'launchpad': {'icon': '🚀', 'name': 'Лаунчпади'},
+            'launchpool': {'icon': '🌊', 'name': 'Лаунчпули'},
+            'other': {'icon': '🗂️', 'name': 'Інші'},
+        }
+        
+        config = CATEGORY_CONFIG.get(category, {'icon': '📋', 'name': category.title()})
+        
+        # Використовуємо LoadingContext
+        async with LoadingContext(
+            callback,
+            f"⏳ <b>Завантаження {config['name']}...</b>",
+            delete_on_complete=True,
+            edit_original=True
+        ) as loading:
+            service = get_top_activity_service()
+            promos = service.get_top_promos_by_category(category, limit=50)
+        
+        items_per_page = 5
+        total_pages = max(1, (len(promos) + items_per_page - 1) // items_per_page)
+        
+        # Зберігаємо стан
+        top_activity_state[user_id] = {
+            'category_promos': promos,
+            'category': category,
+            'page': 1,
+            'items_per_page': items_per_page,
+            'total_pages': total_pages,
+            'type': 'category_promos'
+        }
+        
+        # Форматуємо сторінку
+        message = format_category_page(
+            promos, 1, total_pages, items_per_page, 
+            category, config['icon'], config['name']
+        )
+        
+        await callback.message.edit_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=get_category_promos_keyboard(category, 1, total_pages),
+            disable_web_page_preview=True
+        )
+        await safe_answer_callback(callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Помилка завантаження категорії {callback.data}: {e}", exc_info=True)
+        await callback.answer("❌ Помилка завантаження", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^top_promos_(airdrop|candybomb|launchpad|launchpool|other)_(prev|next)$"))
+async def navigate_category_promos(callback: CallbackQuery):
+    """Навігація по сторінках категорії промо"""
+    try:
+        from bot.keyboards import get_category_promos_keyboard
+        
+        user_id = callback.from_user.id
+        state = top_activity_state.get(user_id)
+        
+        if not state or state.get('type') != 'category_promos':
+            await callback.answer("❌ Дані застаріли, оновіть список", show_alert=True)
+            return
+        
+        # Парсимо callback
+        parts = callback.data.replace("top_promos_", "").rsplit("_", 1)
+        category = parts[0]  # airdrop, candybomb, etc.
+        action = parts[1]    # prev or next
+        
+        # Перевіряємо що категорія співпадає
+        if category != state.get('category'):
+            await callback.answer("❌ Дані застаріли", show_alert=True)
+            return
+        
+        current_page = state['page']
+        total_pages = state['total_pages']
+        
+        if action == "prev" and current_page > 1:
+            current_page -= 1
+        elif action == "next" and current_page < total_pages:
+            current_page += 1
+        
+        state['page'] = current_page
+        
+        # Отримуємо конфіг категорії
+        CATEGORY_CONFIG = {
+            'airdrop': {'icon': '🪂', 'name': 'Аірдропи'},
+            'candybomb': {'icon': '🍬', 'name': 'Кендибомби'},
+            'launchpad': {'icon': '🚀', 'name': 'Лаунчпади'},
+            'launchpool': {'icon': '🌊', 'name': 'Лаунчпули'},
+            'other': {'icon': '🗂️', 'name': 'Інші'},
+        }
+        config = CATEGORY_CONFIG.get(category, {'icon': '📋', 'name': category.title()})
+        
+        # Форматуємо сторінку
+        message = format_category_page(
+            state['category_promos'], 
+            current_page, 
+            total_pages, 
+            state['items_per_page'],
+            category, config['icon'], config['name']
+        )
+        
+        await callback.message.edit_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=get_category_promos_keyboard(category, current_page, total_pages),
+            disable_web_page_preview=True
+        )
+        await safe_answer_callback(callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Помилка навігації категорії: {e}", exc_info=True)
+        await callback.answer("❌ Помилка", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^top_promos_(airdrop|candybomb|launchpad|launchpool|other)_info$"))
+async def category_page_info(callback: CallbackQuery):
+    """Інформація про поточну сторінку категорії"""
+    await callback.answer("📄 Поточна сторінка")
+
+
+# Legacy handler - перенаправляємо на категорії
 @router.callback_query(F.data.in_(["top_promos_prev", "top_promos_next"]))
 async def navigate_top_promos(callback: CallbackQuery):
     """Навигация по страницам ТОП промоакций"""
@@ -11089,4 +11225,519 @@ def format_top_promos_page(promos: list, page: int, total_pages: int, items_per_
     return message
 
 
+# =============================================================================
+# ФОРМАТУВАННЯ ДЛЯ КАТЕГОРІЙ ПРОМОАКЦІЙ
+# =============================================================================
 
+def format_category_page(
+    promos: list, 
+    page: int, 
+    total_pages: int, 
+    items_per_page: int,
+    category: str,
+    category_icon: str,
+    category_name: str
+) -> str:
+    """
+    Універсальний форматувальник для категорій промоакцій.
+    Викликає специфічний форматер в залежності від категорії.
+    """
+    formatters = {
+        'airdrop': format_airdrop_page,
+        'candybomb': format_candybomb_page,
+        'launchpad': format_launchpad_page,
+        'launchpool': format_launchpool_page,
+        'other': format_other_page,
+    }
+    
+    formatter = formatters.get(category, format_other_page)
+    return formatter(promos, page, total_pages, items_per_page, category_icon, category_name)
+
+
+def format_airdrop_page(
+    promos: list, 
+    page: int, 
+    total_pages: int, 
+    items_per_page: int,
+    category_icon: str = "🪂",
+    category_name: str = "Аірдропи"
+) -> str:
+    """Форматує сторінку аірдропів"""
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+    
+    message = (
+        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{category_icon} <b>{category_name.upper()}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    page_promos = promos[start_idx:end_idx]
+    
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for idx, promo in enumerate(page_promos):
+        global_idx = start_idx + idx
+        number = number_emojis[global_idx] if global_idx < 10 else f"{global_idx + 1}."
+        
+        exchange = promo.get('exchange', 'N/A')
+        award_token = promo.get('award_token', '')
+        title = promo.get('title', 'N/A')
+        
+        # Формуємо назву
+        if award_token and award_token not in title:
+            title_display = f"{exchange} | {award_token}"
+        else:
+            title_display = f"{exchange} | {title[:25]}"
+        
+        # Нагорода
+        reward_display = promo.get('reward_per_user_display') or promo.get('reward_display')
+        reward_usd = promo.get('reward_usd_display')
+        expected_reward = promo.get('expected_reward', 0)
+        
+        # Умови
+        conditions = promo.get('conditions', '')
+        
+        # Учасники / переможці
+        participants = promo.get('participants_count') or promo.get('participants', 0)
+        winners = promo.get('winners_count') or promo.get('winners', 0)
+        
+        # Час
+        time_data = promo.get('time_remaining', {})
+        if isinstance(time_data, dict):
+            remaining_str = time_data.get('remaining_str', '')
+        else:
+            remaining_str = str(time_data) if time_data else ''
+        
+        link = promo.get('link', '')
+        
+        # Формуємо картку
+        message += f"{number} <b>{title_display}</b>\n"
+        
+        # 💰 Нагорода
+        if reward_display:
+            if reward_usd:
+                message += f"   💰 Нагорода: {reward_display} ({reward_usd})\n"
+            elif expected_reward > 0:
+                message += f"   💰 Нагорода: {reward_display} (~${expected_reward:,.2f})\n"
+            else:
+                message += f"   💰 Нагорода: {reward_display}\n"
+        elif expected_reward > 0:
+            message += f"   💰 Нагорода: ~${expected_reward:,.2f}\n"
+        
+        # 📋 Умови
+        if conditions:
+            message += f"   📋 Умови: {conditions[:50]}\n"
+        
+        # 👥 Учасники
+        if participants and winners:
+            message += f"   👥 Учасників: {participants:,} | 🏆 Місць: {winners:,}\n"
+        elif participants:
+            message += f"   👥 Учасників: {participants:,}\n"
+        
+        # ⏰ Час
+        if remaining_str:
+            message += f"   ⏰ {remaining_str}\n"
+        
+        # 🔗 Посилання
+        if link:
+            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+        
+        message += "\n"
+    
+    if not page_promos:
+        message += "📭 <i>Немає активних аірдропів</i>\n\n"
+    
+    message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += f"📄 {page}/{total_pages}"
+    
+    return message
+
+
+def format_candybomb_page(
+    promos: list, 
+    page: int, 
+    total_pages: int, 
+    items_per_page: int,
+    category_icon: str = "🍬",
+    category_name: str = "Кендибомби"
+) -> str:
+    """Форматує сторінку кендибомбів"""
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+    
+    message = (
+        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{category_icon} <b>{category_name.upper()}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    page_promos = promos[start_idx:end_idx]
+    
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for idx, promo in enumerate(page_promos):
+        global_idx = start_idx + idx
+        number = number_emojis[global_idx] if global_idx < 10 else f"{global_idx + 1}."
+        
+        exchange = promo.get('exchange', 'N/A')
+        award_token = promo.get('award_token', '')
+        
+        title_display = f"{exchange} | {award_token}" if award_token else f"{exchange}"
+        
+        # Пул
+        total_pool = promo.get('total_prize_pool')
+        total_pool_usd = promo.get('total_prize_pool_usd', 0) or 0
+        
+        # Нагорода на переможця
+        participants = promo.get('participants_count') or promo.get('participants', 0) or 0
+        winners = promo.get('winners_count') or promo.get('winners', 0) or 0
+        
+        reward_per_winner = None
+        reward_per_winner_usd = None
+        
+        if participants > 0 and total_pool:
+            try:
+                pool_value = float(str(total_pool).replace(',', ''))
+                reward_per_winner = pool_value / participants
+                if total_pool_usd > 0:
+                    reward_per_winner_usd = total_pool_usd / participants
+            except:
+                pass
+        
+        # Шанс
+        win_chance = 0
+        if winners and participants:
+            win_chance = min((winners / participants) * 100, 100)
+        
+        # Час
+        time_data = promo.get('time_remaining', {})
+        if isinstance(time_data, dict):
+            remaining_str = time_data.get('remaining_str', '')
+        else:
+            remaining_str = str(time_data) if time_data else ''
+        
+        link = promo.get('link', '')
+        
+        # Формуємо картку
+        message += f"{number} <b>{title_display}</b>\n"
+        
+        # 🎁 Пул
+        if total_pool:
+            if total_pool_usd > 0:
+                message += f"   🎁 Пул: {total_pool} {award_token} (~${total_pool_usd:,.0f})\n"
+            else:
+                message += f"   🎁 Пул: {total_pool} {award_token}\n"
+        
+        # 🎯 На переможця
+        if reward_per_winner:
+            if reward_per_winner_usd:
+                message += f"   🎯 На переможця: ~{reward_per_winner:,.0f} {award_token} (~${reward_per_winner_usd:,.2f})\n"
+            else:
+                message += f"   🎯 На переможця: ~{reward_per_winner:,.0f} {award_token}\n"
+        
+        # 🎲 Шанс
+        if win_chance > 0:
+            message += f"   🎲 Шанс: {win_chance:.1f}% ({winners:,} місць з {participants:,})\n"
+        elif participants:
+            message += f"   👥 Учасників: {participants:,}\n"
+        
+        # ⏰ Час
+        if remaining_str:
+            message += f"   ⏰ {remaining_str}\n"
+        
+        # 🔗 Посилання
+        if link:
+            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+        
+        message += "\n"
+    
+    if not page_promos:
+        message += "📭 <i>Немає активних кендибомбів</i>\n\n"
+    
+    message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += f"📄 {page}/{total_pages}"
+    
+    return message
+
+
+def format_launchpad_page(
+    promos: list, 
+    page: int, 
+    total_pages: int, 
+    items_per_page: int,
+    category_icon: str = "🚀",
+    category_name: str = "Лаунчпади"
+) -> str:
+    """Форматує сторінку лаунчпадів"""
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+    
+    message = (
+        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{category_icon} <b>{category_name.upper()}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    page_promos = promos[start_idx:end_idx]
+    
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for idx, promo in enumerate(page_promos):
+        global_idx = start_idx + idx
+        number = number_emojis[global_idx] if global_idx < 10 else f"{global_idx + 1}."
+        
+        exchange = promo.get('exchange', 'N/A')
+        award_token = promo.get('award_token', '')
+        title = promo.get('title', '')
+        
+        title_display = f"{exchange} | {award_token}" if award_token else f"{exchange} | {title[:20]}"
+        
+        # Дані з raw_data
+        taking_price = promo.get('taking_price', 0)
+        market_price = promo.get('market_price', 0)
+        max_allocation = promo.get('max_allocation', 0)
+        expected_reward = promo.get('expected_reward', 0)
+        profit_display = promo.get('profit_display')
+        
+        # Час
+        time_data = promo.get('time_remaining', {})
+        if isinstance(time_data, dict):
+            remaining_str = time_data.get('remaining_str', '')
+        else:
+            remaining_str = str(time_data) if time_data else ''
+        
+        link = promo.get('link', '')
+        
+        # Формуємо картку
+        message += f"{number} <b>{title_display}</b>\n"
+        
+        # 💵 Ціна
+        if taking_price:
+            if market_price:
+                price_change = ((market_price - taking_price) / taking_price) * 100 if taking_price > 0 else 0
+                sign = "+" if price_change > 0 else ""
+                message += f"   💵 Ціна: ${taking_price:.4f} за токен\n"
+                message += f"   📈 Ринкова: ${market_price:.4f} ({sign}{price_change:.1f}%)\n"
+            else:
+                message += f"   💵 Ціна: ${taking_price:.4f} за токен\n"
+        
+        # 📊 Аллокація
+        if max_allocation:
+            message += f"   📊 Аллокація: до {max_allocation:,.0f} USDT\n"
+        
+        # 💰 Потенційний профіт
+        if expected_reward > 0:
+            message += f"   💰 Потенц. профіт: {profit_display or f'~${expected_reward:,.2f}'}\n"
+        
+        # ⏰ Час
+        if remaining_str:
+            message += f"   ⏰ {remaining_str}\n"
+        
+        # 🔗 Посилання
+        if link:
+            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+        
+        message += "\n"
+    
+    if not page_promos:
+        message += "📭 <i>Немає активних лаунчпадів</i>\n\n"
+    
+    message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += f"📄 {page}/{total_pages}"
+    
+    return message
+
+
+def format_launchpool_page(
+    promos: list, 
+    page: int, 
+    total_pages: int, 
+    items_per_page: int,
+    category_icon: str = "🌊",
+    category_name: str = "Лаунчпули"
+) -> str:
+    """Форматує сторінку лаунчпулів"""
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+    
+    message = (
+        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{category_icon} <b>{category_name.upper()}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    page_promos = promos[start_idx:end_idx]
+    
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for idx, promo in enumerate(page_promos):
+        global_idx = start_idx + idx
+        number = number_emojis[global_idx] if global_idx < 10 else f"{global_idx + 1}."
+        
+        exchange = promo.get('exchange', 'N/A')
+        award_token = promo.get('award_token', '')
+        title = promo.get('title', '')
+        
+        title_display = f"{exchange} | {award_token}" if award_token else f"{exchange} | {title[:20]}"
+        
+        # Дані з raw_data
+        raw_data = promo.get('raw_data', {})
+        pools = raw_data.get('pools', []) if raw_data else []
+        max_apr = promo.get('max_apr', 0)
+        days_left = promo.get('days_left', 0)
+        earnings_display = promo.get('earnings_display')
+        expected_reward = promo.get('expected_reward', 0)
+        total_participants = promo.get('participants_count', 0)
+        
+        # Формуємо список пулів
+        pools_str = ""
+        if pools:
+            pool_parts = []
+            for pool in pools[:3]:  # Максимум 3 пули
+                stake_coin = pool.get('stake_coin', '')
+                apr = pool.get('apr', 0)
+                if stake_coin and apr:
+                    pool_parts.append(f"{stake_coin} ({apr:.0f}%)")
+            pools_str = ", ".join(pool_parts)
+        
+        # Час
+        time_data = promo.get('time_remaining', {})
+        if isinstance(time_data, dict):
+            remaining_str = time_data.get('remaining_str', '')
+        else:
+            remaining_str = str(time_data) if time_data else ''
+        
+        link = promo.get('link', '')
+        
+        # Формуємо картку
+        message += f"{number} <b>{title_display}</b>\n"
+        
+        # 🪙 Стейк пули
+        if pools_str:
+            message += f"   🪙 Стейк: {pools_str}\n"
+        elif max_apr:
+            message += f"   📈 APR: {max_apr:.0f}%\n"
+        
+        # 🎁 Пул нагород
+        total_pool = promo.get('total_prize_pool')
+        if total_pool:
+            message += f"   🎁 Пул нагород: {total_pool} {award_token}\n"
+        
+        # 💰 Заробіток
+        if expected_reward > 0:
+            message += f"   💰 Заробіток: {earnings_display or f'~${expected_reward:,.2f}'}\n"
+        elif earnings_display:
+            message += f"   💰 Заробіток: {earnings_display}\n"
+        
+        # 👥 Учасники
+        if total_participants:
+            message += f"   👥 Учасників: {total_participants:,}\n"
+        
+        # ⏰ Час
+        if remaining_str:
+            message += f"   ⏰ Фармінг: {remaining_str}\n"
+        elif days_left:
+            message += f"   ⏰ Фармінг: {days_left}д залишилось\n"
+        
+        # 🔗 Посилання
+        if link:
+            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+        
+        message += "\n"
+    
+    if not page_promos:
+        message += "📭 <i>Немає активних лаунчпулів</i>\n\n"
+    
+    message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += f"📄 {page}/{total_pages}"
+    
+    return message
+
+
+def format_other_page(
+    promos: list, 
+    page: int, 
+    total_pages: int, 
+    items_per_page: int,
+    category_icon: str = "🗂️",
+    category_name: str = "Інші"
+) -> str:
+    """Форматує сторінку інших промоакцій"""
+    now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+    
+    message = (
+        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{category_icon} <b>{category_name.upper()}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    page_promos = promos[start_idx:end_idx]
+    
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for idx, promo in enumerate(page_promos):
+        global_idx = start_idx + idx
+        number = number_emojis[global_idx] if global_idx < 10 else f"{global_idx + 1}."
+        
+        exchange = promo.get('exchange', 'N/A')
+        award_token = promo.get('award_token', '')
+        title = promo.get('title', 'N/A')
+        promo_type = promo.get('promo_type', '')
+        
+        title_display = f"{exchange} | {title[:30]}"
+        
+        # Нагорода
+        expected_reward = promo.get('expected_reward', 0)
+        reward_display = promo.get('reward_display') or promo.get('reward_per_user_display')
+        
+        # Час
+        time_data = promo.get('time_remaining', {})
+        if isinstance(time_data, dict):
+            remaining_str = time_data.get('remaining_str', '')
+        else:
+            remaining_str = str(time_data) if time_data else ''
+        
+        link = promo.get('link', '')
+        
+        # Формуємо картку
+        message += f"{number} <b>{title_display}</b>\n"
+        
+        # 📌 Тип
+        if promo_type and promo_type != 'other':
+            message += f"   📌 Тип: {promo_type.replace('_', ' ').title()}\n"
+        
+        # 💰 Нагорода
+        if expected_reward > 0:
+            message += f"   💰 Нагорода: ~${expected_reward:,.2f}\n"
+        elif reward_display:
+            message += f"   💰 Нагорода: {reward_display}\n"
+        
+        # ⏰ Час
+        if remaining_str:
+            message += f"   ⏰ {remaining_str}\n"
+        
+        # 🔗 Посилання
+        if link:
+            message += f"   🔗 <a href=\"{link}\">Участвувати</a>\n"
+        
+        message += "\n"
+    
+    if not page_promos:
+        message += "📭 <i>Немає інших промоакцій</i>\n\n"
+    
+    message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += f"📄 {page}/{total_pages}"
+    
+    return message

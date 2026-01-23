@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from utils.promo_formatter import format_promo_header, format_promo_header_simple, get_exchange_icon, get_category_icon
 
 # Новые универсальные форматтеры по категориям
-from utils.message_formatters import LaunchpadFormatter, LaunchpoolFormatter, format_promo_by_category
+from utils.message_formatters import LaunchpadFormatter, LaunchpoolFormatter, format_promo_by_category, format_time_remaining
 
 logger = logging.getLogger(__name__)
 
@@ -319,13 +319,25 @@ class NotificationService:
                 else:
                     message += f"<b>🎁 Награда на аккаунт:</b> {self.escape_html(reward_text)}\n"
 
-            # Период действия
+            # Период действия с оставшимся временем
             if promo.get('start_time') and promo.get('end_time'):
-                message += f"<b>📅 Период:</b> {promo['start_time']} - {promo['end_time']}\n"
+                period_str = f"{promo['start_time']} - {promo['end_time']}"
+                remaining = format_time_remaining(promo['end_time'])
+                if remaining and remaining != "Завершено":
+                    period_str += f" (⏳ {remaining})"
+                elif remaining == "Завершено":
+                    period_str += " (⏳ Завершено)"
+                message += f"<b>📅 Период:</b> {period_str}\n"
             elif promo.get('start_time'):
                 message += f"<b>📅 Начало:</b> {promo['start_time']}\n"
             elif promo.get('end_time'):
-                message += f"<b>📅 Окончание:</b> {promo['end_time']}\n"
+                end_str = f"{promo['end_time']}"
+                remaining = format_time_remaining(promo['end_time'])
+                if remaining and remaining != "Завершено":
+                    end_str += f" (⏳ {remaining})"
+                elif remaining == "Завершено":
+                    end_str += " (⏳ Завершено)"
+                message += f"<b>📅 Окончание:</b> {end_str}\n"
 
             # Ссылка
             if promo.get('link'):
