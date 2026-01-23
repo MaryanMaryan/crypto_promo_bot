@@ -181,7 +181,10 @@ class BitgetLaunchpoolParser(LaunchpoolBaseParser):
                     return None
                         
                 finally:
-                    await context.close()
+                    try:
+                        await context.close()
+                    except Exception as e:
+                        self.logger.debug(f"Контекст уже закрыт: {e}")
                     
         except Exception as e:
             self.logger.error(f"❌ Ошибка получения данных: {e}")
@@ -307,7 +310,10 @@ class BitgetLaunchpoolParser(LaunchpoolBaseParser):
                     return data
                     
                 finally:
-                    await context.close()
+                    try:
+                        await context.close()
+                    except Exception as e:
+                        self.logger.debug(f"Контекст уже закрыт: {e}")
                 
         except Exception as e:
             self.logger.error(f"❌ Ошибка получения данных через браузер: {e}")

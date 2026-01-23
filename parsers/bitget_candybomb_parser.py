@@ -168,7 +168,10 @@ class BitgetCandybombParser(LaunchpoolBaseParser):
                     return None
                         
                 finally:
-                    await context.close()
+                    try:
+                        await context.close()
+                    except Exception as e:
+                        self.logger.debug(f"Контекст уже закрыт: {e}")
                     
         except Exception as e:
             self.logger.error(f"❌ Ошибка получения данных Candy Bomb: {e}")

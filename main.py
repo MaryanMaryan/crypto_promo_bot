@@ -1283,4 +1283,81 @@ async def main():
     await bot_instance.start()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Windows fix: Suppress subprocess cleanup warnings
+    # На Windows, коли Playwright запускається з ThreadPool (без event loop),
+    # виникають попередження при cleanup subprocess. Це косметична проблема.
+    if sys.platform == 'win32':
+        import warnings
+        import io
+        
+        # Suppress warnings
+        warnings.filterwarnings('ignore', category=ResourceWarning, message='.*subprocess.*')
+        warnings.filterwarnings('ignore', message='.*Event loop is closed.*')
+        warnings.filterwarnings('ignore', message='.*I/O operation on closed pipe.*')
+        
+        # Wrap sys.stderr to filter Playwright subprocess cleanup errors
+        original_stderr = sys.stderr
+        
+        class FilteredStderr:
+            def __init__(self, original):
+                self.original = original
+                self.buffer = []
+                self.in_exception = False
+                self.exception_buffer = []
+                
+            def write(self, text):
+                # Detect start of exception block (both variants)
+                if 'Exception ignored in:' in text or 'Traceback (most recent call last):' in text:
+                    self.in_exception = True
+                    self.exception_buffer = [text]
+                    return
+                
+                # If we're collecting an exception block
+                if self.in_exception:
+                    self.exception_buffer.append(text)
+                    
+                    # Check if this is the end of the traceback (empty line or new log line with timestamp)
+                    if text.strip() == '' or (len(self.exception_buffer) > 5 and text.startswith('2026-')):
+                        # Check if the complete block should be filtered
+                        full_text = ''.join(self.exception_buffer)
+                        should_filter = any(phrase in full_text for phrase in [
+                            'BaseSubprocessTransport.__del__',
+                            '_ProactorBasePipeTransport.__del__',
+                            'proactor_events.py',
+                            'base_subprocess.py',
+                            'windows_utils.py'
+                        ])
+                        
+                        if should_filter:
+                            # Suppress the entire exception block
+                            self.exception_buffer = []
+                            self.in_exception = False
+                            # If this is a new log line, write it
+                            if text.startswith('2026-'):
+                                self.original.write(text)
+                        else:
+                            # Output the collected block if it's not filtered
+                            for line in self.exception_buffer:
+                                self.original.write(line)
+                            self.exception_buffer = []
+                            self.in_exception = False
+                    return
+                
+                # Normal output
+                self.original.write(text)
+            
+            def flush(self):
+                self.original.flush()
+            
+            def fileno(self):
+                return self.original.fileno()
+        
+        sys.stderr = FilteredStderr(original_stderr)
+        logger.info("🪟 Windows: підавлення попереджень Playwright subprocess cleanup")
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Бот зупинено користувачем")
+    except Exception as e:
+        logger.error(f"❌ Критична помилка: {e}", exc_info=True)
