@@ -1,64 +1,66 @@
 """
 utils/price_fetcher.py
 Утилита для получения актуальных цен криптовалют с бирж (Bybit, KuCoin, Gate.io)
-с fallback на CoinGecko и CoinMarketCap.
+с fallback на Pre-market данные.
 
 Приоритет источников:
 1. Bybit API (бесплатно, без лимитов)
 2. KuCoin API (бесплатно, много альткоинов)
 3. Gate.io API (бесплатно, ещё больше альткоинов)
-4. CoinGecko API (лимиты ~30 req/min)
-5. CoinMarketCap API (требует API ключ)
+4. Pre-market данные (MEXC, Gate.io pre-market) - для токенов до листинга
 """
 
 import requests
 import logging
 from typing import Optional, Dict, List, Tuple
 import time
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
+# Lazy import для premarket fetcher (избегаем циклических импортов)
+_premarket_fetcher = None
+
+def _get_premarket_fetcher():
+    """Ленивая загрузка premarket fetcher"""
+    global _premarket_fetcher
+    if _premarket_fetcher is None:
+        try:
+            from utils.premarket_price_fetcher import get_premarket_fetcher
+            _premarket_fetcher = get_premarket_fetcher()
+        except ImportError as e:
+            logger.debug(f"⚠️ PremarketFetcher недоступен: {e}")
+            _premarket_fetcher = False  # Помечаем как недоступный
+    return _premarket_fetcher if _premarket_fetcher else None
+
 
 class PriceFetcher:
-    """Получение цен токенов с бирж и агрегаторов"""
+    """Получение цен токенов с бирж"""
 
     # API endpoints
     BYBIT_API = "https://api.bybit.com/v5/market/tickers"
     KUCOIN_API = "https://api.kucoin.com/api/v1/market/orderbook/level1"
     GATEIO_API = "https://api.gateio.ws/api/v4/spot/tickers"
-    COINGECKO_API = "https://api.coingecko.com/api/v3"
-    COINMARKETCAP_API = "https://pro-api.coinmarketcap.com/v1"
     
     # Настройки
     CACHE_DURATION = 300  # 5 минут кэш
     FAST_TIMEOUT = 3  # Быстрый таймаут для бирж
-    SLOW_TIMEOUT = 10  # Таймаут для агрегаторов
     
     # Стейблкоины (цена = 1 USD)
     STABLECOINS = {'USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP', 'GUSD', 'FRAX', 'LUSD', 'SUSD'}
 
-    def __init__(self, cmc_api_key: Optional[str] = None):
+    def __init__(self):
         self._cache: Dict[str, Tuple[float, float]] = {}  # {symbol: (price, timestamp)}
-        self.cmc_api_key = cmc_api_key or os.getenv('COINMARKETCAP_API_KEY')
-        self.use_cmc = bool(self.cmc_api_key)
         
         # Статистика для логирования
         self._stats = {
             'bybit_hits': 0,
             'kucoin_hits': 0,
             'gateio_hits': 0,
-            'coingecko_hits': 0,
-            'cmc_hits': 0,
+            'premarket_hits': 0,
             'cache_hits': 0,
             'not_found': 0
         }
-        
-        # Circuit breaker для CoinGecko/CMC (они имеют лимиты)
-        self._rate_limit_hits = 0
-        self._circuit_open = False
-        self.rate_limit_threshold = 5
 
     def get_token_price(self, symbol: str, preferred_exchange: Optional[str] = None) -> Optional[float]:
         """
@@ -94,12 +96,11 @@ class PriceFetcher:
                 self._save_to_cache(symbol, price)
                 return price
         
-        # Fallback на агрегаторы (только если circuit breaker не активен)
-        if not self._circuit_open:
-            price = self._try_aggregators(symbol)
-            if price is not None:
-                self._save_to_cache(symbol, price)
-                return price
+        # Fallback: Pre-market данные (для токенов до листинга)
+        price = self._try_premarket(symbol)
+        if price is not None:
+            self._save_to_cache(symbol, price)
+            return price
         
         self._stats['not_found'] += 1
         logger.warning(f"⚠️ Цена для {symbol} не найдена ни на одном источнике")
@@ -130,18 +131,23 @@ class PriceFetcher:
             logger.debug(f"⚠️ Ошибка {exchange} для {symbol}: {e}")
         return None
 
-    def _try_aggregators(self, symbol: str) -> Optional[float]:
-        """Пробует агрегаторы (CoinGecko, CMC)"""
-        # Сначала CoinGecko (не требует ключа)
-        price = self._get_price_from_coingecko(symbol)
-        if price:
-            return price
+    def _try_premarket(self, symbol: str) -> Optional[float]:
+        """
+        Пробует получить цену из Pre-market данных.
+        Используется как финальный fallback для токенов, которые ещё не листинге.
+        """
+        fetcher = _get_premarket_fetcher()
+        if fetcher is None:
+            return None
         
-        # Потом CMC (если есть ключ)
-        if self.use_cmc:
-            price = self._get_price_from_cmc(symbol)
-            if price:
+        try:
+            price = fetcher.get_premarket_price(symbol)
+            if price is not None:
+                self._stats['premarket_hits'] += 1
+                logger.debug(f"📈 {symbol}: ${price:.6f} (Pre-market)")
                 return price
+        except Exception as e:
+            logger.debug(f"⚠️ Pre-market ошибка для {symbol}: {e}")
         
         return None
 
@@ -247,117 +253,6 @@ class PriceFetcher:
             logger.debug(f"⚠️ Gate.io ошибка для {symbol}: {e}")
             return None
 
-    # ==================== АГРЕГАТОРЫ (FALLBACK) ====================
-
-    def _get_price_from_coingecko(self, symbol: str) -> Optional[float]:
-        """Получить цену с CoinGecko (fallback)"""
-        try:
-            logger.debug(f"📡 Запрос CoinGecko для {symbol}...")
-            
-            # Сначала ищем ID монеты
-            search_url = f"{self.COINGECKO_API}/search"
-            response = requests.get(
-                search_url, 
-                params={"query": symbol}, 
-                timeout=self.SLOW_TIMEOUT
-            )
-            
-            if response.status_code == 429:
-                self._handle_rate_limit("CoinGecko")
-                return None
-                
-            response.raise_for_status()
-            search_data = response.json()
-            
-            # Ищем точное совпадение
-            coin_id = None
-            for coin in search_data.get('coins', []):
-                if coin['symbol'].upper() == symbol:
-                    coin_id = coin['id']
-                    break
-            
-            if not coin_id:
-                return None
-            
-            # Получаем цену
-            price_url = f"{self.COINGECKO_API}/simple/price"
-            response = requests.get(
-                price_url,
-                params={"ids": coin_id, "vs_currencies": "usd"},
-                timeout=self.SLOW_TIMEOUT
-            )
-            
-            if response.status_code == 429:
-                self._handle_rate_limit("CoinGecko")
-                return None
-                
-            response.raise_for_status()
-            price_data = response.json()
-            
-            price = price_data.get(coin_id, {}).get('usd')
-            if price:
-                self._stats['coingecko_hits'] += 1
-                logger.debug(f"✅ {symbol}: ${price:.6f} (CoinGecko)")
-                return float(price)
-            
-            return None
-            
-        except requests.exceptions.HTTPError as e:
-            if hasattr(e, 'response') and e.response.status_code == 429:
-                self._handle_rate_limit("CoinGecko")
-            return None
-        except Exception as e:
-            logger.debug(f"⚠️ CoinGecko ошибка для {symbol}: {e}")
-            return None
-
-    def _get_price_from_cmc(self, symbol: str) -> Optional[float]:
-        """Получить цену с CoinMarketCap (fallback, требует API ключ)"""
-        if not self.cmc_api_key:
-            return None
-            
-        try:
-            logger.debug(f"📡 Запрос CMC для {symbol}...")
-            
-            url = f"{self.COINMARKETCAP_API}/cryptocurrency/quotes/latest"
-            headers = {
-                'X-CMC_PRO_API_KEY': self.cmc_api_key,
-                'Accept': 'application/json'
-            }
-            params = {'symbol': symbol, 'convert': 'USD'}
-            
-            response = requests.get(url, headers=headers, params=params, timeout=self.SLOW_TIMEOUT)
-            
-            if response.status_code == 429:
-                self._handle_rate_limit("CMC")
-                return None
-                
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get('status', {}).get('error_code') == 0:
-                token_data = data.get('data', {}).get(symbol)
-                if token_data:
-                    if isinstance(token_data, list) and len(token_data) > 0:
-                        price = token_data[0]['quote']['USD']['price']
-                    elif isinstance(token_data, dict):
-                        price = token_data['quote']['USD']['price']
-                    else:
-                        return None
-                    
-                    self._stats['cmc_hits'] += 1
-                    logger.debug(f"✅ {symbol}: ${price:.6f} (CMC)")
-                    return float(price)
-            
-            return None
-            
-        except requests.exceptions.HTTPError as e:
-            if hasattr(e, 'response') and e.response.status_code == 429:
-                self._handle_rate_limit("CMC")
-            return None
-        except Exception as e:
-            logger.debug(f"⚠️ CMC ошибка для {symbol}: {e}")
-            return None
-
     # ==================== BATCH ОПЕРАЦИИ ====================
 
     def get_multiple_prices(self, symbols: List[str], preferred_exchange: Optional[str] = None) -> Dict[str, Optional[float]]:
@@ -413,25 +308,6 @@ class PriceFetcher:
 
     # ==================== УТИЛИТЫ ====================
 
-    def _handle_rate_limit(self, source: str):
-        """Обработка rate limit"""
-        self._rate_limit_hits += 1
-        logger.warning(f"⚠️ Rate limit #{self._rate_limit_hits} от {source}")
-        
-        if self._rate_limit_hits >= self.rate_limit_threshold:
-            self._circuit_open = True
-            logger.warning(
-                f"🚨 Circuit breaker активирован! "
-                f"Агрегаторы временно отключены (получено {self._rate_limit_hits} ошибок 429)"
-            )
-
-    def reset_circuit_breaker(self):
-        """Сбросить circuit breaker"""
-        if self._circuit_open:
-            logger.info("🔄 Circuit breaker сброшен")
-        self._rate_limit_hits = 0
-        self._circuit_open = False
-
     def clear_cache(self):
         """Очистить кэш цен"""
         self._cache.clear()
@@ -451,8 +327,7 @@ class PriceFetcher:
                 f"Bybit={stats['bybit_hits']}, "
                 f"KuCoin={stats['kucoin_hits']}, "
                 f"Gate.io={stats['gateio_hits']}, "
-                f"CoinGecko={stats['coingecko_hits']}, "
-                f"CMC={stats['cmc_hits']}, "
+                f"Pre-market={stats['premarket_hits']}, "
                 f"Кэш={stats['cache_hits']}, "
                 f"Не найдено={stats['not_found']}"
             )

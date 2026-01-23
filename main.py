@@ -57,6 +57,7 @@ class CryptoPromoBot:
         self.telegram_monitor = None  # Telegram Monitor
         self.telegram_monitor_task = None  # Задача мониторинга Telegram
         self.YOUR_CHAT_ID = config.ADMIN_CHAT_ID
+        self.notification_recipients = config.ALL_NOTIFICATION_RECIPIENTS  # Все получатели уведомлений
         self._shutdown_event = asyncio.Event()
 
     async def init_services(self):
@@ -172,6 +173,27 @@ class CryptoPromoBot:
         logger.info(f"🛑 Получен сигнал завершения {signum}")
         asyncio.create_task(self.shutdown())
 
+    async def send_to_all_recipients(self, message: str, parse_mode: str = 'HTML'):
+        """
+        Отправляет сообщение ВСЕМ получателям уведомлений.
+        Используется для рассылки новых промоакций.
+        """
+        for chat_id in self.notification_recipients:
+            try:
+                await self.bot.send_message(chat_id, message, parse_mode=parse_mode)
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось отправить сообщение в чат {chat_id}: {e}")
+
+    async def send_notifications_to_all(self, promos):
+        """
+        Отправляет уведомления о промоакциях ВСЕМ получателям.
+        """
+        for chat_id in self.notification_recipients:
+            try:
+                await self.notification_service.send_bulk_notifications(chat_id, promos)
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось отправить уведомления в чат {chat_id}: {e}")
+
     async def _handle_parsing_result(self, task: ParsingTask, result: dict):
         """
         Callback для обработки результатов параллельного парсинга.
@@ -202,21 +224,13 @@ class CryptoPromoBot:
                             pools,
                             page_url=task.page_url
                         )
-                        await self.bot.send_message(
-                            self.YOUR_CHAT_ID,
-                            message,
-                            parse_mode='HTML'
-                        )
+                        await self.send_to_all_recipients(message)
                     else:
                         message = self.notification_service.format_new_staking(
                             staking,
                             page_url=task.page_url
                         )
-                        await self.bot.send_message(
-                            self.YOUR_CHAT_ID,
-                            message,
-                            parse_mode='HTML'
-                        )
+                        await self.send_to_all_recipients(message)
                         
                         # Отмечаем уведомление как отправленное
                         staking_db_id = staking.get('_staking_db_id')
@@ -228,7 +242,8 @@ class CryptoPromoBot:
                                     ).first()
                                     if staking_record:
                                         stability_tracker = StabilityTrackerService(db)
-                                        stability_tracker.mark_notification_sent(staking_record)
+                                        notification_type = staking.get('_notification_type', 'new')
+                                        stability_tracker.mark_notification_sent(staking_record, notification_type)
                                         db.commit()
                             except Exception as e:
                                 logger.error(f"❌ Ошибка mark_notification_sent: {e}")
@@ -254,18 +269,12 @@ class CryptoPromoBot:
                     
                     message += f"\n🔗 <a href=\"{item.get('url')}\">Открыть страницу</a>"
                     
-                    await self.bot.send_message(
-                        self.YOUR_CHAT_ID,
-                        message,
-                        parse_mode='HTML'
-                    )
+                    await self.send_to_all_recipients(message)
             
             else:
                 # Обычные промоакции
                 if items:
-                    await self.notification_service.send_bulk_notifications(
-                        self.YOUR_CHAT_ID, items
-                    )
+                    await self.send_notifications_to_all(items)
                     
         except Exception as e:
             logger.error(f"❌ Ошибка обработки результата парсинга: {e}", exc_info=True)
@@ -351,11 +360,12 @@ class CryptoPromoBot:
                         'check_interval': link.check_interval,
                         'last_checked': link.last_checked,
                         'exchange': link.exchange or 'Unknown',
-                        'category': link.category or 'general',
+                        'category': link.category or 'launches',
                         'parsing_type': link.parsing_type or '',
                         'api_url': link.api_url,
                         'page_url': link.page_url,
-                        'min_apr': link.min_apr
+                        'min_apr': link.min_apr,
+                        'special_parser': link.special_parser,  # Для BingX/Bitget
                     })
 
             if not links_data:
@@ -415,7 +425,7 @@ class CryptoPromoBot:
                 logger.info("⏹️ Проверка прервана из-за завершения работы")
                 return
 
-            category = link_data.get('category', 'general')
+            category = link_data.get('category', 'launches')
             current_time = datetime.utcnow()
 
             if category == 'staking':
@@ -449,13 +459,13 @@ class CryptoPromoBot:
                         message = self.notification_service.format_okx_project(
                             pools, page_url=link_data.get('page_url')
                         )
-                        await self.bot.send_message(self.YOUR_CHAT_ID, message, parse_mode='HTML')
+                        await self.send_to_all_recipients(message)
                     else:
                         for staking in new_stakings:
                             message = self.notification_service.format_new_staking(
                                 staking, page_url=link_data.get('page_url')
                             )
-                            await self.bot.send_message(self.YOUR_CHAT_ID, message, parse_mode='HTML')
+                            await self.send_to_all_recipients(message)
                             
                             staking_db_id = staking.get('_staking_db_id')
                             if staking_db_id:
@@ -466,7 +476,8 @@ class CryptoPromoBot:
                                         ).first()
                                         if staking_record:
                                             stability_tracker = StabilityTrackerService(db)
-                                            stability_tracker.mark_notification_sent(staking_record)
+                                            notification_type = staking.get('_notification_type', 'new')
+                                            stability_tracker.mark_notification_sent(staking_record, notification_type)
                                             db.commit()
                                 except Exception as e:
                                     logger.error(f"❌ Ошибка mark_notification_sent: {e}")
@@ -502,30 +513,58 @@ class CryptoPromoBot:
                             message += f"{i}. <a href=\"{url}\">{title}</a>\n"
                     
                     message += f"\n🔗 <a href=\"{result.get('url')}\">Открыть страницу</a>"
-                    await self.bot.send_message(self.YOUR_CHAT_ID, message, parse_mode='HTML')
+                    await self.send_to_all_recipients(message)
                     total_new_promos += 1
 
             else:
-                # ОБЫЧНЫЕ ПРОМОАКЦИИ
-                count_before = self._get_promo_count_for_link(link_data['id'])
-                
-                loop = asyncio.get_event_loop()
-                new_promos = await loop.run_in_executor(
-                    get_executor(),
-                    self.parser_service.check_for_new_promos,
-                    link_data['id'],
-                    link_data['url']
-                )
-
-                count_after = self._get_promo_count_for_link(link_data['id'])
-                new_count = len(new_promos) if new_promos else 0
-
-                if new_count > 0:
-                    logger.info(f"🔍 {link_data['name']}: {count_before} → {count_after} | Новых: {new_count}")
-                    await self.notification_service.send_bulk_notifications(self.YOUR_CHAT_ID, new_promos)
-                    total_new_promos += new_count
+                # BINGX/BITGET LAUNCHPOOL: требуют асинхронной проверки
+                special_parser = link_data.get('special_parser')
+                if special_parser in ['bingx_launchpool', 'bitget_launchpool']:
+                    logger.info(f"🌊 Проверка {special_parser}: {link_data['name']}")
+                    
+                    try:
+                        if special_parser == 'bingx_launchpool':
+                            from parsers.bingx_launchpool_parser import BingxLaunchpoolParser
+                            parser = BingxLaunchpoolParser()
+                        else:
+                            from parsers.bitget_launchpool_parser import BitgetLaunchpoolParser
+                            parser = BitgetLaunchpoolParser()
+                        
+                        # Получаем проекты асинхронно
+                        projects = await parser.get_projects_async()
+                        active_upcoming = [p for p in projects if p.status in ['active', 'upcoming']]
+                        
+                        # TODO: Здесь можно добавить проверку на новые проекты
+                        # и отправку уведомлений через notification_service
+                        
+                        if active_upcoming:
+                            logger.info(f"✅ {link_data['name']}: {len(active_upcoming)} активных/предстоящих проектов")
+                        else:
+                            logger.info(f"✅ {link_data['name']}: нет активных проектов")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка {special_parser}: {e}")
                 else:
-                    logger.info(f"✅ {link_data['name']}: без изменений")
+                    # ОБЫЧНЫЕ ПРОМОАКЦИИ
+                    count_before = self._get_promo_count_for_link(link_data['id'])
+                    
+                    loop = asyncio.get_event_loop()
+                    new_promos = await loop.run_in_executor(
+                        get_executor(),
+                        self.parser_service.check_for_new_promos,
+                        link_data['id'],
+                        link_data['url']
+                    )
+
+                    count_after = self._get_promo_count_for_link(link_data['id'])
+                    new_count = len(new_promos) if new_promos else 0
+
+                    if new_count > 0:
+                        logger.info(f"🔍 {link_data['name']}: {count_before} → {count_after} | Новых: {new_count}")
+                        await self.send_notifications_to_all(new_promos)
+                        total_new_promos += new_count
+                    else:
+                        logger.info(f"✅ {link_data['name']}: без изменений")
 
             # Обновляем время последней проверки
             with get_db_session() as db:
@@ -579,11 +618,12 @@ class CryptoPromoBot:
                         'name': link.name,
                         'url': link.url,
                         'exchange': link.exchange or 'Unknown',
-                        'category': link.category or 'general',
+                        'category': link.category or 'launches',
                         'parsing_type': link.parsing_type or 'combined',
                         'api_url': link.api_url,
                         'page_url': link.page_url,
-                        'min_apr': link.min_apr
+                        'min_apr': link.min_apr,
+                        'special_parser': link.special_parser,  # Для BingX/Bitget
                     })
 
             if not links_data:
@@ -619,8 +659,9 @@ class CryptoPromoBot:
         
         logger.info(f"📥 Добавлено {len(task_ids)} задач в очередь")
         
-        # Ждём завершения всех задач
-        results = await self.worker_pool.wait_for_completion(timeout=300.0)
+        # Ждём завершения ТОЛЬКО наших задач (чтобы не смешивать с auto_check)
+        # Увеличенный таймаут для ручной проверки - некоторые парсеры работают долго (OKX boost ~50с)
+        results = await self.worker_pool.wait_for_completion(timeout=600.0, task_ids=task_ids)
         
         # Собираем статистику
         check_results = []
@@ -701,7 +742,7 @@ class CryptoPromoBot:
                 return
 
             try:
-                category = link_data.get('category', 'general')
+                category = link_data.get('category', 'launches')
                 count_after = 0
 
                 if category == 'staking':
@@ -752,7 +793,8 @@ class CryptoPromoBot:
                                             staking_record = db.query(StakingHistory).filter(StakingHistory.id == staking_db_id).first()
                                             if staking_record:
                                                 stability_tracker = StabilityTrackerService(db)
-                                                stability_tracker.mark_notification_sent(staking_record)
+                                                notification_type = staking.get('_notification_type', 'new')
+                                                stability_tracker.mark_notification_sent(staking_record, notification_type)
                                                 db.commit()
                                     except Exception as e:
                                         logger.error(f"❌ Ошибка mark_notification_sent: {e}")
@@ -779,15 +821,14 @@ class CryptoPromoBot:
                     })
 
                     if result and result.get('changed'):
-                        message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
-                        message += f"📝 Ссылка: {link_data['name']}\n"
-                        message += f"🔍 Стратегия: {result.get('strategy')}\n"
-                        message += f"💬 {result.get('message')}\n\n"
-                        if result.get('announcement_links'):
-                            for i, ann in enumerate(result['announcement_links'][:5], 1):
-                                message += f"{i}. <a href=\"{ann.get('url', '')}\">{ann.get('title', 'Без названия')}</a>\n"
-                        message += f"\n🔗 <a href=\"{result.get('url')}\">Открыть страницу</a>"
-                        await self.bot.send_message(chat_id, message, parse_mode='HTML')
+                        # Використовуємо новий форматтер для анонсів
+                        from utils.message_formatters import AnnouncementAlertFormatter
+                        message = AnnouncementAlertFormatter.format(
+                            link_name=link_data['name'],
+                            result=result,
+                            link_url=link_data.get('url')
+                        )
+                        await self.bot.send_message(chat_id, message, parse_mode='HTML', disable_web_page_preview=True)
                         total_new_promos += new_count
 
                 else:
@@ -897,20 +938,74 @@ class CryptoPromoBot:
                     'name': link.name,
                     'url': link.url,
                     'exchange': link.exchange or 'Unknown',
-                    'category': link.category or 'general',
+                    'category': link.category or 'launches',
                     'parsing_type': link.parsing_type,  # Добавлено для проверки Telegram
                     'telegram_channel': link.telegram_channel,  # Для Telegram Monitor
                     'telegram_account_id': link.telegram_account_id,  # Для Telegram Monitor
                     'api_url': link.api_url,
                     'page_url': link.page_url,
-                    'min_apr': link.min_apr  # КРИТИЧНО: Добавлен min_apr для фильтрации
+                    'min_apr': link.min_apr,  # КРИТИЧНО: Добавлен min_apr для фильтрации
+                    'special_parser': link.special_parser,  # Для BingX/Bitget
                 }
 
             logger.info(f"🔧 Принудительная проверка ссылки {link_data['name']} (ID: {link_id})")
 
             # Проверяем тип парсинга и категорию ссылки
             parsing_type = link_data.get('parsing_type')
-            category = link_data.get('category', 'general')
+            category = link_data.get('category', 'launches')
+            special_parser = link_data.get('special_parser')
+            
+            # BINGX/BITGET LAUNCHPOOL: требуют асинхронной проверки
+            if special_parser in ['bingx_launchpool', 'bitget_launchpool']:
+                logger.info(f"🌊 Принудительная проверка {special_parser}: {link_data['name']}")
+                
+                try:
+                    # Используем асинхронный парсер напрямую
+                    if special_parser == 'bingx_launchpool':
+                        from parsers.bingx_launchpool_parser import BingxLaunchpoolParser
+                        parser = BingxLaunchpoolParser()
+                        display_name = "BingX Launchpool"
+                    else:
+                        from parsers.bitget_launchpool_parser import BitgetLaunchpoolParser
+                        parser = BitgetLaunchpoolParser()
+                        display_name = "Bitget Launchpool"
+                    
+                    # Получаем проекты асинхронно
+                    projects = await parser.get_projects_async()
+                    
+                    if projects:
+                        # Фильтруем только active и upcoming
+                        active_upcoming = [p for p in projects if p.status in ['active', 'upcoming']]
+                        
+                        if active_upcoming:
+                            message = f"🌊 <b>{display_name.upper()}</b>\n\n"
+                            message += f"✅ Найдено проектов: {len(active_upcoming)}\n\n"
+                            
+                            for p in active_upcoming:
+                                status_emoji = p.get_status_emoji()
+                                message += f"{status_emoji} <b>{p.token_symbol}</b> - {p.token_name}\n"
+                                message += f"   📊 Статус: {p.get_status_text()}\n"
+                                if p.pools:
+                                    max_apr = max([pool.apr for pool in p.pools], default=0)
+                                    message += f"   📈 Макс. APR: {max_apr:.0f}%\n"
+                                message += "\n"
+                            
+                            await self.bot.send_message(chat_id, message, parse_mode='HTML')
+                        else:
+                            await self.bot.send_message(
+                                chat_id, 
+                                f"ℹ️ В {display_name} нет активных или предстоящих проектов"
+                            )
+                    else:
+                        await self.bot.send_message(
+                            chat_id, 
+                            f"ℹ️ В {display_name} проекты не найдены"
+                        )
+                        
+                except Exception as e:
+                    logger.error(f"❌ Ошибка {special_parser}: {e}", exc_info=True)
+                    await self.bot.send_message(chat_id, f"❌ Ошибка при проверке: {str(e)[:100]}")
+                return
             
             # TELEGRAM: используем TelegramMonitor для проверки
             if parsing_type == 'telegram':
@@ -1003,7 +1098,8 @@ class CryptoPromoBot:
 
                                     if staking_record:
                                         stability_tracker = StabilityTrackerService(db)
-                                        stability_tracker.mark_notification_sent(staking_record)
+                                        notification_type = staking.get('_notification_type', 'new')
+                                        stability_tracker.mark_notification_sent(staking_record, notification_type)
                                         db.commit()
                                         logger.info(f"✅ Отмечено как отправленное: {staking.get('coin')} (ID: {staking_db_id})")
                             except Exception as e:

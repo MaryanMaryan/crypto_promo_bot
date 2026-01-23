@@ -70,14 +70,24 @@ CATEGORY_CONFIG = {
         'patterns': ['launchpad', 'launch_pad', 'token_sale', 'ieo', 'ido'],
     },
     'launchpool': {
-        'icon': '🚀',
+        'icon': '🌊',
         'name': 'LAUNCHPOOL',
         'patterns': ['launchpool', 'launch_pool', 'farming'],
+    },
+    'drops': {
+        'icon': '🎁',
+        'name': 'DROPS',
+        'patterns': ['drops'],
     },
     'airdrop': {
         'icon': '🪂',
         'name': 'AIRDROP',
         'patterns': ['airdrop', 'air_drop', 'eftd', 'free_token'],
+    },
+    'candybomb': {
+        'icon': '🍬',
+        'name': 'CANDYBOMB',
+        'patterns': ['candybomb', 'candy_bomb', 'candy-bomb', 'candydrop', 'candy_drop', 'candy-drop'],
     },
     'staking': {
         'icon': '💎',

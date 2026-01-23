@@ -9,6 +9,14 @@ from parsers.universal_fallback_parser import UniversalFallbackParser
 from parsers.staking_parser import StakingParser
 from parsers.announcement_parser import AnnouncementParser
 from parsers.weex_parser import WeexParser
+from parsers.bybit_launchpool_parser import BybitLaunchpoolParser
+from parsers.mexc_launchpool_parser import MexcLaunchpoolParser
+from parsers.gate_launchpool_parser import GateLaunchpoolParser
+from parsers.gate_launchpad_parser import GateLaunchpadParser
+from parsers.bingx_launchpool_parser import BingxLaunchpoolParser
+from parsers.bitget_launchpool_parser import BitgetLaunchpoolParser
+from parsers.bitget_poolx_parser import BitgetPoolxParser
+from parsers.bitget_candybomb_parser import BitgetCandybombParser
 from services.stability_tracker_service import StabilityTrackerService
 from utils.price_fetcher import get_price_fetcher
 
@@ -20,6 +28,14 @@ class ParserService:
     # Биржи, требующие специальных парсеров
     SPECIAL_PARSERS = {
         'weex': WeexParser,
+        'bybit_launchpool': BybitLaunchpoolParser,
+        'mexc_launchpool': MexcLaunchpoolParser,
+        'gate_launchpool': GateLaunchpoolParser,
+        'gate_launchpad': GateLaunchpadParser,
+        'bingx_launchpool': BingxLaunchpoolParser,
+        'bitget_launchpool': BitgetLaunchpoolParser,
+        'bitget_poolx': BitgetPoolxParser,
+        'bitget_candybomb': BitgetCandybombParser,
     }
     
     # Стейблкоины для которых цена = 1 USD
@@ -124,6 +140,46 @@ class ParserService:
             logger.info(f"🔧 Автовыбор: специальный парсер {parser_class.__name__} для биржи {exchange}")
             return parser_class(target_url)
         
+        # Пробуем с суффиксом на основе URL
+        # Для launchpool/launchpad пробуем exchange_launchpool/exchange_launchpad
+        if exchange:
+            check_url = url or api_url or html_url or ''
+            url_lower = check_url.lower()
+            
+            # Проверяем по категории
+            if category in ['launchpool', 'launchpad']:
+                parser_key = f"{exchange}_{category}"
+                if parser_key in self.SPECIAL_PARSERS:
+                    parser_class = self.SPECIAL_PARSERS[parser_key]
+                    target_url = html_url or url
+                    logger.info(f"🔧 Автовыбор: специальный парсер {parser_class.__name__} для {parser_key}")
+                    return parser_class(target_url)
+            
+            # Проверяем по содержимому URL
+            if 'launchpool' in url_lower:
+                parser_key = f"{exchange}_launchpool"
+                if parser_key in self.SPECIAL_PARSERS:
+                    parser_class = self.SPECIAL_PARSERS[parser_key]
+                    target_url = html_url or url
+                    logger.info(f"🔧 Автовыбор: парсер {parser_class.__name__} по URL (launchpool)")
+                    return parser_class(target_url)
+            
+            elif 'launchpad' in url_lower:
+                parser_key = f"{exchange}_launchpad"
+                if parser_key in self.SPECIAL_PARSERS:
+                    parser_class = self.SPECIAL_PARSERS[parser_key]
+                    target_url = html_url or url
+                    logger.info(f"🔧 Автовыбор: парсер {parser_class.__name__} по URL (launchpad)")
+                    return parser_class(target_url)
+            
+            elif 'candy-bomb' in url_lower or 'candybomb' in url_lower:
+                parser_key = f"{exchange}_candybomb"
+                if parser_key in self.SPECIAL_PARSERS:
+                    parser_class = self.SPECIAL_PARSERS[parser_key]
+                    target_url = html_url or url
+                    logger.info(f"🔧 Автовыбор: парсер {parser_class.__name__} по URL (candybomb)")
+                    return parser_class(target_url)
+        
         # По умолчанию используем UniversalFallbackParser
         logger.info(f"🌐 Автовыбор: UniversalFallbackParser")
         return UniversalFallbackParser(url, api_url=api_url, html_url=html_url, parsing_type=parsing_type)
@@ -211,6 +267,21 @@ class ParserService:
         except (ValueError, TypeError):
             return None
     
+    def _serialize_raw_data(self, raw_data: Any) -> Optional[str]:
+        """Сериализует raw_data в JSON строку для хранения в БД"""
+        if raw_data is None:
+            return None
+        try:
+            import json
+            if isinstance(raw_data, str):
+                # Уже строка - проверим что это валидный JSON
+                json.loads(raw_data)
+                return raw_data
+            return json.dumps(raw_data, ensure_ascii=False, default=str)
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка сериализации raw_data: {e}")
+            return None
+    
     def _check_with_special_parser(self, link_id: int, url: str, special_parser: str, link) -> Optional[Dict]:
         """
         Проверяет ссылку с использованием специального парсера (для announcement с special_parser).
@@ -284,7 +355,7 @@ class ParserService:
             html_url = None
             parsing_type = 'combined'  # По умолчанию
             special_parser = None  # Специальный парсер
-            category = 'general'  # Категория для автовыбора парсера
+            category = 'launches'  # Категория для автовыбора парсера
 
             with get_db_session() as db:
                 link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
@@ -293,7 +364,7 @@ class ParserService:
                     html_url = link.get_primary_html_url()
                     parsing_type = link.parsing_type or 'combined'
                     special_parser = link.special_parser  # Получаем выбранный парсер
-                    category = link.category or 'general'
+                    category = link.category or 'launches'
 
             logger.info(f"📡 API URL: {api_url or 'Не указан'}")
             logger.info(f"🌐 HTML URL (fallback): {html_url or 'Не указан'}")
@@ -863,7 +934,10 @@ class ParserService:
                             # MEXC Airdrop специфичные поля (раздельные пулы)
                             token_pool=self._safe_float(promo.get('token_pool')),
                             token_pool_currency=str(promo.get('token_pool_currency', '')) if promo.get('token_pool_currency') else None,
-                            bonus_usdt=self._safe_float(promo.get('bonus_usdt'))
+                            bonus_usdt=self._safe_float(promo.get('bonus_usdt')),
+                            # MEXC Launchpad и другие специальные форматы
+                            promo_type=promo.get('promo_type'),
+                            raw_data=self._serialize_raw_data(promo.get('raw_data'))
                         )
                         db.add(history_item)
                         saved_count += 1
@@ -996,11 +1070,13 @@ class ParserService:
             if min_apr is not None:
                 logger.info(f"   Min APR: {min_apr}%")
 
+            # Проверяем, нужен ли специальный парсер для Bitget PoolX
+            if 'bitget.com' in api_url.lower() and 'poolx' in api_url.lower():
+                logger.info(f"📡 Используем специальный парсер BitgetPoolxParser...")
+                return self._parse_bitget_poolx_staking(link_id, api_url, min_apr)
+
             # Создаем парсер стейкингов
             parser = StakingParser(api_url=api_url, exchange_name=exchange_name)
-
-            # Сбрасываем circuit breaker перед парсингом
-            parser.price_fetcher.reset_circuit_breaker()
 
             # Парсим стейкинги
             logger.info(f"📡 Запуск парсинга стейкингов...")
@@ -1053,6 +1129,102 @@ class ParserService:
 
         except Exception as e:
             logger.error(f"❌ ParserService: Критическая ошибка при парсинге стейкинг-ссылки {link_id}: {e}", exc_info=True)
+            return []
+
+    def _parse_bitget_poolx_staking(self, link_id: int, api_url: str, min_apr: float = None) -> List[Dict[str, Any]]:
+        """
+        Специальный парсер для Bitget PoolX стейкингов
+        Конвертирует LaunchpoolProject в формат стейкингов
+        """
+        import asyncio
+        from parsers.bitget_poolx_parser import BitgetPoolxParser
+        from utils.price_fetcher import get_price_fetcher
+        
+        try:
+            parser = BitgetPoolxParser()
+            
+            # Запускаем асинхронный парсинг
+            try:
+                loop = asyncio.get_running_loop()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, parser.get_projects_async())
+                    projects = future.result()
+            except RuntimeError:
+                projects = asyncio.run(parser.get_projects_async())
+            
+            if not projects:
+                logger.info(f"ℹ️ BitgetPoolxParser: Нет проектов")
+                return []
+            
+            logger.info(f"📦 BitgetPoolxParser: Найдено {len(projects)} проектов")
+            
+            # Конвертируем проекты в формат стейкингов
+            stakings = []
+            price_fetcher = get_price_fetcher()
+            
+            for project in projects:
+                # Только активные и upcoming
+                if project.status not in ['active', 'upcoming']:
+                    continue
+                
+                # Для каждого пула создаём стейкинг
+                for pool in project.pools:
+                    # Получаем цену стейк-токена
+                    token_price = price_fetcher.get_token_price(pool.stake_coin)
+                    
+                    # Рассчитываем user_limit_usd
+                    user_limit_usd = None
+                    if pool.max_stake and token_price:
+                        user_limit_usd = pool.max_stake * token_price
+                    
+                    staking = {
+                        'exchange': 'Bitget',
+                        'product_id': f"{project.id}_{pool.stake_coin}",
+                        'coin': pool.stake_coin,
+                        'reward_coin': project.token_symbol,
+                        'apr': pool.apr,
+                        'type': 'PoolX',
+                        'status': project.status.capitalize(),
+                        'category': 'poolx',
+                        'category_text': 'PoolX Staking',
+                        'term_days': project.days_left,
+                        'token_price_usd': token_price,
+                        'start_time': project.start_time,
+                        'end_time': project.end_time,
+                        'user_limit_tokens': pool.max_stake,
+                        'user_limit_usd': user_limit_usd,
+                        'max_capacity': None,
+                        'current_deposit': pool.total_staked,
+                        'fill_percentage': None,
+                        'is_vip': False,
+                        'is_new_user': False,
+                        'total_rewards': project.total_pool_tokens,
+                        'pool_reward': pool.pool_reward,
+                        'participants': pool.participants,
+                    }
+                    
+                    # Фильтрация по min_apr
+                    if min_apr and pool.apr < min_apr:
+                        continue
+                    
+                    stakings.append(staking)
+                    logger.info(f"   📌 {pool.stake_coin} → {project.token_symbol}: APR {pool.apr}%")
+            
+            logger.info(f"📊 BitgetPoolxParser: Конвертировано {len(stakings)} стейкингов")
+            
+            # Проверяем на новые
+            new_stakings = check_and_save_new_stakings(stakings, link_id=link_id, min_apr=min_apr)
+            
+            if new_stakings:
+                logger.info(f"🎉 BitgetPoolxParser: Найдено {len(new_stakings)} НОВЫХ стейкингов")
+            else:
+                logger.info(f"ℹ️ BitgetPoolxParser: Все стейкинги уже в базе")
+            
+            return new_stakings
+            
+        except Exception as e:
+            logger.error(f"❌ BitgetPoolxParser: Ошибка парсинга: {e}", exc_info=True)
             return []
 
     def _group_okx_pools(self, stakings: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:

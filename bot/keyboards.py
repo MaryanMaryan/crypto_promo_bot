@@ -363,20 +363,25 @@ def get_top_promos_keyboard(current_page: int, total_pages: int) -> InlineKeyboa
 
 
 # =============================================================================
-# AIRDROP MANAGEMENT KEYBOARDS
+# AIRDROP MANAGEMENT KEYBOARDS (LEGACY - использует унифицированную клавиатуру из handlers.py)
 # =============================================================================
 
-def get_airdrop_management_keyboard():
-    """Меню управления для ссылок категории 'airdrop' с кнопкой текущих промоакций"""
+def get_airdrop_management_keyboard(link=None):
+    """
+    Legacy функция для airdrop - перенаправляет на унифицированную клавиатуру.
+    Если link не передан, создаёт fallback клавиатуру.
+    """
+    if link:
+        # Импортируем из handlers для избежания циклического импорта
+        from bot.handlers import get_unified_link_management_keyboard
+        return get_unified_link_management_keyboard(link)
+    
+    # Fallback без link объекта
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="🗑️ Удалить ссылку", callback_data="manage_delete"))
-    builder.add(InlineKeyboardButton(text="⏰ Изменить интервал", callback_data="manage_interval"))
-    builder.add(InlineKeyboardButton(text="✏️ Переименовать ссылку", callback_data="manage_rename"))
-    builder.add(InlineKeyboardButton(text="🎯 Настроить парсинг", callback_data="manage_configure_parsing"))
     builder.add(InlineKeyboardButton(text="🎁 Текущие промоакции", callback_data="manage_view_current_promos"))
-    builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
-    builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
-    builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
+    builder.add(InlineKeyboardButton(text="🔄 Сменить категорию", callback_data="manage_change_category"))
+    builder.add(InlineKeyboardButton(text="⚙️ Настройки", callback_data="manage_settings_submenu"))
+    builder.add(InlineKeyboardButton(text="⏸ Остановить парсинг", callback_data="manage_pause"))
     builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_link_list"))
     builder.adjust(1)
     return builder.as_markup()
@@ -402,7 +407,11 @@ def get_current_promos_keyboard(current_page: int, total_pages: int, last_update
     
     # Принудительная проверка (запуск парсера)
     builder.add(InlineKeyboardButton(text="🔍 Принудительная проверка", callback_data="promos_force_parse"))
+    
+    # Настройки уведомлений
+    builder.add(InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="notification_settings_show"))
+    
     builder.add(InlineKeyboardButton(text="⬅️ К ссылке", callback_data="back_to_link_management"))
     
-    builder.adjust(3, 1, 1)
+    builder.adjust(3, 1, 1, 1)
     return builder.as_markup()

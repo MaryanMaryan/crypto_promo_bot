@@ -277,6 +277,7 @@ class StabilityTrackerService:
     def mark_notification_sent(
         self,
         staking: StakingHistory,
+        notification_type: str = 'new',
         current_time: Optional[datetime] = None
     ) -> None:
         """
@@ -284,6 +285,7 @@ class StabilityTrackerService:
 
         Args:
             staking: Запись стейкинга
+            notification_type: Тип уведомления ('new', 'apr_change', 'stable_flexible')
             current_time: Текущее время (для тестирования)
         """
         if current_time is None:
@@ -293,7 +295,13 @@ class StabilityTrackerService:
         staking.notification_sent_at = current_time
         staking.is_notification_pending = False
 
-        logger.info(f"✅ Notification marked as sent for {staking.exchange} {staking.coin}")
+        # КРИТИЧНО: Если это уведомление об изменении APR, обнуляем previous_apr
+        # чтобы при следующей проверке не отправлялось повторное уведомление
+        if notification_type == 'apr_change':
+            staking.previous_apr = None
+            logger.info(f"✅ APR change notification sent, previous_apr reset for {staking.exchange} {staking.coin}")
+        else:
+            logger.info(f"✅ Notification marked as sent for {staking.exchange} {staking.coin}")
 
     def get_pending_notifications(self, api_link: ApiLink) -> List[StakingHistory]:
         """

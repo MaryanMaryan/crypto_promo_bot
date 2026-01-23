@@ -307,104 +307,139 @@ class TelegramMonitor:
                 logger.error(f"❌ ОШИБКА: send_notification вызван БЕЗ ключевых слов! Отмена отправки.")
                 return
 
-            # Если message - это объект Telethon Message, пересылаем его
+            # Получаем текст и ID сообщения
             if hasattr(message, 'id') and hasattr(message, 'chat'):
-                # НОВЫЙ УНИВЕРСАЛЬНЫЙ ЗАГОЛОВОК
-                promo_header = format_promo_header(
-                    name=channel_username,
-                    promo_type='telegram',
-                    is_new=True
-                )
-                header = f"{promo_header}\n\n"
-                header += f"📱 <b>Канал:</b> @{channel_username}\n"
-
-                if result.get('matched_keywords'):
-                    keywords_str = ", ".join([f"<code>{kw}</code>" for kw in result['matched_keywords']])
-                    header += f"🔑 <b>Триггеры:</b> {keywords_str}\n"
-
-                header += f"━━━━━━━━━━━━━━━━\n"
-
-                await self.bot.send_message(
-                    config.ADMIN_CHAT_ID,
-                    header,
-                    parse_mode="HTML"
-                )
-
-                # Затем копируем оригинальное сообщение (без пометки "Forwarded")
-                # Используем copy_message вместо forward_message для публичных каналов
-                try:
-                    await self.bot.copy_message(
-                        chat_id=config.ADMIN_CHAT_ID,
-                        from_chat_id=message.chat.id,
-                        message_id=message.id
-                    )
-                    logger.info(f"✅ Оригинальное сообщение скопировано админу")
-                except Exception as copy_error:
-                    # Если копирование не удалось, отправляем текст
-                    logger.warning(f"⚠️ Не удалось скопировать сообщение: {copy_error}")
-                    await self.bot.send_message(
-                        config.ADMIN_CHAT_ID,
-                        message.text,
-                        parse_mode=None
-                    )
-                    logger.info(f"✅ Текст сообщения отправлен админу")
-
+                message_text = message.text or ""
+                message_id = message.id
             else:
-                # Если message - это просто текст (из ручной проверки), используем старый формат
                 message_text = message if isinstance(message, str) else str(message)
-                notification = self._format_basic_notification(
-                    channel_username,
-                    message_text,
-                    result['matched_keywords'],
-                    result['links'],
-                    result['dates']
-                )
+                message_id = None
 
-                await self.bot.send_message(
-                    config.ADMIN_CHAT_ID,
-                    notification,
-                    parse_mode="HTML"
-                )
+            # Форматируем единое уведомление
+            notification = self._format_telegram_notification(
+                channel_username=channel_username,
+                message_text=message_text,
+                message_id=message_id,
+                matched_keywords=result.get('matched_keywords', []),
+                links=result.get('links', []),
+                dates=result.get('dates')
+            )
 
-                logger.info(f"✅ Уведомление отправлено админу")
+            # Отправляем ВСЕМ получателям уведомлений
+            recipients = getattr(config, 'ALL_NOTIFICATION_RECIPIENTS', [config.ADMIN_CHAT_ID])
+            sent_count = 0
+            
+            for chat_id in recipients:
+                try:
+                    await self.bot.send_message(
+                        chat_id,
+                        notification,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True
+                    )
+                    sent_count += 1
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось отправить уведомление в {chat_id}: {e}")
+
+            logger.info(f"✅ Уведомление отправлено {sent_count}/{len(recipients)} получателям")
 
         except Exception as e:
             logger.error(f"❌ Ошибка отправки уведомления: {e}")
 
-    def _format_basic_notification(self, channel_username: str, message_text: str,
-                                   matched_keywords: List[str], links: List[str],
-                                   dates: Optional[str]) -> str:
-        """Базовое форматирование уведомления"""
-        # Создаем краткую версию текста (максимум 300 символов)
-        summary = message_text[:300] + "..." if len(message_text) > 300 else message_text
-
-        # НОВЫЙ УНИВЕРСАЛЬНЫЙ ЗАГОЛОВОК
+    def _format_telegram_notification(
+        self,
+        channel_username: str,
+        message_text: str,
+        message_id: Optional[int],
+        matched_keywords: List[str],
+        links: List[str],
+        dates: Optional[str]
+    ) -> str:
+        """
+        Универсальный форматер для Telegram уведомлений.
+        Создает единое красиво оформленное сообщение с подсветкой ключевых слов.
+        
+        Args:
+            channel_username: Имя канала (без @)
+            message_text: Текст оригинального сообщения
+            message_id: ID сообщения в Telegram (для ссылки)
+            matched_keywords: Список найденных ключевых слов
+            links: Список ссылок из сообщения
+            dates: Найденные даты
+            
+        Returns:
+            Отформатированное HTML сообщение
+        """
+        import html
+        import re
+        
+        # === ЗАГОЛОВОК ===
         promo_header = format_promo_header(
             name=channel_username,
             promo_type='telegram',
             is_new=True
         )
-        message = f"{promo_header}\n\n"
-        message += f"📱 <b>Канал:</b> @{channel_username}\n"
-
-        keywords_str = ", ".join([f"<code>{kw}</code>" for kw in matched_keywords])
-        message += f"🔑 <b>Триггеры:</b> {keywords_str}\n\n"
-
+        notification = f"{promo_header}\n\n"
+        
+        # === КАНАЛ ===
+        notification += f"📱 <b>Канал:</b> @{channel_username}\n\n"
+        
+        # === СООБЩЕНИЕ С ПОДСВЕТКОЙ КЛЮЧЕВЫХ СЛОВ ===
+        # Ограничиваем длину текста (макс 500 символов)
+        truncated = len(message_text) > 500
+        display_text = message_text[:500] if truncated else message_text
+        
+        # Экранируем HTML
+        safe_text = html.escape(display_text)
+        
+        # Подсвечиваем ключевые слова тегом <u> (подчеркивание)
+        for keyword in matched_keywords:
+            # Создаем паттерн для регистронезависимого поиска
+            escaped_keyword = re.escape(html.escape(keyword))
+            pattern = re.compile(f'({escaped_keyword})', re.IGNORECASE)
+            safe_text = pattern.sub(r'<u>\1</u>', safe_text)
+        
+        notification += f"📝 <b>Сообщение:</b>\n{safe_text}"
+        if truncated:
+            notification += "..."
+        notification += "\n\n"
+        
+        # === ТРИГГЕРЫ ===
+        if matched_keywords:
+            keywords_str = ", ".join([f"<code>{html.escape(kw)}</code>" for kw in matched_keywords])
+            notification += f"🔑 <b>Триггеры:</b> {keywords_str}\n"
+        
+        # === ДАТЫ (если есть) ===
         if dates:
-            message += f"📅 Период: {dates}\n\n"
+            notification += f"📅 <b>Период:</b> {html.escape(dates)}\n"
+        
+        # === ССЫЛКА НА СООБЩЕНИЕ ===
+        if message_id:
+            tg_link = f"https://t.me/{channel_username}/{message_id}"
+            notification += f"🔗 <a href=\"{tg_link}\">Открыть в Telegram</a>\n"
+        elif links:
+            # Показываем первую найденную ссылку
+            notification += f"🔗 <a href=\"{links[0]}\">Ссылка из сообщения</a>\n"
+            if len(links) > 1:
+                notification += f"    <i>(+{len(links)-1} ещё)</i>\n"
+        
+        # === ВРЕМЯ ===
+        notification += f"\n⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        
+        return notification
 
-        message += f"📝 <b>Описание:</b>\n<i>{summary}</i>\n\n"
-
-        if links:
-            message += "🔗 <b>Ссылки:</b>\n"
-            for i, link in enumerate(links[:3], 1):
-                message += f"  {i}. {link}\n"
-            message += "\n"
-
-        message += "━━━━━━━━━━━━━━━━\n"
-        message += f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-
-        return message
+    def _format_basic_notification(self, channel_username: str, message_text: str,
+                                   matched_keywords: List[str], links: List[str],
+                                   dates: Optional[str]) -> str:
+        """Обратная совместимость - вызывает новый форматер"""
+        return self._format_telegram_notification(
+            channel_username=channel_username,
+            message_text=message_text,
+            message_id=None,
+            matched_keywords=matched_keywords,
+            links=links,
+            dates=dates
+        )
 
     async def reload_channels(self):
         """Перезагрузка списка отслеживаемых каналов"""

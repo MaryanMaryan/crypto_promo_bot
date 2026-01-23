@@ -1,0 +1,26 @@
+[
+  {
+    "url": "https://www.bitget.com/v1/finance/launchpool/product/count",
+    "data": {
+      "code": "200",
+      "data": {
+        "overNum": "115",
+        "runningNum": "0",
+        "waitStartNum": "1"
+      },
+      "params": []
+    }
+  },
+  {
+    "url": "https://www.bitget.com/v1/finance/launchpool/product/list/new",
+    "data": {
+      "code": "200",
+      "data": {
+        "hasNextPage": false,
+        "items": [],
+        "total": 0
+      },
+      "params": []
+    }
+  }
+]

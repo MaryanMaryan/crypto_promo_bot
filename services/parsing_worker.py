@@ -69,6 +69,7 @@ class ParsingWorker:
         self._consecutive_errors = 0
         self._max_consecutive_errors = 5  # После 5 ошибок — пауза
         self._error_pause_seconds = 30  # Пауза после серии ошибок
+        self._task_timeout = 120  # Таймаут на выполнение одной задачи (секунд)
     
     async def start(self):
         """Запускает воркера"""
@@ -121,8 +122,14 @@ class ParsingWorker:
                 logger.info(f"👷 Воркер {self.worker_id}: начал {task.link_name} (категория: {task.category})")
                 
                 try:
-                    # Выполняем парсинг
-                    result = await self._execute_task(task)
+                    # Выполняем парсинг с таймаутом
+                    try:
+                        result = await asyncio.wait_for(
+                            self._execute_task(task),
+                            timeout=self._task_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        raise TimeoutError(f"Таймаут {self._task_timeout}с для {task.link_name}")
                     
                     # Отмечаем успех в Circuit Breaker
                     if exchange:
@@ -418,7 +425,7 @@ class ParsingWorkerPool:
         link_id: int,
         link_name: str,
         url: str,
-        category: str = "general",
+        category: str = "launches",
         priority: TaskPriority = TaskPriority.NORMAL,
         **kwargs
     ) -> str:
@@ -452,7 +459,7 @@ class ParsingWorkerPool:
                 link_id=link_data['id'],
                 link_name=link_data['name'],
                 url=link_data['url'],
-                category=link_data.get('category', 'general'),
+                category=link_data.get('category', 'launches'),
                 parsing_type=link_data.get('parsing_type', 'combined'),
                 exchange=link_data.get('exchange', ''),
                 api_url=link_data.get('api_url'),
@@ -465,9 +472,13 @@ class ParsingWorkerPool:
         logger.info(f"📥 Добавлено {len(task_ids)} задач в очередь (приоритет: {priority.name})")
         return task_ids
     
-    async def wait_for_completion(self, timeout: float = 300.0) -> List[ParsingTask]:
+    async def wait_for_completion(self, timeout: float = 300.0, task_ids: List[str] = None) -> List[ParsingTask]:
         """
-        Ждёт завершения всех задач в очереди.
+        Ждёт завершения задач в очереди.
+        
+        Args:
+            timeout: Максимальное время ожидания в секундах
+            task_ids: Список ID задач для ожидания (если None - все задачи)
         
         Returns:
             Список завершённых задач
@@ -476,20 +487,34 @@ class ParsingWorkerPool:
             return []
         
         results = []
+        pending_task_ids = set(task_ids) if task_ids else None
         start_time = time.time()
         
         while time.time() - start_time < timeout:
-            # Проверяем, есть ли ещё задачи
-            if self._queue.is_empty and not any(w.is_busy for w in self._workers):
-                # Собираем оставшиеся результаты
-                remaining = await self._queue.get_all_results(timeout=1.0)
-                results.extend(remaining)
-                break
+            # Проверяем, все ли нужные задачи завершены
+            if pending_task_ids is not None:
+                if not pending_task_ids:
+                    # Все нужные задачи завершены
+                    break
+            else:
+                # Проверяем, есть ли ещё задачи (старое поведение)
+                if self._queue.is_empty and not any(w.is_busy for w in self._workers):
+                    # Собираем оставшиеся результаты
+                    remaining = await self._queue.get_all_results(timeout=1.0)
+                    results.extend(remaining)
+                    break
             
             # Собираем результаты
             result = await self._queue.get_result(timeout=1.0)
             if result:
-                results.append(result)
+                if pending_task_ids is not None:
+                    # Проверяем, что это нужная задача
+                    if result.task_id in pending_task_ids:
+                        results.append(result)
+                        pending_task_ids.discard(result.task_id)
+                    # Чужие результаты просто игнорируем - они уже обработаны через callback
+                else:
+                    results.append(result)
         
         return results
     

@@ -104,6 +104,7 @@ BYBIT_COIN_MAPPING = {
     853: "RENDER",
     854: "WIF",
     856: "BONK",
+    858: "XAUT",
     860: "POPCAT",
     862: "FLOKI",
     866: "BRETT",
@@ -129,4 +130,6 @@ BYBIT_COIN_MAPPING = {
     1087: "NIGHT",
     1090: "ZKP",
     1092: "VOOI",
+    1098: "ELSA",
+    1099: "IMU",
 }

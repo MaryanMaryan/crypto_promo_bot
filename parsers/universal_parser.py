@@ -2,6 +2,7 @@ import json
 import logging
 import hashlib
 import requests
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 from .base_parser import BaseParser
 from utils.url_template_builder import get_url_builder
@@ -99,6 +100,14 @@ class UniversalParser(BaseParser):
             
             if response.status_code == 200:
                 logger.info(f"✅ Прямой запрос успешен: статус 200")
+                
+                # Проверяем Content-Type перед парсингом JSON
+                content_type = response.headers.get('content-type', '').lower()
+                if 'application/json' not in content_type:
+                    logger.error(f"❌ Неверный Content-Type: {content_type}")
+                    logger.debug(f"   Первые 500 символов ответа: {response.text[:500]}")
+                    raise ValueError(f"Ответ не является JSON (Content-Type: {content_type})")
+                
                 data = response.json()
                 return self.parse_json_data(data)
             
@@ -129,6 +138,14 @@ class UniversalParser(BaseParser):
                 
                 if response and response.status_code == 200:
                     logger.info(f"✅ Запрос через прокси успешен!")
+                    
+                    # Проверяем Content-Type перед парсингом JSON
+                    content_type = response.headers.get('content-type', '').lower()
+                    if 'application/json' not in content_type:
+                        logger.error(f"❌ Неверный Content-Type: {content_type}")
+                        logger.debug(f"   Первые 500 символов ответа: {response.text[:500]}")
+                        raise ValueError(f"Ответ не является JSON (Content-Type: {content_type})")
+                    
                     data = response.json()
                     return self.parse_json_data(data)
                 
@@ -368,12 +385,12 @@ class UniversalParser(BaseParser):
                 ]),
                 # Time (расширенный поиск для Bybit)
                 'start_time': self._get_value(obj, [
-                    'startTime', 'start', 'startDate', 'beginTime', 'openTime',
+                    'start_time', 'startTime', 'start', 'startDate', 'beginTime', 'openTime',
                     'startTimestamp', 'beginTimestamp',
                     'depositStart', 'applyStart'  # Bybit Token Splash
                 ]),
                 'end_time': self._get_value(obj, [
-                    'endTime', 'end', 'endDate', 'expireTime', 'closeTime',
+                    'end_time', 'endTime', 'end', 'endDate', 'expireTime', 'closeTime',
                     'endTimestamp', 'expireTimestamp',
                     'depositEnd', 'applyEnd'  # Bybit Token Splash
                 ]),
@@ -422,6 +439,22 @@ class UniversalParser(BaseParser):
 
             # Очищаем None значения
             promo_data = {k: v for k, v in promo_data.items() if v is not None}
+
+            # Конвертируем timestamp в datetime для start_time и end_time
+            for time_field in ['start_time', 'end_time']:
+                if time_field in promo_data and promo_data[time_field]:
+                    time_value = promo_data[time_field]
+                    # Если это число (Unix timestamp)
+                    if isinstance(time_value, (int, float)):
+                        try:
+                            # Определяем формат: секунды или миллисекунды
+                            if time_value > 10000000000:  # миллисекунды
+                                promo_data[time_field] = datetime.fromtimestamp(time_value / 1000)
+                            else:  # секунды
+                                promo_data[time_field] = datetime.fromtimestamp(time_value)
+                        except Exception as e:
+                            logger.warning(f"⚠️ Ошибка конвертации {time_field}: {e}")
+                            pass
 
             # Минимальная валидация: должен быть хотя бы title или любое поле кроме raw_data
             fields_count = len([k for k in promo_data.keys() if k not in ['raw_data', 'exchange', 'promo_id']])

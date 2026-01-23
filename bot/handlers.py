@@ -14,7 +14,8 @@ from data.database import (
     get_db_session, atomic_operation,
     # Новые async функции для отзывчивого UI
     get_links_async, get_link_by_id_async, get_active_links_count_async,
-    get_links_by_category_async, update_link_async, delete_link_async, create_link_async
+    get_links_by_category_async, update_link_async, delete_link_async, create_link_async,
+    get_favorite_links_async
 )
 from data.models import ApiLink
 from bot.parser_service import ParserService
@@ -116,6 +117,8 @@ class AddLinkStates(StatesGroup):
     waiting_for_telegram_keywords = State()  # НОВОЕ: Ввод ключевых слов Telegram
     waiting_for_telegram_account = State()  # НОВОЕ: Выбор Telegram аккаунта для ссылки
     # Для анонсов:
+    waiting_for_announcement_url = State()  # НОВОЕ: Ввод URL для анонсов
+    waiting_for_announcement_page_type = State()  # НОВОЕ: Тип страницы (HTML/Browser)
     waiting_for_announcement_strategy = State()  # НОВОЕ: Выбор стратегии парсинга анонсов
     waiting_for_announcement_keywords = State()  # НОВОЕ: Ввод ключевых слов для анонсов
     waiting_for_announcement_regex = State()  # НОВОЕ: Ввод regex для анонсов
@@ -165,22 +168,22 @@ def get_main_menu_inline():
     """Главное меню с inline-кнопками"""
     builder = InlineKeyboardBuilder()
     
-    # Ряд 1: Список ссылок + ТОП Активности
-    builder.add(InlineKeyboardButton(text="📊 Список ссылок", callback_data="main_list_links"))
+    # Ряд 1: Избранные + ТОП Активности
+    builder.add(InlineKeyboardButton(text="⭐ Избранные", callback_data="main_favorites"))
     builder.add(InlineKeyboardButton(text="🚀 ТОП Активности", callback_data="top_activity_menu"))
     
     # Ряд 2: Добавить + Проверить всё
     builder.add(InlineKeyboardButton(text="➕ Добавить", callback_data="main_add_link"))
     builder.add(InlineKeyboardButton(text="🔄 Проверить всё", callback_data="main_check_all"))
     
-    # Ряд 3: Управление ссылками + Обход блокировок
+    # Ряд 3: Управление ссылками + Список ссылок
     builder.add(InlineKeyboardButton(text="⚙️ Управление ссылками", callback_data="main_manage_links"))
-    builder.add(InlineKeyboardButton(text="🛡️ Обход блокировок", callback_data="main_bypass"))
+    builder.add(InlineKeyboardButton(text="📊 Список ссылок", callback_data="main_list_links"))
     
-    # Ряд 4: Помощь
-    builder.add(InlineKeyboardButton(text="❓ Помощь", callback_data="main_help"))
+    # Ряд 4: Обход блокировок (на весь ряд)
+    builder.add(InlineKeyboardButton(text="🛡️ Обход блокировок", callback_data="main_bypass"))
 
-    # Раскладка: все кнопки по 2 в ряд, последняя одна
+    # Раскладка: 2, 2, 2, 1
     builder.adjust(2, 2, 2, 1)
     return builder.as_markup()
 
@@ -199,21 +202,174 @@ def get_main_reply_keyboard():
 def get_main_menu():
     return get_main_reply_keyboard()
 
-# СУЩЕСТВУЮЩИЕ КЛАВИАТУРЫ
-def get_management_keyboard(link=None):
+
+# =============================================================================
+# УНИФИЦИРОВАННЫЕ КЛАВИАТУРЫ УПРАВЛЕНИЯ ССЫЛКАМИ (РЕФАКТОРИНГ)
+# =============================================================================
+
+def get_unified_link_management_keyboard(link):
+    """
+    Унифицированная клавиатура управления ссылкой для всех категорий.
+    
+    Структура:
+    - Текущие промоакции/стейкинги (если применимо)
+    - Сменить категорию
+    - Настройки (подменю)
+    - Остановить/Включить парсинг (динамическая кнопка)
+    - Назад
+    """
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="🗑️ Удалить ссылку", callback_data="manage_delete"))
-    builder.add(InlineKeyboardButton(text="⏰ Изменить интервал", callback_data="manage_interval"))
-    builder.add(InlineKeyboardButton(text="✏️ Переименовать ссылку", callback_data="manage_rename"))
-    builder.add(InlineKeyboardButton(text="🎯 Настроить парсинг", callback_data="manage_configure_parsing"))
+    
+    # 1. Кнопка "Текущие промоакции/стейкинги" (зависит от категории)
+    category = link.category or 'launches'
+    has_promo_parser = link.special_parser and link.special_parser not in ('announcement', 'telegram')
+    
+    if category == 'staking':
+        builder.add(InlineKeyboardButton(
+            text="📈 Текущие стейкинги", 
+            callback_data="manage_view_current_stakings"
+        ))
+    elif category in ['airdrop', 'candybomb', 'drops', 'launches', 'launchpool', 'launchpad']:
+        builder.add(InlineKeyboardButton(
+            text="🎁 Текущие промоакции", 
+            callback_data="manage_view_current_promos"
+        ))
+    elif category == 'announcement' and has_promo_parser:
+        # Announcement со special_parser показываем кнопку текущих промо
+        builder.add(InlineKeyboardButton(
+            text="🎁 Текущие промоакции", 
+            callback_data="manage_view_current_promos"
+        ))
+    
+    # 2. Сменить категорию
+    builder.add(InlineKeyboardButton(
+        text="🔄 Сменить категорию", 
+        callback_data=f"edit_category_{link.id}"
+    ))
+    
+    # 3. Настройки (подменю)
+    builder.add(InlineKeyboardButton(
+        text="⚙️ Настройки", 
+        callback_data="manage_settings_submenu"
+    ))
+    
+    # 4. Динамическая кнопка Остановить/Включить
+    if link.is_active:
+        builder.add(InlineKeyboardButton(
+            text="⏸ Остановить парсинг", 
+            callback_data="manage_pause"
+        ))
+    else:
+        builder.add(InlineKeyboardButton(
+            text="▶️ Включить парсинг", 
+            callback_data="manage_resume"
+        ))
+    
+    # 5. Назад
+    builder.add(InlineKeyboardButton(
+        text="⬅️ Назад", 
+        callback_data="back_to_link_list"
+    ))
+    
+    builder.adjust(1)
+    return builder.as_markup()
 
-    # НОВОЕ: Кнопка смены Telegram аккаунта (только для telegram ссылок)
-    if link and link.parsing_type == 'telegram':
-        builder.add(InlineKeyboardButton(text="📱 Сменить Telegram аккаунт", callback_data="manage_change_tg_account"))
 
-    builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
-    builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
-    builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
+def get_link_settings_submenu_keyboard(link):
+    """
+    Подменю настроек ссылки.
+    
+    Структура:
+    - Изменить интервал
+    - Переименовать
+    - Настроить парсинг (ведет в детальные настройки)
+    - Telegram аккаунт (только для telegram)
+    - Принудительная проверка
+    - Удалить ссылку
+    - Назад
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Основные настройки
+    builder.add(InlineKeyboardButton(
+        text="⏰ Изменить интервал", 
+        callback_data="manage_interval"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="✏️ Переименовать", 
+        callback_data="manage_rename"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🎯 Настроить парсинг", 
+        callback_data="manage_configure_parsing"
+    ))
+    
+    # Специальная кнопка для Telegram ссылок
+    if link.parsing_type == 'telegram':
+        builder.add(InlineKeyboardButton(
+            text="📱 Telegram аккаунт", 
+            callback_data="manage_change_tg_account"
+        ))
+    
+    # Действия
+    builder.add(InlineKeyboardButton(
+        text="🔧 Принудительная проверка", 
+        callback_data="manage_force_check"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🗑️ Удалить ссылку", 
+        callback_data="manage_delete"
+    ))
+    
+    # Назад к главному меню ссылки
+    builder.add(InlineKeyboardButton(
+        text="⬅️ Назад", 
+        callback_data=f"manage_link_{link.id}"
+    ))
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_back_to_link_keyboard(link_id: int):
+    """
+    Клавиатура с кнопкой возврата к управлению ссылкой.
+    Используется после выполнения действий (изменение интервала, категории и т.д.)
+    """
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="⬅️ Назад к ссылке", 
+        callback_data=f"manage_link_{link_id}"
+    ))
+    return builder.as_markup()
+
+
+def get_back_to_settings_keyboard(link_id: int):
+    """
+    Клавиатура с кнопкой возврата к настройкам ссылки.
+    Используется после изменения настроек парсинга.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="⬅️ К настройкам", 
+        callback_data="manage_settings_submenu"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🏠 К ссылке", 
+        callback_data=f"manage_link_{link_id}"
+    ))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+# LEGACY: Старые функции для обратной совместимости (перенаправляют на унифицированные)
+def get_management_keyboard(link=None):
+    """Legacy функция - перенаправляет на унифицированную клавиатуру"""
+    if link:
+        return get_unified_link_management_keyboard(link)
+    # Fallback для случаев без link
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="⚙️ Настройки", callback_data="manage_settings_submenu"))
     builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_link_list"))
     builder.adjust(1)
     return builder.as_markup()
@@ -222,25 +378,24 @@ def get_category_management_menu():
     """Подменю выбора категории для управления ссылками"""
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="📋 Все ссылки", callback_data="category_all"))
-    builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="category_airdrop"))
+    builder.add(InlineKeyboardButton(text="🎁 Дропы", callback_data="category_drops"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="category_staking"))
-    builder.add(InlineKeyboardButton(text="📝 Общая", callback_data="category_general"))
+    builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="category_launches"))
     builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="category_announcement"))
     builder.add(InlineKeyboardButton(text="❌ Назад", callback_data="back_to_main_menu"))
     builder.adjust(1, 2, 2, 1)
     return builder.as_markup()
 
-def get_staking_management_keyboard():
-    """Меню управления для ссылок категории 'staking' с дополнительной кнопкой"""
+def get_staking_management_keyboard(link=None):
+    """Legacy функция для staking - перенаправляет на унифицированную клавиатуру"""
+    if link:
+        return get_unified_link_management_keyboard(link)
+    # Fallback без link объекта
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="🗑️ Удалить ссылку", callback_data="manage_delete"))
-    builder.add(InlineKeyboardButton(text="⏰ Изменить интервал", callback_data="manage_interval"))
-    builder.add(InlineKeyboardButton(text="✏️ Переименовать ссылку", callback_data="manage_rename"))
-    builder.add(InlineKeyboardButton(text="🎯 Настроить парсинг", callback_data="manage_configure_parsing"))
     builder.add(InlineKeyboardButton(text="📈 Текущие стейкинги", callback_data="manage_view_current_stakings"))
-    builder.add(InlineKeyboardButton(text="⏸️ Остановить парсинг", callback_data="manage_pause"))
-    builder.add(InlineKeyboardButton(text="▶️ Возобновить парсинг", callback_data="manage_resume"))
-    builder.add(InlineKeyboardButton(text="🔧 Принудительно проверить", callback_data="manage_force_check"))
+    builder.add(InlineKeyboardButton(text="🔄 Сменить категорию", callback_data="manage_change_category"))
+    builder.add(InlineKeyboardButton(text="⚙️ Настройки", callback_data="manage_settings_submenu"))
+    builder.add(InlineKeyboardButton(text="⏸ Остановить парсинг", callback_data="manage_pause"))
     builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_link_list"))
     builder.adjust(1)
     return builder.as_markup()
@@ -287,40 +442,36 @@ def get_notification_settings_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура настроек умных уведомлений"""
     builder = InlineKeyboardBuilder()
 
-    builder.add(InlineKeyboardButton(
-        text="⏱️ Изменить время стабилизации",
-        callback_data="notification_settings_change_stability"
-    ))
+    # Новые кнопки для launchpool уведомлений
     builder.add(InlineKeyboardButton(
         text="📊 Изменить порог изменения APR",
         callback_data="notification_settings_change_apr_threshold"
     ))
     builder.add(InlineKeyboardButton(
-        text="🔔 Новые стейкинги (вкл/выкл)",
-        callback_data="notification_toggle_new_stakings"
+        text="📅 Изменения периода (вкл/выкл)",
+        callback_data="notification_toggle_period_changes"
     ))
     builder.add(InlineKeyboardButton(
-        text="📈 Изменения APR (вкл/выкл)",
-        callback_data="notification_toggle_apr_changes"
+        text="🎁 Изменения общего пула наград (вкл/выкл)",
+        callback_data="notification_toggle_reward_pool_changes"
     ))
+    # Внутри обработчика callback 'notification_other_settings' будут показаны остальные настройки:
+    # - Изменения APR (вкл/выкл)
+    # - Изменения статуса пула (вкл/выкл)
+    # - Изменения расчетной доходности (вкл/выкл)
+    # - Только выбранные токены (вкл/выкл)
+    # - Только новые пулы (вкл/выкл)
+    # - и другие специфические опции
     builder.add(InlineKeyboardButton(
-        text="⚡ Fixed сразу (вкл/выкл)",
-        callback_data="notification_toggle_fixed_immediately"
-    ))
-    builder.add(InlineKeyboardButton(
-        text="🔄 Combined как Fixed (вкл/выкл)",
-        callback_data="notification_toggle_combined_as_fixed"
-    ))
-    builder.add(InlineKeyboardButton(
-        text="📋 Только стабильные Flexible (вкл/выкл)",
-        callback_data="notification_toggle_only_stable"
+        text="⚙️ Другие настройки",
+        callback_data="notification_other_settings"
     ))
     builder.add(InlineKeyboardButton(
         text="❌ Назад",
-        callback_data="manage_view_current_stakings"
+        callback_data="manage_view_current_promos"
     ))
 
-    builder.adjust(1)  # По одной кнопке в ряд
+    builder.adjust(1)
     return builder.as_markup()
 
 def get_stability_hours_keyboard() -> InlineKeyboardMarkup:
@@ -354,6 +505,47 @@ def get_apr_threshold_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(4)  # По 4 кнопки в ряд
     return builder.as_markup()
 
+def get_other_notification_settings_keyboard(link) -> InlineKeyboardMarkup:
+    """Клавиатура других настроек уведомлений"""
+    builder = InlineKeyboardBuilder()
+    
+    notify_apr = getattr(link, 'notify_apr_changes', True)
+    notify_fill = getattr(link, 'notify_fill_changes', False)
+    notify_new = getattr(link, 'notify_new_stakings', True)
+    notify_stable = getattr(link, 'notify_only_stable_flexible', True)
+    notify_combined = getattr(link, 'notify_combined_as_fixed', True)
+    
+    builder.add(InlineKeyboardButton(
+        text=f"{'✅' if notify_apr else '❌'} Изменения APR",
+        callback_data="notification_toggle_apr_changes"
+    ))
+    builder.add(InlineKeyboardButton(
+        text=f"{'✅' if notify_fill else '❌'} Заполненность пулов",
+        callback_data="notification_toggle_fill_changes"
+    ))
+    builder.add(InlineKeyboardButton(
+        text=f"{'✅' if notify_new else '❌'} Новые пулы",
+        callback_data="notification_toggle_new_stakings"
+    ))
+    builder.add(InlineKeyboardButton(
+        text=f"{'✅' if notify_stable else '❌'} Только стабильные",
+        callback_data="notification_toggle_only_stable"
+    ))
+    builder.add(InlineKeyboardButton(
+        text=f"{'✅' if notify_combined else '❌'} Combined как Fixed",
+        callback_data="notification_toggle_combined_as_fixed"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="⏱️ Время стабилизации",
+        callback_data="notification_settings_change_stability"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data="notification_settings_show"
+    ))
+    builder.adjust(1)
+    return builder.as_markup()
+
 def get_links_keyboard(links, action_type="delete"):
     builder = InlineKeyboardBuilder()
 
@@ -368,15 +560,21 @@ def get_links_keyboard(links, action_type="delete"):
 
     # Словарь иконок для категорий
     category_icons = {
-        'general': '📝',
+        'launches': '🚀',
+        'launchpad': '🚀',
+        'launchpool': '🌊',
+        'drops': '🎁',
         'airdrop': '🪂',
+        'candybomb': '🍬',
         'staking': '💰',
-        'launchpool': '🚀',
         'announcement': '📢'
     }
 
     for link in links:
         status_icon = "✅" if link.is_active else "❌"
+        
+        # Добавляем звезду если в избранном
+        favorite_icon = "⭐" if hasattr(link, 'is_favorite') and link.is_favorite else ""
 
         # Добавляем иконку типа парсинга, если поле существует
         parsing_icon = ""
@@ -387,11 +585,11 @@ def get_links_keyboard(links, action_type="delete"):
         # Добавляем иконку категории, если поле существует
         category_icon = ""
         if hasattr(link, 'category'):
-            category = link.category or 'general'
+            category = link.category or 'launches'
             category_icon = category_icons.get(category, '📁') + " "
 
         builder.add(InlineKeyboardButton(
-            text=f"{status_icon} {category_icon}{parsing_icon}{link.name} ({link.check_interval}с)",
+            text=f"{status_icon}{favorite_icon} {category_icon}{parsing_icon}{link.name} ({link.check_interval}с)",
             callback_data=f"{action_type}_link_{link.id}"
         ))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
@@ -410,15 +608,15 @@ def get_interval_presets_keyboard(link_id):
             text=text, callback_data=f"interval_preset_{link_id}_{seconds}"
         ))
     builder.add(InlineKeyboardButton(text="✏️ Ввести своё значение", callback_data=f"interval_custom_{link_id}"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
-    builder.adjust(2)
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_settings_submenu"))
+    builder.adjust(3, 3, 3, 1, 1)
     return builder.as_markup()
 
 def get_confirmation_keyboard(link_id, action_type="delete"):
     builder = InlineKeyboardBuilder()
     if action_type == "delete":
         builder.add(InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_{link_id}"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data=f"manage_link_{link_id}"))
     builder.adjust(2)
     return builder.as_markup()
 
@@ -456,21 +654,23 @@ def get_configure_parsing_submenu(link_id, parsing_type='combined', category=Non
         builder.add(InlineKeyboardButton(text="📡 Изменить API URL", callback_data=f"edit_api_url_{link_id}"))
         builder.add(InlineKeyboardButton(text="🌐 Изменить HTML URL", callback_data=f"edit_html_url_{link_id}"))
 
-    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_configure_parsing"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
+    builder.add(InlineKeyboardButton(text="⬅️ К настройкам", callback_data="manage_settings_submenu"))
+    builder.add(InlineKeyboardButton(text="🏠 К ссылке", callback_data=f"manage_link_{link_id}"))
     builder.adjust(1)
     return builder.as_markup()
 
 def get_category_edit_keyboard(link_id):
     """Клавиатура для выбора категории при редактировании ссылки"""
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="📝 Общая", callback_data=f"set_category_{link_id}_general"))
-    builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data=f"set_category_{link_id}_airdrop"))
+    builder.add(InlineKeyboardButton(text="⭐ Избранные", callback_data=f"set_category_{link_id}_favorite"))
+    builder.add(InlineKeyboardButton(text="🚀 Лаунчпады", callback_data=f"set_category_{link_id}_launchpad"))
+    builder.add(InlineKeyboardButton(text="🌊 Лаунчпулы", callback_data=f"set_category_{link_id}_launchpool"))
+    builder.add(InlineKeyboardButton(text="🪂 Аирдропы", callback_data=f"set_category_{link_id}_airdrop"))
+    builder.add(InlineKeyboardButton(text="🍬 CandyBomb", callback_data=f"set_category_{link_id}_candybomb"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data=f"set_category_{link_id}_staking"))
-    builder.add(InlineKeyboardButton(text="� Анонс", callback_data=f"set_category_{link_id}_announcement"))
-    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"show_parsing_config_{link_id}"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
-    builder.adjust(1, 2, 1, 1, 1)
+    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data=f"set_category_{link_id}_announcement"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"manage_link_{link_id}"))
+    builder.adjust(1, 2, 2, 2, 1)
     return builder.as_markup()
 
 def get_parsing_type_keyboard(link_id):
@@ -481,8 +681,7 @@ def get_parsing_type_keyboard(link_id):
     builder.add(InlineKeyboardButton(text="🌐 Только HTML", callback_data=f"set_parsing_type_{link_id}_html"))
     builder.add(InlineKeyboardButton(text="🌐 Только Browser", callback_data=f"set_parsing_type_{link_id}_browser"))
     builder.add(InlineKeyboardButton(text="📱 Telegram", callback_data=f"set_parsing_type_{link_id}_telegram"))
-    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"show_parsing_config_{link_id}"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="manage_configure_parsing"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -499,6 +698,12 @@ SPECIAL_PARSERS_CONFIG = {
         'description': 'Парсер для OKX X-Launch/Boost (web3.okx.com)',
         'domains': ['okx.com'],
         'emoji': '🚀'
+    },
+    'bybit_launchpool': {
+        'name': 'Bybit Launchpool',
+        'description': 'Парсер для Bybit Launchpool',
+        'domains': ['bybit.com/en/trade/spot/launchpool'],
+        'emoji': '🌊'
     }
 }
 
@@ -507,42 +712,105 @@ PARSERS_CONFIG = {
     'auto': {
         'name': 'Автоматический выбор',
         'emoji': '🤖',
-        'categories': ['general', 'airdrop', 'staking', 'launchpool', 'announcement'],
+        'categories': ['launches', 'airdrop', 'staking', 'launchpool', 'announcement'],
         'domains': [],  # Подходит для всех
         'priority': 0
     },
     'staking': {
         'name': 'Стейкинг парсер',
         'emoji': '📊',
-        'categories': ['staking', 'general'],  # Показывается для этих категорий
+        'categories': ['staking', 'launches'],  # Показывается для этих категорий
         'domains': ['bybit.com', 'kucoin.com', 'okx.com', 'binance.com', 'gate.io', 'mexc.com'],
         'priority': 1
     },
     'announcement': {
         'name': 'Анонс парсер',
         'emoji': '📢',
-        'categories': ['announcement', 'general'],
+        'categories': ['announcement', 'launches'],
         'domains': [],  # Подходит для всех
         'priority': 2
     },
     'weex': {
         'name': 'WEEX парсер',
         'emoji': '🔧',
-        'categories': ['airdrop', 'launchpool', 'general'],
+        'categories': ['airdrop', 'launchpool', 'launches'],
         'domains': ['weex.com'],
         'priority': 3
     },
     'okx_boost': {
         'name': 'OKX Boost парсер',
         'emoji': '🚀',
-        'categories': ['airdrop', 'launchpool', 'general'],
+        'categories': ['airdrop', 'launchpool', 'launches'],
         'domains': ['okx.com'],
         'priority': 4
+    },
+    'bybit_launchpool': {
+        'name': 'Bybit Launchpool',
+        'emoji': '🌊',
+        'categories': ['launchpool', 'launches'],
+        'domains': ['bybit.com'],
+        'priority': 5
+    },
+    'mexc_launchpool': {
+        'name': 'MEXC Launchpool',
+        'emoji': '🌊',
+        'categories': ['launchpool', 'launches'],
+        'domains': ['mexc.com'],
+        'priority': 6
+    },
+    'gate_launchpool': {
+        'name': 'Gate.io Launchpool',
+        'emoji': '🌊',
+        'categories': ['launchpool', 'launches'],
+        'domains': ['gate.com', 'gate.io'],
+        'priority': 7
+    },
+    'gate_launchpad': {
+        'name': 'Gate.io Launchpad',
+        'emoji': '🚀',
+        'categories': ['launchpool', 'launches'],
+        'domains': ['gate.com', 'gate.io'],
+        'priority': 8
+    },
+    'bingx_launchpool': {
+        'name': 'BingX Launchpool',
+        'emoji': '🌊',
+        'categories': ['launchpool', 'launches'],
+        'domains': ['bingx.com'],
+        'priority': 9
+    },
+    'bitget_launchpool': {
+        'name': 'Bitget Launchpool',
+        'emoji': '🌊',
+        'categories': ['launchpool', 'launches'],
+        'domains': ['bitget.com'],
+        'priority': 10
+    },
+    'bitget_poolx': {
+        'name': 'Bitget PoolX',
+        'emoji': '💎',
+        'categories': ['staking', 'launchpool'],
+        'domains': ['bitget.com'],
+        'priority': 11
+    },
+    'bitget_candybomb': {
+        'name': 'Bitget CandyBomb',
+        'emoji': '�',
+        'categories': ['candybomb', 'airdrop', 'drops'],
+        'domains': ['bitget.com'],
+        'priority': 12
+    },
+    'phemex_candydrop': {
+        'name': 'Phemex Candy Drop',
+        'emoji': '🍬',
+        'categories': ['candybomb', 'airdrop', 'drops'],
+        'domains': ['phemex.com'],
+        'priority': 13
     },
     'universal': {
         'name': 'Универсальный парсер',
         'emoji': '🌐',
-        'categories': ['general', 'airdrop', 'staking', 'launchpool', 'announcement'],
+        'categories': ['launches', 'drops', 'airdrop', 'candybomb', 'staking', 'launchpool', 'launchpad', 'announcement'],
         'domains': [],  # Подходит для всех
         'priority': 99
     }
@@ -596,12 +864,32 @@ def get_available_parsers_for_context(category: str, url: str = None) -> list:
             recommended_parser = parser_id
             break
         
-        # Для airdrop/launchpool со специальными парсерами
-        if category in ['airdrop', 'launchpool'] and parser_id in ['weex', 'okx_boost']:
+        # Для airdrop/candybomb/launchpool/launchpad со специальными парсерами
+        if category in ['airdrop', 'candybomb', 'drops', 'launchpool', 'launchpad', 'launches'] and parser_id in ['weex', 'okx_boost', 'bybit_launchpool', 'mexc_launchpool', 'gate_launchpool', 'gate_launchpad', 'bingx_launchpool', 'bitget_launchpool', 'bitget_poolx', 'bitget_candybomb', 'phemex_candydrop']:
             domains = config.get('domains', [])
             if domains and any(d in url_lower for d in domains):
-                recommended_parser = parser_id
-                break
+                # Для Bitget проверяем точный URL чтобы выбрать правильный парсер
+                if 'bitget.com' in url_lower:
+                    if ('candy-bomb' in url_lower or 'candybomb' in url_lower) and parser_id == 'bitget_candybomb':
+                        recommended_parser = parser_id
+                        break
+                    elif 'poolx' in url_lower and parser_id == 'bitget_poolx':
+                        recommended_parser = parser_id
+                        break
+                    elif 'launchpool' in url_lower and parser_id == 'bitget_launchpool':
+                        recommended_parser = parser_id
+                        break
+                else:
+                    recommended_parser = parser_id
+                    break
+        
+        # Для staking с bitget_poolx
+        if category == 'staking' and parser_id == 'bitget_poolx':
+            domains = config.get('domains', [])
+            if domains and any(d in url_lower for d in domains):
+                if 'poolx' in url_lower:
+                    recommended_parser = parser_id
+                    break
     
     # Формируем результат с флагом рекомендации
     result = []
@@ -647,6 +935,75 @@ def detect_special_parser_for_url(url: str) -> list:
                 break
     
     return available
+
+
+def auto_detect_parser_for_launches(url: str, category: str) -> tuple:
+    """
+    Автоматически определяет парсер для лаучей по URL.
+    
+    Returns:
+        tuple: (parser_id, parser_name, parser_emoji) или (None, None, None) если не распознан
+    """
+    if not url:
+        return (None, None, None)
+    
+    url_lower = url.lower()
+    
+    # Специализированные парсеры для launchpool
+    launchpool_parsers = {
+        'bybit': ('bybit_launchpool', 'Bybit Launchpool', '🌊'),
+        'mexc': ('mexc_launchpool', 'MEXC Launchpool', '🌊'),
+        'gate': ('gate_launchpool', 'Gate.io Launchpool', '🌊'),
+        'bingx': ('bingx_launchpool', 'BingX Launchpool', '🌊'),
+        'bitget': ('bitget_launchpool', 'Bitget Launchpool', '🌊'),
+    }
+    
+    # Специализированные парсеры для launchpad
+    launchpad_parsers = {
+        'gate': ('gate_launchpad', 'Gate.io Launchpad', '🚀'),
+    }
+    
+    # Специальные парсеры для airdrop/промо
+    special_parsers = {
+        'weex': ('weex', 'WEEX Parser', '🔧'),
+        'okx': ('okx_boost', 'OKX Boost', '🚀'),
+    }
+    
+    # Определяем биржу по URL
+    detected_exchange = None
+    for exchange in ['bybit', 'mexc', 'gate', 'kucoin', 'okx', 'binance', 'weex', 'bingx', 'bitget', 'phemex']:
+        if exchange in url_lower:
+            detected_exchange = exchange
+            break
+    
+    if not detected_exchange:
+        return (None, None, None)
+    
+    # Для Bitget Candy Bomb - проверяем по URL
+    if detected_exchange == 'bitget' and ('candy-bomb' in url_lower or 'candybomb' in url_lower):
+        return ('bitget_candybomb', 'Bitget CandyBomb', '🎁')
+    
+    # Для Phemex Candy Drop - проверяем по URL
+    if detected_exchange == 'phemex' and ('candy-drop' in url_lower or 'candydrop' in url_lower or '/events/candy' in url_lower):
+        return ('phemex_candydrop', 'Phemex Candy Drop', '🍬')
+    
+    # Для launchpool - ищем специализированный парсер
+    if category == 'launchpool':
+        if detected_exchange in launchpool_parsers:
+            return launchpool_parsers[detected_exchange]
+    
+    # Для launchpad - ищем специализированный парсер
+    elif category == 'launchpad':
+        if detected_exchange in launchpad_parsers:
+            return launchpad_parsers[detected_exchange]
+    
+    # Проверяем специальные парсеры (weex, okx)
+    if detected_exchange in special_parsers:
+        return special_parsers[detected_exchange]
+    
+    # Не найден специализированный парсер
+    return (None, None, None)
+
 
 def get_special_parser_keyboard(available_parsers: list = None):
     """Клавиатура для выбора специального парсера"""
@@ -827,6 +1184,214 @@ async def cmd_start(message: Message):
 # ОБРАБОТЧИКИ INLINE-КНОПОК ГЛАВНОГО МЕНЮ
 # =============================================================================
 
+@router.callback_query(F.data == "main_favorites")
+async def main_favorites_handler(callback: CallbackQuery):
+    """Inline: Раздел Избранные - показывает список избранных ссылок"""
+    await show_favorites_page(callback, page=0)
+
+@router.callback_query(F.data.startswith("favorites_page_"))
+async def favorites_page_handler(callback: CallbackQuery):
+    """Обработчик пагинации списка избранных"""
+    page = int(callback.data.split("_")[-1])
+    await show_favorites_page(callback, page=page)
+
+async def show_favorites_page(callback: CallbackQuery, page: int = 0):
+    """Показать страницу со списком избранных ссылок"""
+    try:
+        links = await get_favorite_links_async()
+        
+        # Словарь иконок для категорий
+        category_icons = {
+            'launches': '🚀', 'launchpad': '🚀', 'launchpool': '🌊',
+            'drops': '🎁', 'airdrop': '🪂', 'candybomb': '🍬',
+            'staking': '💰', 'announcement': '📢'
+        }
+        
+        if not links:
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="➕ Добавить в избранное", callback_data="main_add_link"))
+            builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+            builder.adjust(1)
+            
+            await callback.message.edit_text(
+                "⭐ <b>ИЗБРАННЫЕ ССЫЛКИ</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📭 <i>Список пуст</i>\n\n"
+                "Добавьте ссылки в избранное:\n"
+                "• При добавлении новой ссылки выберите «⭐ Избранные»\n"
+                "• Или измените категорию существующей ссылки в Управлении",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+        
+        # Подсчёт статистики
+        active_count = sum(1 for link in links if link.is_active)
+        paused_count = len(links) - active_count
+        
+        # Пагинация
+        per_page = 10
+        total_pages = max(1, (len(links) + per_page - 1) // per_page)
+        page = max(0, min(page, total_pages - 1))
+        start_idx = page * per_page
+        end_idx = start_idx + per_page
+        page_links = links[start_idx:end_idx]
+        
+        # Формируем сообщение с улучшенным форматированием
+        response = "⭐ <b>ИЗБРАННЫЕ ССЫЛКИ</b>\n"
+        response += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        response += f"📊 {len(links)} ссылок • ✅ {active_count} активны • ⏸ {paused_count} пауза\n\n"
+        
+        for link in page_links:
+            status = "✅" if link.is_active else "❌"
+            category = link.category or 'launches'
+            cat_icon = category_icons.get(category, '📁')
+            # Интервал в минутах
+            interval_min = link.check_interval // 60 if link.check_interval >= 60 else link.check_interval
+            interval_suffix = "м" if link.check_interval >= 60 else "с"
+            response += f"{cat_icon} <b>{link.name}</b> — {interval_min}{interval_suffix} {status}\n"
+        
+        # Клавиатура с пагинацией
+        builder = InlineKeyboardBuilder()
+        
+        # Кнопки для управления каждой ссылкой (по 2 в ряд с иконками категорий)
+        for link in page_links:
+            category = link.category or 'launches'
+            cat_icon = category_icons.get(category, '📁')
+            builder.add(InlineKeyboardButton(
+                text=f"{cat_icon} {link.name}",
+                callback_data=f"favorite_manage_{link.id}"
+            ))
+        
+        # Пагинация
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"favorites_page_{page-1}"))
+        if total_pages > 1:
+            nav_buttons.append(InlineKeyboardButton(text=f"📄 {page+1}/{total_pages}", callback_data="favorites_info"))
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"favorites_page_{page+1}"))
+        
+        if nav_buttons:
+            builder.row(*nav_buttons)
+        
+        builder.row(
+            InlineKeyboardButton(text="➕ Добавить", callback_data="main_add_link"),
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu")
+        )
+        
+        # Adjust: по 2 кнопки ссылок в ряд, затем навигация, затем кнопки внизу
+        adjust_pattern = [2] * ((len(page_links) + 1) // 2)  # По 2 кнопки в ряд
+        if nav_buttons:
+            adjust_pattern.append(len(nav_buttons))
+        adjust_pattern.append(2)
+        builder.adjust(*adjust_pattern)
+        
+        await callback.message.edit_text(
+            response,
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в show_favorites_page: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
+
+@router.callback_query(F.data.startswith("favorite_manage_"))
+async def favorite_manage_handler(callback: CallbackQuery):
+    """Управление избранной ссылкой - показывает такое же меню как в Управлении ссылками"""
+    try:
+        link_id = int(callback.data.replace("favorite_manage_", ""))
+        
+        link = await get_link_by_id_async(link_id)
+        if not link:
+            await callback.answer("❌ Ссылка не найдена", show_alert=True)
+            return
+        
+        # Сохраняем выбор пользователя для последующих действий
+        user_id = callback.from_user.id
+        user_selections[user_id] = link_id
+        
+        # Показываем инфо о ссылке с кнопками управления
+        category_icons = {
+            'launches': '🚀', 'launchpad': '🚀', 'launchpool': '🌊',
+            'drops': '🎁', 'airdrop': '🪂', 'candybomb': '🍬',
+            'staking': '💰', 'announcement': '📢'
+        }
+        category = link.category or 'launches'
+        cat_icon = category_icons.get(category, '📁')
+        status = "✅ Активна" if link.is_active else "❌ Остановлена"
+        
+        # Определяем тип клавиатуры в зависимости от категории
+        if category == 'staking':
+            keyboard = get_staking_management_keyboard()
+        elif category in ('airdrop', 'candybomb', 'drops', 'launches', 'launchpool', 'launchpad', 'announcement'):
+            keyboard = get_airdrop_management_keyboard()
+        else:
+            keyboard = get_management_keyboard(link)
+        
+        # Добавляем кнопку "Убрать из избранного"
+        builder = InlineKeyboardBuilder()
+        # Копируем кнопки из keyboard
+        for row in keyboard.inline_keyboard:
+            for btn in row:
+                if btn.callback_data != "back_to_link_list":  # Заменим эту кнопку
+                    builder.add(btn)
+        
+        # Добавляем специальные кнопки для избранного
+        builder.add(InlineKeyboardButton(text="💔 Убрать из избранного", callback_data=f"remove_favorite_{link_id}"))
+        builder.add(InlineKeyboardButton(text="⬅️ К избранным", callback_data="main_favorites"))
+        builder.adjust(1)
+        
+        await callback.message.edit_text(
+            f"⭐ <b>Избранная ссылка</b>\n\n"
+            f"<b>Название:</b> {link.name}\n"
+            f"<b>Категория:</b> {cat_icon} {category}\n"
+            f"<b>Статус:</b> {status}\n"
+            f"<b>Интервал:</b> {link.check_interval} сек\n"
+            f"<b>URL:</b> <code>{(link.api_url or link.html_url or link.url or '-')[:50]}</code>",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в favorite_manage_handler: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
+
+@router.callback_query(F.data.startswith("remove_favorite_"))
+async def remove_favorite_handler(callback: CallbackQuery):
+    """Убрать ссылку из избранного"""
+    try:
+        link_id = int(callback.data.replace("remove_favorite_", ""))
+        
+        def remove_from_favorites(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+            link.is_favorite = False
+            return link.name
+        
+        link_name = atomic_operation(remove_from_favorites)
+        
+        # Инвалидируем кэш избранных
+        from utils.cache import get_cache_manager
+        cache = get_cache_manager()
+        cache.invalidate("links:favorites")
+        
+        await callback.answer(f"💔 {link_name} удалена из избранного")
+        
+        # Возвращаемся к списку избранных
+        await show_favorites_page(callback, page=0)
+        
+    except Exception as e:
+        logger.error(f"Ошибка удаления из избранного: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
+
+
 @router.callback_query(F.data == "main_list_links")
 async def main_list_links_handler(callback: CallbackQuery):
     """Inline: Список ссылок с пагинацией"""
@@ -862,17 +1427,18 @@ async def show_links_page(callback: CallbackQuery, page: int = 0):
         # Группируем ссылки по категориям
         categories = {}
         for link in links:
-            category = link.category or 'general'
+            category = link.category or 'launches'
             if category not in categories:
                 categories[category] = []
             categories[category].append(link)
 
         # Словари для названий категорий
         category_names = {
-            'general': '📝 ОБЩЕЕ',
+            'launches': '🚀 ЛАУЧИ',
+            'launchpad': '🚀 ЛАУНЧПАДЫ',
+            'launchpool': '🌊 ЛАУНЧПУЛЫ',
             'staking': '💰 СТЕЙКИНГ',
             'airdrop': '🪂 АИРДРОП',
-            'launchpool': '🚀 LAUNCHPOOL',
             'announcement': '📢 АНОНСЫ'
         }
 
@@ -889,7 +1455,7 @@ async def show_links_page(callback: CallbackQuery, page: int = 0):
         response = "📊 <b>Список ссылок:</b>\n\n"
 
         # Сортируем категории по приоритету
-        category_order = ['staking', 'airdrop', 'launchpool', 'announcement', 'general']
+        category_order = ['launches', 'staking', 'airdrop', 'launchpool', 'announcement']
         sorted_categories = [cat for cat in category_order if cat in categories]
         sorted_categories.extend([cat for cat in categories.keys() if cat not in category_order])
 
@@ -905,11 +1471,12 @@ async def show_links_page(callback: CallbackQuery, page: int = 0):
             for link in categories[category]:
                 status_text = "Активна" if link.is_active else "Остановлена"
                 status_emoji = "✅" if link.is_active else "❌"
+                favorite_star = "⭐" if hasattr(link, 'is_favorite') and link.is_favorite else ""
                 interval_minutes = link.check_interval // 60
                 parsing_type = parsing_icons.get(link.parsing_type, '❓')
 
                 # Формируем блок ссылки без эмодзи статуса в названии
-                response += f"<b>{link.name}</b>\n"
+                response += f"<b>{favorite_star}{link.name}</b>\n"
                 response += f"Статус: {status_emoji} {status_text}\n"
                 response += f"Парсинг: {parsing_type}\n"
                 response += f"Интервал: {interval_minutes} мин\n"
@@ -961,16 +1528,18 @@ async def show_links_page(callback: CallbackQuery, page: int = 0):
 async def main_add_link_handler(callback: CallbackQuery, state: FSMContext):
     """Inline: Добавить ссылку - переход к выбору категории"""
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="📝 Общая ссылка", callback_data="add_category_general"))
+    builder.add(InlineKeyboardButton(text="⭐ Избранные", callback_data="add_category_favorite"))
+    builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="add_category_launches"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
     builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
     builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
-    builder.adjust(1, 2, 1, 1)
+    builder.adjust(1, 2, 2, 1)
 
     await callback.message.edit_text(
         "➕ <b>Добавление ссылки</b>\n\n"
-        "Выберите категорию для новой ссылки:",
+        "Выберите категорию для новой ссылки:\n\n"
+        "⭐ <b>Избранные</b> - важные ссылки для быстрого доступа",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -1084,9 +1653,9 @@ async def main_categories_handler(callback: CallbackQuery):
     """Inline: Быстрый переход к категориям"""
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="📋 Все ссылки", callback_data="category_all"))
-    builder.add(InlineKeyboardButton(text="📝 Общая", callback_data="category_general"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдропы", callback_data="category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="category_staking"))
+    builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="category_launches"))
     builder.add(InlineKeyboardButton(text="📢 Анонсы", callback_data="category_announcement"))
     builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
     builder.adjust(1, 2, 2, 1)
@@ -1170,15 +1739,16 @@ async def menu_list_links(message: Message):
             interval_minutes = link.check_interval // 60
 
             # Определяем отображение категории
-            category = link.category or 'general'
+            category = link.category or 'launches'
             category_icons = {
-                'general': '📝 Общее',
+                'launches': '🚀 Лаучи',
+                'launchpad': '🚀 Лаунчпады',
+                'launchpool': '🌊 Лаунчпулы',
                 'airdrop': '🪂 Аирдроп',
                 'staking': '💰 Стейкинг',
-                'launchpool': '🚀 Лаунчпул',
                 'announcement': '📢 Анонс'
             }
-            category_display = category_icons.get(category, '📝 Общее')
+            category_display = category_icons.get(category, '🚀 Лаучи')
 
             # Определяем отображение типа парсинга
             parsing_type = link.parsing_type or 'combined'
@@ -1235,16 +1805,18 @@ async def menu_list_links(message: Message):
 async def menu_add_link(message: Message, state: FSMContext):
     """Начало процесса добавления ссылки - выбор категории"""
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="📝 Общая ссылка", callback_data="add_category_general"))
+    builder.add(InlineKeyboardButton(text="⭐ Избранные", callback_data="add_category_favorite"))
+    builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="add_category_launches"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
-    builder.add(InlineKeyboardButton(text="� Анонс", callback_data="add_category_announcement"))
+    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
-    builder.adjust(1, 2, 1, 1)
+    builder.adjust(1, 2, 2, 1)
 
     await message.answer(
         "🔗 <b>Добавление новой ссылки</b>\n\n"
-        "🗂️ <b>Шаг 1:</b> Выберите категорию ссылки:",
+        "🗂️ <b>Шаг 1:</b> Выберите категорию ссылки:\n\n"
+        "⭐ <b>Избранные</b> - важные ссылки для быстрого доступа",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -1255,27 +1827,110 @@ async def handle_category_choice(callback: CallbackQuery, state: FSMContext):
     """Обработка выбора категории при добавлении ссылки"""
     category = callback.data.replace("add_category_", "")
 
+    # Если выбрали "Лаучи" - показываем подменю с Лаунчпады/Лаунчпулы
+    if category == "launches":
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🚀 Лаунчпады", callback_data="add_category_launchpad"))
+        builder.add(InlineKeyboardButton(text="🌊 Лаунчпулы", callback_data="add_category_launchpool"))
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_category"))
+        builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+        builder.adjust(2, 2)
+        
+        await callback.message.edit_text(
+            "🔗 <b>Добавление новой ссылки</b>\n\n"
+            "✅ <b>Категория:</b> Лаучи\n\n"
+            "🗂️ Выберите подкатегорию:",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    # Если выбрали "Избранные" - показываем подменю выбора реальной категории
+    if category == "favorite":
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🚀 Лаунчпады", callback_data="add_favorite_launchpad"))
+        builder.add(InlineKeyboardButton(text="🌊 Лаунчпулы", callback_data="add_favorite_launchpool"))
+        builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_favorite_airdrop"))
+        builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_favorite_staking"))
+        builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_favorite_announcement"))
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_category"))
+        builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+        builder.adjust(2, 2, 1, 2)
+        
+        await callback.message.edit_text(
+            "🔗 <b>Добавление в Избранные</b>\n\n"
+            "⭐ Ссылка будет добавлена в <b>Избранные</b>\n\n"
+            "🗂️ Выберите тип ссылки для правильного парсинга:",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
     # Сохраняем категорию в state
     await state.update_data(category=category)
 
     category_names = {
-        'general': 'Общая ссылка',
+        'launches': 'Лаучи',
+        'launchpad': 'Лаунчпады',
+        'launchpool': 'Лаунчпулы',
         'airdrop': 'Аирдроп',
         'staking': 'Стейкинг',
-        'launchpool': 'Лаунчпул',
         'announcement': 'Анонс'
     }
     category_display = category_names.get(category, category)
 
-    # Добавляем кнопку "Назад"
+    # Добавляем кнопку "Назад" (для подкатегорий - возврат к меню Лаучи)
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_category"))
+    if category in ['launchpad', 'launchpool']:
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="add_category_launches"))
+    else:
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_category"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
     builder.adjust(2)
 
     await callback.message.edit_text(
         f"🔗 <b>Добавление новой ссылки</b>\n\n"
         f"✅ <b>Категория:</b> {category_display}\n\n"
+        f"🏷️ <b>Шаг 2:</b> Введите название биржи\n\n"
+        f"Примеры:\n"
+        f"• <i>Bybit Promotions</i>\n"
+        f"• <i>MEXC Launchpad</i>\n"
+        f"• <i>OKX Earn</i>\n\n"
+        f"Это название поможет вам легко находить ссылку в списке.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_name)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("add_favorite_"), StateFilter(AddLinkStates.waiting_for_category))
+async def handle_favorite_category_choice(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора типа ссылки при добавлении в Избранные"""
+    category = callback.data.replace("add_favorite_", "")
+    
+    # Сохраняем категорию и флаг избранного
+    await state.update_data(category=category, is_favorite=True)
+    
+    category_names = {
+        'launchpad': 'Лаунчпады',
+        'launchpool': 'Лаунчпулы',
+        'airdrop': 'Аирдроп',
+        'staking': 'Стейкинг',
+        'announcement': 'Анонс'
+    }
+    category_display = category_names.get(category, category)
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="add_category_favorite"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"🔗 <b>Добавление в Избранные</b>\n\n"
+        f"⭐ <b>В избранное</b> | 🗂️ <b>Тип:</b> {category_display}\n\n"
         f"🏷️ <b>Шаг 2:</b> Введите название биржи\n\n"
         f"Примеры:\n"
         f"• <i>Bybit Promotions</i>\n"
@@ -1303,7 +1958,114 @@ async def process_name_input(message: Message, state: FSMContext):
 
     # Сохраняем название
     await state.update_data(custom_name=custom_name)
-
+    
+    # Получаем категорию для определения следующего шага
+    data = await state.get_data()
+    category = data.get('category', 'launches')
+    
+    # =========================================================================
+    # СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ СТЕЙКИНГА - упрощённый процесс
+    # =========================================================================
+    if category == 'staking':
+        # Для стейкинга: автоматически устанавливаем тип парсинга = api
+        await state.update_data(parsing_type='api', selected_parser='staking')
+        
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name_staking"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2)
+        
+        await message.answer(
+            f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
+            f"📡 <b>Шаг 2/4:</b> Введите API ссылку для стейкинга\n\n"
+            f"<b>Примеры API ссылок:</b>\n"
+            f"• <code>https://api.bybit.com/v5/earn/product?category=FlexibleSaving</code>\n"
+            f"• <code>https://www.kucoin.com/_api/earn-saving/products</code>\n"
+            f"• <code>https://www.okx.com/priapi/v1/earn/staking/products</code>\n\n"
+            f"💡 Парсер автоматически определит биржу по URL.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_api_url)
+        return
+    
+    # =========================================================================
+    # СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ ЛАУЧЕЙ - упрощённый процесс
+    # =========================================================================
+    if category in ['launchpad', 'launchpool']:
+        # Для лаучей: сразу переходим к вводу ссылки
+        await state.update_data(parsing_type='combined')  # По умолчанию combined
+        
+        category_display = "Лаунчпад" if category == "launchpad" else "Лаунчпул"
+        category_emoji = "🚀" if category == "launchpad" else "🌊"
+        
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name_launches"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2)
+        
+        await message.answer(
+            f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
+            f"{category_emoji} <b>Шаг 2/3:</b> Введите ссылку на {category_display}\n\n"
+            f"<b>Можете ввести:</b>\n"
+            f"• API ссылку (например <code>https://api.bybit.com/...</code>)\n"
+            f"• Ссылку на страницу (например <code>https://www.bybit.com/en/trade/spot/launchpool</code>)\n\n"
+            f"💡 Бот автоматически определит подходящий парсер по URL.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_page_url)  # Используем page_url для лаучей
+        return
+    
+    # =========================================================================
+    # СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ АИРДРОПА - упрощённый процесс
+    # =========================================================================
+    if category == 'airdrop':
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="📡 API", callback_data="airdrop_source_api"))
+        builder.add(InlineKeyboardButton(text="🌐 Веб-страница", callback_data="airdrop_source_web"))
+        builder.add(InlineKeyboardButton(text="📱 Telegram", callback_data="airdrop_source_telegram"))
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name_airdrop"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(3, 2)
+        
+        await message.answer(
+            f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
+            f"🪂 <b>Шаг 2/4:</b> Выберите источник данных\n\n"
+            f"<b>📡 API</b> - прямой endpoint (быстро, надёжно)\n"
+            f"<b>🌐 Веб-страница</b> - парсинг HTML страницы\n"
+            f"<b>📱 Telegram</b> - мониторинг канала по ключевым словам",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_parsing_type)  # Переиспользуем состояние
+        return
+    
+    # =========================================================================
+    # СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ АНОНСОВ - упрощённый процесс
+    # =========================================================================
+    if category == 'announcement':
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🌐 Веб-страница", callback_data="announcement_source_web"))
+        builder.add(InlineKeyboardButton(text="📱 Telegram", callback_data="announcement_source_telegram"))
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name_announcement"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2, 2)
+        
+        await message.answer(
+            f"✅ Название сохранено: <b>{custom_name}</b>\n\n"
+            f"📢 <b>Шаг 2/5:</b> Выберите источник данных\n\n"
+            f"<b>🌐 Веб-страница</b> - мониторинг страницы анонсов\n"
+            f"<b>📱 Telegram</b> - мониторинг канала по ключевым словам",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_parsing_type)
+        return
+    
+    # =========================================================================
+    # СТАНДАРТНАЯ ОБРАБОТКА ДЛЯ ОСТАЛЬНЫХ КАТЕГОРИЙ
+    # =========================================================================
     # Создаем кнопки для выбора типа парсинга
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="🔄 Комбинированный (API + HTML + Browser)", callback_data="parsing_type_combined"))
@@ -1363,7 +2125,7 @@ async def process_parsing_type_selection(callback: CallbackQuery, state: FSMCont
 
     elif parsing_type == 'html':
         # Проверяем категорию - для announcement нужно выбрать стратегию
-        category = data.get('category', 'general')
+        category = data.get('category', 'launches')
 
         if category == 'announcement':
             # Для анонсов предлагаем выбрать стратегию парсинга
@@ -1668,10 +2430,42 @@ async def process_api_url_input(message: Message, state: FSMContext):
 
     data = await state.get_data()
     parsing_type = data.get('parsing_type', 'combined')
+    category = data.get('category', 'launches')
+    custom_name = data.get('custom_name')
     
+    # =========================================================================
+    # СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ СТЕЙКИНГА - переходим к выбору APR
+    # =========================================================================
+    if category == 'staking':
+        builder = InlineKeyboardBuilder()
+        # Кнопки выбора минимального APR
+        builder.add(InlineKeyboardButton(text="0% (все)", callback_data="staking_apr_0"))
+        builder.add(InlineKeyboardButton(text="5%", callback_data="staking_apr_5"))
+        builder.add(InlineKeyboardButton(text="10%", callback_data="staking_apr_10"))
+        builder.add(InlineKeyboardButton(text="20%", callback_data="staking_apr_20"))
+        builder.add(InlineKeyboardButton(text="50%", callback_data="staking_apr_50"))
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_url_staking"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(3, 2, 2)
+        
+        await message.answer(
+            f"✅ API ссылка сохранена!\n\n"
+            f"📊 <b>Шаг 3/4:</b> Минимальный APR для уведомлений\n\n"
+            f"Бот будет уведомлять только о стейкингах с APR выше выбранного значения.\n\n"
+            f"💡 <b>0% (все)</b> - показывать все стейкинги\n"
+            f"💡 <b>5-10%</b> - только интересные предложения\n"
+            f"💡 <b>20-50%</b> - только высокодоходные",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_min_apr)
+        return
+    
+    # =========================================================================
+    # СТАНДАРТНАЯ ОБРАБОТКА
+    # =========================================================================
     # Для combined - сразу переходим к выбору парсера (пропускаем HTML)
     if parsing_type == 'combined':
-        custom_name = data.get('custom_name')
         await state.update_data(html_url=None)
         # Переходим к выбору интервала (combined пропускает выбор парсера)
         await _show_interval_selection_msg(message, state, custom_name)
@@ -1693,6 +2487,1146 @@ async def process_api_url_input(message: Message, state: FSMContext):
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_html_url)
+
+# =============================================================================
+# ОБРАБОТЧИКИ ДЛЯ ЛАУЧЕЙ - упрощённый процесс добавления
+# Обработчик waiting_for_page_url (process_airdrop_url_input) объединён 
+# с airdrop и находится в секции ОБРАБОТЧИКИ ДЛЯ АИРДРОПА
+# =============================================================================
+
+@router.callback_query(AddLinkStates.waiting_for_parser_selection, F.data.startswith("launches_parser_"))
+async def process_launches_parser_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора парсера для лаучей"""
+    parser_id = callback.data.replace("launches_parser_", "")
+    
+    # Сохраняем парсер
+    await state.update_data(selected_parser=parser_id if parser_id != 'auto' else 'auto')
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    category = data.get('category', 'launchpool')
+    
+    # Получаем информацию о парсере
+    parser_info = PARSERS_CONFIG.get(parser_id, {})
+    parser_emoji = parser_info.get('emoji', '🤖')
+    parser_name = parser_info.get('name', 'Автоматический')
+    
+    category_display = "Лаунчпад" if category == "launchpad" else "Лаунчпул"
+    
+    # Показываем выбор интервала
+    builder = InlineKeyboardBuilder()
+    presets = [
+        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+    ]
+    
+    for text, seconds in presets:
+        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parser_launches"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(3, 3, 3, 2)
+    
+    await callback.message.edit_text(
+        f"✅ Парсер выбран: <b>{parser_emoji} {parser_name}</b>\n\n"
+        f"⏰ <b>Последний шаг:</b> Выберите интервал проверки\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Категория:</b> {category_display}\n"
+        f"<b>Парсер:</b> {parser_emoji} {parser_name}\n\n"
+        f"Как часто проверять на новые проекты?",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_interval)
+    await callback.answer()
+
+
+# Кнопки "Назад" для лаучей
+@router.callback_query(F.data == "back_to_name_launches")
+async def back_to_name_launches(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу названия для лаучей"""
+    data = await state.get_data()
+    category = data.get('category', 'launchpool')
+    category_display = "Лаунчпад" if category == "launchpad" else "Лаунчпул"
+    
+    # Определяем куда возвращаться - к подкатегориям лаучей
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="add_category_launches"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"🔗 <b>Добавление новой ссылки</b>\n\n"
+        f"✅ <b>Категория:</b> {category_display}\n\n"
+        f"🏷️ <b>Шаг 2:</b> Введите название\n\n"
+        f"Примеры:\n"
+        f"• <i>Bybit Launchpool</i>\n"
+        f"• <i>MEXC Launchpad</i>\n"
+        f"• <i>Gate.io Startup</i>",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_name)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_url_launches")
+async def back_to_url_launches(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу URL для лаучей"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    category = data.get('category', 'launchpool')
+    
+    category_display = "Лаунчпад" if category == "launchpad" else "Лаунчпул"
+    category_emoji = "🚀" if category == "launchpad" else "🌊"
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name_launches"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"✅ Название: <b>{custom_name}</b>\n\n"
+        f"{category_emoji} <b>Шаг 2/3:</b> Введите ссылку на {category_display}\n\n"
+        f"<b>Можете ввести:</b>\n"
+        f"• API ссылку (например <code>https://api.bybit.com/...</code>)\n"
+        f"• Ссылку на страницу (например <code>https://www.bybit.com/en/trade/spot/launchpool</code>)\n\n"
+        f"💡 Бот автоматически определит подходящий парсер по URL.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_page_url)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_parser_launches")
+async def back_to_parser_launches(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору парсера для лаучей"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    category = data.get('category', 'launchpool')
+    api_url = data.get('api_url')
+    html_url = data.get('html_url')
+    url = api_url or html_url or ''
+    
+    category_display = "Лаунчпад" if category == "launchpad" else "Лаунчпул"
+    
+    # Формируем клавиатуру с доступными парсерами
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🤖 Автоматический выбор", callback_data="launches_parser_auto"))
+    
+    if category == 'launchpool':
+        builder.add(InlineKeyboardButton(text="🌊 Bybit Launchpool", callback_data="launches_parser_bybit_launchpool"))
+        builder.add(InlineKeyboardButton(text="🌊 MEXC Launchpool", callback_data="launches_parser_mexc_launchpool"))
+        builder.add(InlineKeyboardButton(text="🌊 Gate.io Launchpool", callback_data="launches_parser_gate_launchpool"))
+        builder.add(InlineKeyboardButton(text="🌊 BingX Launchpool", callback_data="launches_parser_bingx_launchpool"))
+        builder.add(InlineKeyboardButton(text="🌊 Bitget Launchpool", callback_data="launches_parser_bitget_launchpool"))
+    elif category == 'launchpad':
+        builder.add(InlineKeyboardButton(text="🚀 Gate.io Launchpad", callback_data="launches_parser_gate_launchpad"))
+    
+    builder.add(InlineKeyboardButton(text="🔧 WEEX Parser", callback_data="launches_parser_weex"))
+    builder.add(InlineKeyboardButton(text="🚀 OKX Boost", callback_data="launches_parser_okx_boost"))
+    builder.add(InlineKeyboardButton(text="🌐 Универсальный", callback_data="launches_parser_universal"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_launches"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        f"🤖 <b>Выберите парсер:</b>\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Категория:</b> {category_display}\n"
+        f"<b>URL:</b> <code>{url[:50]}...</code>\n\n"
+        f"Выберите подходящий парсер для обработки данных:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_parser_selection)
+    await callback.answer()
+
+
+# =============================================================================
+# ОБРАБОТЧИКИ ДЛЯ АИРДРОПА - упрощённый процесс добавления
+# =============================================================================
+
+def auto_detect_parser_for_airdrop(url: str) -> tuple:
+    """
+    Автоматически определяет парсер для аирдропа по URL.
+    
+    Returns:
+        (parser_id, parser_name, parser_emoji) или (None, None, None) если не распознан
+    """
+    url_lower = url.lower()
+    
+    # Специальные парсеры для airdrop
+    if 'weex.com' in url_lower:
+        return ('weex', 'WEEX Parser', '🔧')
+    elif 'okx.com' in url_lower:
+        return ('okx_boost', 'OKX Boost', '🚀')
+    elif 'bitget.com' in url_lower and ('candy-bomb' in url_lower or 'candybomb' in url_lower):
+        return ('bitget_candybomb', 'Bitget CandyBomb', '🎁')
+    elif 'phemex.com' in url_lower and ('candy-drop' in url_lower or 'candydrop' in url_lower or '/events/candy' in url_lower):
+        return ('phemex_candydrop', 'Phemex Candy Drop', '🍬')
+    
+    return (None, None, None)
+
+
+@router.callback_query(AddLinkStates.waiting_for_parsing_type, F.data.startswith("airdrop_source_"))
+async def process_airdrop_source_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора источника данных для аирдропа"""
+    source = callback.data.replace("airdrop_source_", "")
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    # Маппинг источника на тип парсинга
+    source_to_parsing_type = {
+        'api': 'api',
+        'web': 'html',
+        'telegram': 'telegram'
+    }
+    parsing_type = source_to_parsing_type.get(source, 'api')
+    await state.update_data(parsing_type=parsing_type)
+    
+    builder = InlineKeyboardBuilder()
+    
+    if source == 'telegram':
+        # Для Telegram - переходим к стандартной обработке Telegram
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_source_airdrop"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2)
+        
+        await callback.message.edit_text(
+            f"✅ Источник: <b>📱 Telegram</b>\n\n"
+            f"📱 <b>Шаг 3/5:</b> Введите username или ссылку на канал\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• <code>@channel_name</code>\n"
+            f"• <code>https://t.me/channel_name</code>\n\n"
+            f"⚠️ Бот должен иметь доступ к каналу для мониторинга.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_telegram_channel)
+    else:
+        # Для API и Web - запрашиваем URL
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_source_airdrop"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2)
+        
+        source_name = "API" if source == "api" else "веб-страницы"
+        source_emoji = "📡" if source == "api" else "🌐"
+        
+        await callback.message.edit_text(
+            f"✅ Источник: <b>{source_emoji} {source_name}</b>\n\n"
+            f"🔗 <b>Шаг 3/4:</b> Введите ссылку\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• <code>https://www.weex.com/api/airdrop/list</code>\n"
+            f"• <code>https://www.okx.com/priapi/v1/earn/airdrop</code>\n\n"
+            f"💡 Бот попробует автоматически определить парсер.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_page_url)  # Используем page_url
+    
+    await callback.answer()
+
+
+@router.message(AddLinkStates.waiting_for_page_url)
+async def process_airdrop_url_input(message: Message, state: FSMContext):
+    """Обработка ввода URL для аирдропа (и лаучей)"""
+    url = message.text.strip()
+    
+    if not url:
+        await message.answer("❌ URL не может быть пустым. Попробуйте снова:")
+        return
+    
+    # Базовая валидация URL
+    if not url.startswith(('http://', 'https://')):
+        await message.answer(
+            "❌ Неверный формат URL. Ссылка должна начинаться с http:// или https://\n\n"
+            "Попробуйте снова:"
+        )
+        return
+    
+    data = await state.get_data()
+    category = data.get('category', 'airdrop')
+    custom_name = data.get('custom_name', '')
+    
+    # Определяем, это API или HTML URL (для airdrop)
+    if 'api' in url.lower() or '/v1/' in url.lower() or '/v5/' in url.lower() or 'priapi' in url.lower():
+        await state.update_data(api_url=url, html_url=None, page_url=url)
+    else:
+        await state.update_data(html_url=url, api_url=None, page_url=url)
+    
+    # =========================================================================
+    # ДЛЯ ЛАУЧЕЙ - используем auto_detect_parser_for_launches
+    # =========================================================================
+    if category in ['launchpad', 'launchpool']:
+        # Пробуем автоопределение парсера
+        parser_id, parser_name, parser_emoji = auto_detect_parser_for_launches(url, category)
+        
+        if parser_id:
+            # Парсер распознан - сохраняем и переходим к интервалу
+            await state.update_data(selected_parser=parser_id)
+            
+            category_display = "Лаунчпад" if category == "launchpad" else "Лаунчпул"
+            
+            builder = InlineKeyboardBuilder()
+            presets = [
+                ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+                ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+                ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+            ]
+            
+            for text, seconds in presets:
+                builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+            builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_launches"))
+            builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+            builder.adjust(3, 3, 3, 2)
+            
+            await message.answer(
+                f"✅ URL сохранён\n"
+                f"🤖 Парсер определён автоматически: <b>{parser_emoji} {parser_name}</b>\n\n"
+                f"⏰ <b>Последний шаг:</b> Выберите интервал проверки\n\n"
+                f"<b>Имя:</b> {custom_name}\n"
+                f"<b>Категория:</b> {category_display}\n"
+                f"<b>Парсер:</b> {parser_emoji} {parser_name}\n\n"
+                f"Как часто проверять на новые проекты?",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await state.set_state(AddLinkStates.waiting_for_interval)
+        else:
+            # Парсер не распознан - показываем выбор
+            category_display = "Лаунчпад" if category == "launchpad" else "Лаунчпул"
+            
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="🤖 Автоматический выбор", callback_data="launches_parser_auto"))
+            
+            if category == 'launchpool':
+                builder.add(InlineKeyboardButton(text="🌊 Bybit Launchpool", callback_data="launches_parser_bybit_launchpool"))
+                builder.add(InlineKeyboardButton(text="🌊 MEXC Launchpool", callback_data="launches_parser_mexc_launchpool"))
+                builder.add(InlineKeyboardButton(text="🌊 Gate.io Launchpool", callback_data="launches_parser_gate_launchpool"))
+                builder.add(InlineKeyboardButton(text="🌊 BingX Launchpool", callback_data="launches_parser_bingx_launchpool"))
+                builder.add(InlineKeyboardButton(text="🌊 Bitget Launchpool", callback_data="launches_parser_bitget_launchpool"))
+            elif category == 'launchpad':
+                builder.add(InlineKeyboardButton(text="🚀 Gate.io Launchpad", callback_data="launches_parser_gate_launchpad"))
+            
+            builder.add(InlineKeyboardButton(text="🔧 WEEX Parser", callback_data="launches_parser_weex"))
+            builder.add(InlineKeyboardButton(text="🚀 OKX Boost", callback_data="launches_parser_okx_boost"))
+            builder.add(InlineKeyboardButton(text="🌐 Универсальный", callback_data="launches_parser_universal"))
+            builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_launches"))
+            builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+            builder.adjust(1)
+            
+            await message.answer(
+                f"✅ URL сохранён\n"
+                f"⚠️ Парсер не определён автоматически\n\n"
+                f"🤖 <b>Шаг 3/3:</b> Выберите парсер вручную\n\n"
+                f"<b>Имя:</b> {custom_name}\n"
+                f"<b>Категория:</b> {category_display}\n"
+                f"<b>URL:</b> <code>{url[:50]}...</code>",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await state.set_state(AddLinkStates.waiting_for_parser_selection)
+        return
+    
+    # =========================================================================
+    # ДЛЯ АИРДРОПА - используем auto_detect_parser_for_airdrop
+    # =========================================================================
+    if category == 'airdrop':
+        # Пробуем автоопределение парсера
+        parser_id, parser_name, parser_emoji = auto_detect_parser_for_airdrop(url)
+        
+        if parser_id:
+            # Парсер распознан - сохраняем и переходим к интервалу
+            await state.update_data(selected_parser=parser_id)
+            
+            builder = InlineKeyboardBuilder()
+            presets = [
+                ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+                ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+                ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+            ]
+            
+            for text, seconds in presets:
+                builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+            builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_airdrop"))
+            builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+            builder.adjust(3, 3, 3, 2)
+            
+            await message.answer(
+                f"✅ URL сохранён\n"
+                f"🤖 Парсер определён автоматически: <b>{parser_emoji} {parser_name}</b>\n\n"
+                f"⏰ <b>Последний шаг:</b> Выберите интервал проверки\n\n"
+                f"<b>Имя:</b> {custom_name}\n"
+                f"<b>Категория:</b> Аирдроп\n"
+                f"<b>Парсер:</b> {parser_emoji} {parser_name}\n\n"
+                f"Как часто проверять на новые аирдропы?",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await state.set_state(AddLinkStates.waiting_for_interval)
+        else:
+            # Парсер не распознан - показываем выбор
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="🤖 Автоматический выбор", callback_data="airdrop_parser_auto"))
+            builder.add(InlineKeyboardButton(text="🔧 WEEX Parser", callback_data="airdrop_parser_weex"))
+            builder.add(InlineKeyboardButton(text="🚀 OKX Boost", callback_data="airdrop_parser_okx_boost"))
+            builder.add(InlineKeyboardButton(text="🌐 Универсальный", callback_data="airdrop_parser_universal"))
+            builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_airdrop"))
+            builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+            builder.adjust(1)
+            
+            await message.answer(
+                f"✅ URL сохранён\n"
+                f"⚠️ Парсер не определён автоматически\n\n"
+                f"🤖 <b>Шаг 4/4:</b> Выберите парсер вручную\n\n"
+                f"<b>Имя:</b> {custom_name}\n"
+                f"<b>Категория:</b> Аирдроп\n"
+                f"<b>URL:</b> <code>{url[:50]}...</code>",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await state.set_state(AddLinkStates.waiting_for_parser_selection)
+        return
+
+
+@router.callback_query(AddLinkStates.waiting_for_parser_selection, F.data.startswith("airdrop_parser_"))
+async def process_airdrop_parser_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора парсера для аирдропа"""
+    parser_id = callback.data.replace("airdrop_parser_", "")
+    
+    # Сохраняем парсер
+    await state.update_data(selected_parser=parser_id if parser_id != 'auto' else 'auto')
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    
+    # Получаем информацию о парсере
+    parser_info = PARSERS_CONFIG.get(parser_id, {})
+    parser_emoji = parser_info.get('emoji', '🤖')
+    parser_name = parser_info.get('name', 'Автоматический')
+    
+    # Показываем выбор интервала
+    builder = InlineKeyboardBuilder()
+    presets = [
+        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+    ]
+    
+    for text, seconds in presets:
+        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_parser_airdrop"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(3, 3, 3, 2)
+    
+    await callback.message.edit_text(
+        f"✅ Парсер выбран: <b>{parser_emoji} {parser_name}</b>\n\n"
+        f"⏰ <b>Последний шаг:</b> Выберите интервал проверки\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Категория:</b> Аирдроп\n"
+        f"<b>Парсер:</b> {parser_emoji} {parser_name}\n\n"
+        f"Как часто проверять на новые аирдропы?",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_interval)
+    await callback.answer()
+
+
+# Кнопки "Назад" для аирдропа
+@router.callback_query(F.data == "back_to_name_airdrop")
+async def back_to_name_airdrop(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу названия для аирдропа"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_category"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"🔗 <b>Добавление новой ссылки</b>\n\n"
+        f"✅ <b>Категория:</b> Аирдроп\n\n"
+        f"🏷️ <b>Шаг 2:</b> Введите название\n\n"
+        f"Примеры:\n"
+        f"• <i>WEEX Airdrop</i>\n"
+        f"• <i>OKX Boost Events</i>\n"
+        f"• <i>Binance Megadrop</i>",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_name)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_source_airdrop")
+async def back_to_source_airdrop(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору источника для аирдропа"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📡 API", callback_data="airdrop_source_api"))
+    builder.add(InlineKeyboardButton(text="🌐 Веб-страница", callback_data="airdrop_source_web"))
+    builder.add(InlineKeyboardButton(text="📱 Telegram", callback_data="airdrop_source_telegram"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name_airdrop"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(3, 2)
+    
+    await callback.message.edit_text(
+        f"✅ Название: <b>{custom_name}</b>\n\n"
+        f"🪂 <b>Шаг 2/4:</b> Выберите источник данных\n\n"
+        f"<b>📡 API</b> - прямой endpoint (быстро, надёжно)\n"
+        f"<b>🌐 Веб-страница</b> - парсинг HTML страницы\n"
+        f"<b>📱 Telegram</b> - мониторинг канала по ключевым словам",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_parsing_type)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_url_airdrop")
+async def back_to_url_airdrop(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу URL для аирдропа"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    parsing_type = data.get('parsing_type', 'api')
+    
+    source_name = "API" if parsing_type == "api" else "веб-страницы"
+    source_emoji = "📡" if parsing_type == "api" else "🌐"
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_source_airdrop"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"✅ Источник: <b>{source_emoji} {source_name}</b>\n\n"
+        f"🔗 <b>Шаг 3/4:</b> Введите ссылку\n\n"
+        f"<b>Примеры:</b>\n"
+        f"• <code>https://www.weex.com/api/airdrop/list</code>\n"
+        f"• <code>https://www.okx.com/priapi/v1/earn/airdrop</code>\n\n"
+        f"💡 Бот попробует автоматически определить парсер.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_page_url)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_parser_airdrop")
+async def back_to_parser_airdrop(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору парсера для аирдропа"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    api_url = data.get('api_url')
+    html_url = data.get('html_url')
+    url = api_url or html_url or ''
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🤖 Автоматический выбор", callback_data="airdrop_parser_auto"))
+    builder.add(InlineKeyboardButton(text="🔧 WEEX Parser", callback_data="airdrop_parser_weex"))
+    builder.add(InlineKeyboardButton(text="🚀 OKX Boost", callback_data="airdrop_parser_okx_boost"))
+    builder.add(InlineKeyboardButton(text="🌐 Универсальный", callback_data="airdrop_parser_universal"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_airdrop"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        f"🤖 <b>Выберите парсер:</b>\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Категория:</b> Аирдроп\n"
+        f"<b>URL:</b> <code>{url[:50]}...</code>\n\n"
+        f"Выберите подходящий парсер для обработки данных:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_parser_selection)
+    await callback.answer()
+
+
+# =============================================================================
+# ОБРАБОТЧИКИ ДЛЯ АНОНСОВ - упрощённый процесс добавления
+# =============================================================================
+
+@router.callback_query(AddLinkStates.waiting_for_parsing_type, F.data.startswith("announcement_source_"))
+async def process_announcement_source_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора источника данных для анонсов"""
+    source = callback.data.replace("announcement_source_", "")
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    builder = InlineKeyboardBuilder()
+    
+    if source == 'telegram':
+        # Для Telegram - запрашиваем канал
+        await state.update_data(parsing_type='telegram')
+        
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_source_announcement"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2)
+        
+        await callback.message.edit_text(
+            f"✅ Источник: <b>📱 Telegram</b>\n\n"
+            f"📱 <b>Шаг 3/6:</b> Введите username или ссылку на канал\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• <code>@binance_announcements</code>\n"
+            f"• <code>https://t.me/binance</code>\n\n"
+            f"⚠️ Бот должен иметь доступ к каналу для мониторинга.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_telegram_channel)
+    else:
+        # Для веб-страницы - сначала запрашиваем URL
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_source_announcement"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2)
+        
+        await callback.message.edit_text(
+            f"✅ Источник: <b>🌐 Веб-страница</b>\n\n"
+            f"🔗 <b>Шаг 3/6:</b> Введите ссылку на страницу анонсов\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• <code>https://www.binance.com/en/support/announcement</code>\n"
+            f"• <code>https://www.okx.com/help/section/announcements-latest-announcements</code>\n\n"
+            f"💡 Далее вы сможете выбрать тип страницы и стратегию отслеживания.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_announcement_url)
+    
+    await callback.answer()
+
+
+@router.message(AddLinkStates.waiting_for_announcement_url)
+async def process_announcement_url_input(message: Message, state: FSMContext):
+    """Обработка ввода URL для анонсов"""
+    url = message.text.strip()
+    
+    if not url:
+        await message.answer("❌ URL не может быть пустым. Попробуйте снова:")
+        return
+    
+    if not url.startswith(('http://', 'https://')):
+        await message.answer(
+            "❌ Неверный формат URL. Ссылка должна начинаться с http:// или https://\n\n"
+            "Попробуйте снова:"
+        )
+        return
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    # Сохраняем URL
+    await state.update_data(html_url=url, page_url=url)
+    
+    # Показываем выбор типа страницы
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📄 Статическая (HTML)", callback_data="announcement_page_html"))
+    builder.add(InlineKeyboardButton(text="⚡ Динамическая (Browser)", callback_data="announcement_page_browser"))
+    builder.add(InlineKeyboardButton(text="❓ Не знаю", callback_data="announcement_page_auto"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1, 1, 1, 2)
+    
+    await message.answer(
+        f"✅ URL сохранён!\n\n"
+        f"📄 <b>Шаг 4/6:</b> Выберите тип страницы\n\n"
+        f"<b>📄 Статическая (HTML)</b>\n"
+        f"Контент загружается сразу, быстрее работает\n\n"
+        f"<b>⚡ Динамическая (Browser)</b>\n"
+        f"Контент появляется после JavaScript, надёжнее\n\n"
+        f"<b>❓ Не знаю</b>\n"
+        f"Бот попробует определить автоматически",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_announcement_page_type)
+
+
+@router.callback_query(AddLinkStates.waiting_for_announcement_page_type, F.data.startswith("announcement_page_"))
+async def process_announcement_page_type(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора типа страницы для анонсов"""
+    page_type = callback.data.replace("announcement_page_", "")
+    
+    # Маппинг на тип парсинга
+    page_type_to_parsing = {
+        'html': 'html',
+        'browser': 'browser',
+        'auto': 'combined'  # Автоматический = комбинированный
+    }
+    parsing_type = page_type_to_parsing.get(page_type, 'combined')
+    await state.update_data(parsing_type=parsing_type, selected_parser='announcement')
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    # Показываем выбор стратегии
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🔍 Любые изменения", callback_data="announcement_strategy_any_change"))
+    builder.add(InlineKeyboardButton(text="🎯 Изменения в элементе", callback_data="announcement_strategy_element_change"))
+    builder.add(InlineKeyboardButton(text="📝 Любое ключевое слово", callback_data="announcement_strategy_any_keyword"))
+    builder.add(InlineKeyboardButton(text="📚 Все ключевые слова", callback_data="announcement_strategy_all_keywords"))
+    builder.add(InlineKeyboardButton(text="⚡ Regex паттерн", callback_data="announcement_strategy_regex"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_page_type_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1, 1, 1, 1, 1, 2)
+    
+    page_type_display = {
+        'html': '📄 Статическая',
+        'browser': '⚡ Динамическая',
+        'auto': '❓ Автоопределение'
+    }.get(page_type, 'Неизвестно')
+    
+    await callback.message.edit_text(
+        f"✅ Тип страницы: <b>{page_type_display}</b>\n\n"
+        f"🎯 <b>Шаг 5/6:</b> Выберите стратегию отслеживания\n\n"
+        f"<b>🔍 Любые изменения</b> - уведомления о любых изменениях\n"
+        f"<b>🎯 Изменения в элементе</b> - отслеживание конкретного элемента\n"
+        f"<b>📝 Любое ключевое слово</b> - поиск любого из заданных слов\n"
+        f"<b>📚 Все ключевые слова</b> - все слова должны присутствовать\n"
+        f"<b>⚡ Regex</b> - поиск по регулярному выражению",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_announcement_strategy)
+    await callback.answer()
+
+
+@router.callback_query(AddLinkStates.waiting_for_announcement_strategy, F.data.startswith("announcement_strategy_"))
+async def process_announcement_strategy_new(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора стратегии для анонсов (новый flow)"""
+    strategy = callback.data.replace("announcement_strategy_", "")
+    
+    await state.update_data(announcement_strategy=strategy)
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    builder = InlineKeyboardBuilder()
+    
+    # В зависимости от стратегии запрашиваем дополнительные данные или переходим к интервалу
+    if strategy == 'any_change':
+        # Для "любые изменения" - сразу к интервалу
+        presets = [
+            ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+            ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+            ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+        ]
+        
+        for text, seconds in presets:
+            builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_strategy_announcement"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(3, 3, 3, 2)
+        
+        await callback.message.edit_text(
+            f"✅ Стратегия: <b>🔍 Любые изменения</b>\n\n"
+            f"⏰ <b>Последний шаг:</b> Выберите интервал проверки\n\n"
+            f"<b>Имя:</b> {custom_name}\n"
+            f"<b>Категория:</b> Анонсы\n"
+            f"<b>Стратегия:</b> Любые изменения\n\n"
+            f"Как часто проверять страницу?",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_interval)
+        
+    elif strategy == 'element_change':
+        # Запрашиваем CSS селектор
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_strategy_announcement"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2)
+        
+        await callback.message.edit_text(
+            f"✅ Стратегия: <b>🎯 Изменения в элементе</b>\n\n"
+            f"🎯 <b>Шаг 6/7:</b> Введите CSS селектор элемента\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• <code>.announcement-list</code>\n"
+            f"• <code>#news-container</code>\n"
+            f"• <code>div.news-item:first-child</code>\n\n"
+            f"Бот будет отслеживать изменения только в этом элементе.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_announcement_selector)
+        
+    elif strategy in ['any_keyword', 'all_keywords']:
+        # Запрашиваем ключевые слова
+        strategy_name = "Любое ключевое слово" if strategy == 'any_keyword' else "Все ключевые слова"
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_strategy_announcement"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2)
+        
+        await callback.message.edit_text(
+            f"✅ Стратегия: <b>📝 {strategy_name}</b>\n\n"
+            f"📝 <b>Шаг 6/7:</b> Введите ключевые слова\n\n"
+            f"Введите слова через запятую:\n"
+            f"<code>airdrop, launchpad, listing, token</code>\n\n"
+            f"Бот будет искать эти слова в анонсах.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_announcement_keywords)
+        
+    elif strategy == 'regex':
+        # Запрашиваем regex паттерн
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_strategy_announcement"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(2)
+        
+        await callback.message.edit_text(
+            f"✅ Стратегия: <b>⚡ Regex паттерн</b>\n\n"
+            f"⚡ <b>Шаг 6/7:</b> Введите регулярное выражение\n\n"
+            f"<b>Примеры:</b>\n"
+            f"• <code>(?i)airdrop|launchpad</code>\n"
+            f"• <code>\\b[A-Z]{{3,5}}\\b.*listing</code>\n\n"
+            f"Бот будет искать совпадения с этим паттерном.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+        await state.set_state(AddLinkStates.waiting_for_announcement_regex)
+    
+    await callback.answer()
+
+
+# Кнопки "Назад" для анонсов
+@router.callback_query(F.data == "back_to_name_announcement")
+async def back_to_name_announcement(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу названия для анонсов"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_category"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"🔗 <b>Добавление новой ссылки</b>\n\n"
+        f"✅ <b>Категория:</b> Анонсы\n\n"
+        f"🏷️ <b>Шаг 2:</b> Введите название\n\n"
+        f"Примеры:\n"
+        f"• <i>Binance Announcements</i>\n"
+        f"• <i>OKX News</i>\n"
+        f"• <i>Gate.io Updates</i>",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_name)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_source_announcement")
+async def back_to_source_announcement(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору источника для анонсов"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🌐 Веб-страница", callback_data="announcement_source_web"))
+    builder.add(InlineKeyboardButton(text="📱 Telegram", callback_data="announcement_source_telegram"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2, 2)
+    
+    await callback.message.edit_text(
+        f"✅ Название: <b>{custom_name}</b>\n\n"
+        f"📢 <b>Шаг 2/5:</b> Выберите источник данных\n\n"
+        f"<b>🌐 Веб-страница</b> - мониторинг страницы анонсов\n"
+        f"<b>📱 Telegram</b> - мониторинг канала по ключевым словам",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_parsing_type)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_url_announcement")
+async def back_to_url_announcement(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу URL для анонсов"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_source_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"✅ Источник: <b>🌐 Веб-страница</b>\n\n"
+        f"🔗 <b>Шаг 3/6:</b> Введите ссылку на страницу анонсов\n\n"
+        f"<b>Примеры:</b>\n"
+        f"• <code>https://www.binance.com/en/support/announcement</code>\n"
+        f"• <code>https://www.okx.com/help/section/announcements-latest-announcements</code>\n\n"
+        f"💡 Далее вы сможете выбрать тип страницы и стратегию отслеживания.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_announcement_url)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_page_type_announcement")
+async def back_to_page_type_announcement(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору типа страницы для анонсов"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📄 Статическая (HTML)", callback_data="announcement_page_html"))
+    builder.add(InlineKeyboardButton(text="⚡ Динамическая (Browser)", callback_data="announcement_page_browser"))
+    builder.add(InlineKeyboardButton(text="❓ Не знаю", callback_data="announcement_page_auto"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_url_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1, 1, 1, 2)
+    
+    await callback.message.edit_text(
+        f"📄 <b>Шаг 4/6:</b> Выберите тип страницы\n\n"
+        f"<b>📄 Статическая (HTML)</b>\n"
+        f"Контент загружается сразу, быстрее работает\n\n"
+        f"<b>⚡ Динамическая (Browser)</b>\n"
+        f"Контент появляется после JavaScript, надёжнее\n\n"
+        f"<b>❓ Не знаю</b>\n"
+        f"Бот попробует определить автоматически",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_announcement_page_type)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_strategy_announcement")
+async def back_to_strategy_announcement(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору стратегии для анонсов"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🔍 Любые изменения", callback_data="announcement_strategy_any_change"))
+    builder.add(InlineKeyboardButton(text="🎯 Изменения в элементе", callback_data="announcement_strategy_element_change"))
+    builder.add(InlineKeyboardButton(text="📝 Любое ключевое слово", callback_data="announcement_strategy_any_keyword"))
+    builder.add(InlineKeyboardButton(text="📚 Все ключевые слова", callback_data="announcement_strategy_all_keywords"))
+    builder.add(InlineKeyboardButton(text="⚡ Regex паттерн", callback_data="announcement_strategy_regex"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_page_type_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1, 1, 1, 1, 1, 2)
+    
+    await callback.message.edit_text(
+        f"🎯 <b>Шаг 5/6:</b> Выберите стратегию отслеживания\n\n"
+        f"<b>🔍 Любые изменения</b> - уведомления о любых изменениях\n"
+        f"<b>🎯 Изменения в элементе</b> - отслеживание конкретного элемента\n"
+        f"<b>📝 Любое ключевое слово</b> - поиск любого из заданных слов\n"
+        f"<b>📚 Все ключевые слова</b> - все слова должны присутствовать\n"
+        f"<b>⚡ Regex</b> - поиск по регулярному выражению",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_announcement_strategy)
+    await callback.answer()
+
+
+# =============================================================================
+# ОБРАБОТЧИКИ ДЛЯ СТЕЙКИНГА - упрощённый процесс добавления
+# =============================================================================
+
+@router.callback_query(AddLinkStates.waiting_for_min_apr, F.data.startswith("staking_apr_"))
+async def process_staking_apr_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора минимального APR для стейкинга"""
+    apr_value = int(callback.data.replace("staking_apr_", ""))
+    
+    # Сохраняем APR (0 означает без фильтра)
+    await state.update_data(min_apr=apr_value if apr_value > 0 else None)
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    
+    # Показываем выбор типов стейкинга
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📈 Flexible (гибкий)", callback_data="staking_type_flexible"))
+    builder.add(InlineKeyboardButton(text="🔒 Fixed (фиксированный)", callback_data="staking_type_fixed"))
+    builder.add(InlineKeyboardButton(text="✅ Оба типа", callback_data="staking_type_both"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_apr_staking"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1, 1, 1, 2)
+    
+    apr_display = f"{apr_value}%" if apr_value > 0 else "0% (все)"
+    
+    await callback.message.edit_text(
+        f"✅ Минимальный APR: <b>{apr_display}</b>\n\n"
+        f"📊 <b>Шаг 4/4:</b> Выберите типы стейкинга\n\n"
+        f"<b>📈 Flexible</b> - можно вывести в любое время\n"
+        f"<b>🔒 Fixed</b> - заблокирован на период\n"
+        f"<b>✅ Оба типа</b> - показывать все (рекомендуется)",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_statuses)
+    await callback.answer()
+
+
+@router.callback_query(AddLinkStates.waiting_for_statuses, F.data.startswith("staking_type_"))
+async def process_staking_type_selection(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора типа стейкинга - переход к интервалу"""
+    staking_type = callback.data.replace("staking_type_", "")
+    
+    # Конвертируем в types_filter формат
+    types_filter = None
+    if staking_type == 'flexible':
+        types_filter = '["Flexible"]'
+    elif staking_type == 'fixed':
+        types_filter = '["Fixed"]'
+    # both = None (без фильтра)
+    
+    await state.update_data(types_filter=types_filter, staking_type_selected=staking_type)
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name')
+    min_apr = data.get('min_apr')
+    
+    # Показываем выбор интервала
+    builder = InlineKeyboardBuilder()
+    presets = [
+        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+    ]
+    
+    for text, seconds in presets:
+        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_type_staking"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(3, 3, 3, 2)
+    
+    # Формируем информацию о настройках
+    apr_display = f"{min_apr}%" if min_apr else "0% (все)"
+    type_display = {
+        'flexible': '📈 Flexible',
+        'fixed': '🔒 Fixed', 
+        'both': '✅ Оба типа'
+    }.get(staking_type, staking_type)
+    
+    await callback.message.edit_text(
+        f"✅ Тип стейкинга: <b>{type_display}</b>\n\n"
+        f"⏰ <b>Последний шаг:</b> Выберите интервал проверки\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Минимальный APR:</b> {apr_display}\n"
+        f"<b>Типы:</b> {type_display}\n\n"
+        f"Как часто проверять стейкинги?",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_interval)
+    await callback.answer()
+
+
+# Кнопки "Назад" для стейкинга
+@router.callback_query(F.data == "back_to_name_staking")
+async def back_to_name_staking(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу названия для стейкинга"""
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_category"))
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"🔗 <b>Добавление новой ссылки</b>\n\n"
+        f"✅ <b>Категория:</b> Стейкинг\n\n"
+        f"🏷️ <b>Шаг 2:</b> Введите название биржи\n\n"
+        f"Примеры:\n"
+        f"• <i>Bybit Staking</i>\n"
+        f"• <i>Kucoin Earn</i>\n"
+        f"• <i>OKX Savings</i>",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_name)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_api_url_staking")
+async def back_to_api_url_staking(callback: CallbackQuery, state: FSMContext):
+    """Возврат к вводу API URL для стейкинга"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_name_staking"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"✅ Название: <b>{custom_name}</b>\n\n"
+        f"📡 <b>Шаг 2/4:</b> Введите API ссылку для стейкинга\n\n"
+        f"<b>Примеры API ссылок:</b>\n"
+        f"• <code>https://api.bybit.com/v5/earn/product?category=FlexibleSaving</code>\n"
+        f"• <code>https://www.kucoin.com/_api/earn-saving/products</code>\n"
+        f"• <code>https://www.okx.com/priapi/v1/earn/staking/products</code>\n\n"
+        f"💡 Парсер автоматически определит биржу по URL.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_api_url)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_apr_staking")
+async def back_to_apr_staking(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору APR для стейкинга"""
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="0% (все)", callback_data="staking_apr_0"))
+    builder.add(InlineKeyboardButton(text="5%", callback_data="staking_apr_5"))
+    builder.add(InlineKeyboardButton(text="10%", callback_data="staking_apr_10"))
+    builder.add(InlineKeyboardButton(text="20%", callback_data="staking_apr_20"))
+    builder.add(InlineKeyboardButton(text="50%", callback_data="staking_apr_50"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_api_url_staking"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(3, 2, 2)
+    
+    await callback.message.edit_text(
+        f"✅ Название: <b>{custom_name}</b>\n\n"
+        f"📊 <b>Шаг 3/4:</b> Минимальный APR для уведомлений\n\n"
+        f"Бот будет уведомлять только о стейкингах с APR выше выбранного значения.\n\n"
+        f"💡 <b>0% (все)</b> - показывать все стейкинги\n"
+        f"💡 <b>5-10%</b> - только интересные предложения\n"
+        f"💡 <b>20-50%</b> - только высокодоходные",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_min_apr)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_type_staking")
+async def back_to_type_staking(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору типа стейкинга"""
+    data = await state.get_data()
+    min_apr = data.get('min_apr')
+    apr_display = f"{min_apr}%" if min_apr else "0% (все)"
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="📈 Flexible (гибкий)", callback_data="staking_type_flexible"))
+    builder.add(InlineKeyboardButton(text="🔒 Fixed (фиксированный)", callback_data="staking_type_fixed"))
+    builder.add(InlineKeyboardButton(text="✅ Оба типа", callback_data="staking_type_both"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_apr_staking"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(1, 1, 1, 2)
+    
+    await callback.message.edit_text(
+        f"✅ Минимальный APR: <b>{apr_display}</b>\n\n"
+        f"📊 <b>Шаг 4/4:</b> Выберите типы стейкинга\n\n"
+        f"<b>📈 Flexible</b> - можно вывести в любое время\n"
+        f"<b>🔒 Fixed</b> - заблокирован на период\n"
+        f"<b>✅ Оба типа</b> - показывать все (рекомендуется)",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_statuses)
+    await callback.answer()
+
 
 # ОБРАБОТЧИКИ ДЛЯ ДОБАВЛЕНИЯ HTML ССЫЛКИ
 
@@ -2016,16 +3950,18 @@ async def back_to_telegram_channel(callback: CallbackQuery, state: FSMContext):
 async def back_to_category(callback: CallbackQuery, state: FSMContext):
     """Возврат к выбору категории"""
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="📝 Общая ссылка", callback_data="add_category_general"))
+    builder.add(InlineKeyboardButton(text="⭐ Избранные", callback_data="add_category_favorite"))
+    builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="add_category_launches"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
-    builder.add(InlineKeyboardButton(text="� Анонс", callback_data="add_category_announcement"))
+    builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
     builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
-    builder.adjust(1, 2, 1, 1)
+    builder.adjust(1, 2, 2, 1)
 
     await callback.message.edit_text(
         "🔗 <b>Добавление новой ссылки</b>\n\n"
-        "🗂️ <b>Шаг 1:</b> Выберите категорию ссылки:",
+        "🗂️ <b>Шаг 1:</b> Выберите категорию ссылки:\n\n"
+        "⭐ <b>Избранные</b> - важные ссылки для быстрого доступа",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -2101,7 +4037,7 @@ async def _show_parser_selection(callback: CallbackQuery, state: FSMContext):
     """Вспомогательная функция для показа выбора парсера"""
     data = await state.get_data()
     custom_name = data.get('custom_name')
-    category = data.get('category', 'general')
+    category = data.get('category', 'launches')
     html_url = data.get('html_url')
     api_url = data.get('api_url')
     
@@ -2133,10 +4069,11 @@ async def _show_parser_selection(callback: CallbackQuery, state: FSMContext):
     
     # Формируем текст категории
     category_names = {
-        'general': 'Общая ссылка',
+        'launches': 'Лаучи',
+        'launchpad': 'Лаунчпады',
+        'launchpool': 'Лаунчпулы',
         'airdrop': 'Аирдроп',
         'staking': 'Стейкинг',
-        'launchpool': 'Лаунчпул',
         'announcement': 'Анонс'
     }
     category_display = category_names.get(category, category)
@@ -2159,7 +4096,7 @@ async def _show_parser_selection_msg(message: Message, state: FSMContext):
     """Вспомогательная функция для показа выбора парсера (через message)"""
     data = await state.get_data()
     custom_name = data.get('custom_name')
-    category = data.get('category', 'general')
+    category = data.get('category', 'launches')
     html_url = data.get('html_url')
     api_url = data.get('api_url')
     
@@ -2191,10 +4128,11 @@ async def _show_parser_selection_msg(message: Message, state: FSMContext):
     
     # Формируем текст категории
     category_names = {
-        'general': 'Общая ссылка',
+        'launches': 'Лаучи',
+        'launchpad': 'Лаунчпады',
+        'launchpool': 'Лаунчпулы',
         'airdrop': 'Аирдроп',
         'staking': 'Стейкинг',
-        'launchpool': 'Лаунчпул',
         'announcement': 'Анонс'
     }
     category_display = category_names.get(category, category)
@@ -2299,13 +4237,14 @@ async def process_special_parser_selection(callback: CallbackQuery, state: FSMCo
 async def back_to_name(callback: CallbackQuery, state: FSMContext):
     """Возврат к вводу названия биржи"""
     data = await state.get_data()
-    category = data.get('category', 'general')
+    category = data.get('category', 'launches')
 
     category_names = {
-        'general': 'Общая ссылка',
+        'launches': 'Лаучи',
+        'launchpad': 'Лаунчпады',
+        'launchpool': 'Лаунчпулы',
         'airdrop': 'Аирдроп',
         'staking': 'Стейкинг',
-        'launchpool': 'Лаунчпул',
         'announcement': 'Анонс'
     }
     category_display = category_names.get(category, category)
@@ -2569,10 +4508,11 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         parsing_type = data.get('parsing_type', 'combined')  # По умолчанию combined
 
         # НОВЫЕ ПОЛЯ ФАЗЫ 2:
-        category = data.get('category', 'general')
+        category = data.get('category', 'launches')
         page_url = data.get('page_url')
         min_apr = data.get('min_apr')
         statuses_filter = data.get('statuses_filter')
+        types_filter = data.get('types_filter')  # НОВОЕ: типы стейкинга (Flexible/Fixed)
 
         # ПОЛЯ ДЛЯ TELEGRAM:
         telegram_channel = data.get('telegram_channel')
@@ -2594,6 +4534,9 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
             special_parser = None  # Универсальный = стандартный
         else:
             special_parser = selected_parser  # staking, announcement, weex, okx_boost
+
+        # ИЗБРАННЫЕ:
+        is_favorite = data.get('is_favorite', False)
 
         def add_link_operation(session):
             # Проверяем дубликаты по URL
@@ -2619,6 +4562,7 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
                 page_url=page_url,
                 min_apr=min_apr,
                 statuses_filter=statuses_filter,
+                types_filter=types_filter,  # НОВОЕ: типы стейкинга
                 # ПОЛЯ ДЛЯ TELEGRAM:
                 telegram_channel=telegram_channel,
                 telegram_account_id=telegram_account_id,  # НОВОЕ: Назначаем аккаунт
@@ -2627,7 +4571,9 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
                 announcement_regex=announcement_regex,
                 announcement_css_selector=announcement_css_selector,
                 # СПЕЦИАЛЬНЫЙ ПАРСЕР:
-                special_parser=special_parser
+                special_parser=special_parser,
+                # ИЗБРАННЫЕ:
+                is_favorite=is_favorite
             )
             # Устанавливаем ключевые слова для Telegram
             if telegram_keywords:
@@ -2741,11 +4687,12 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
         parsing_type_display = parsing_type_names.get(parsing_type, parsing_type)
 
         category_names = {
+            'launches': 'Лаучи',
+            'launchpad': 'Лаунчпады',
+            'launchpool': 'Лаунчпулы',
             'airdrop': 'Аирдроп',
             'staking': 'Стейкинг',
-            'launchpool': 'Лаунчпул',
-            'announcement': 'Анонс',
-            'general': 'Общее'
+            'announcement': 'Анонс'
         }
         category_display = category_names.get(category, category)
 
@@ -2783,7 +4730,20 @@ async def process_interval_selection(callback: CallbackQuery, state: FSMContext)
             if subscription_info:
                 message_parts.append(f"\n{subscription_info}")
 
-        if min_apr:
+        # Специальное форматирование для стейкинга
+        if category == 'staking':
+            apr_display = f"{min_apr}%" if min_apr else "0% (все)"
+            message_parts.append(f"\n<b>📊 Минимальный APR:</b> {apr_display}\n")
+            
+            # Отображение типов стейкинга
+            staking_type = data.get('staking_type_selected', 'both')
+            type_display = {
+                'flexible': '📈 Flexible',
+                'fixed': '🔒 Fixed',
+                'both': '✅ Оба типа'
+            }.get(staking_type, '✅ Оба типа')
+            message_parts.append(f"<b>📋 Типы стейкинга:</b> {type_display}\n")
+        elif min_apr:
             message_parts.append(f"\n<b>📊 Минимальный APR:</b> {min_apr}%\n")
 
         await callback.message.edit_text(
@@ -2845,6 +4805,40 @@ async def handle_category_selection(callback: CallbackQuery):
         category = callback.data.replace("category_", "")  # 'staking', 'airdrop', 'all' и т.д.
         user_id = callback.from_user.id
 
+        # Если выбрали "Лаучи" - показываем подменю с Лаунчпады/Лаунчпулы
+        if category == "launches":
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="🚀 Лаунчпады", callback_data="category_launchpad"))
+            builder.add(InlineKeyboardButton(text="🌊 Лаунчпулы", callback_data="category_launchpool"))
+            builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_categories"))
+            builder.adjust(2, 1)
+            
+            await callback.message.edit_text(
+                "🚀 <b>Лаучи</b>\n\n"
+                "Выберите подкатегорию:",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+
+        # Если выбрали "Дропы" - показываем подменю с Аирдропы/CandyBomb
+        if category == "drops":
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="🪂 Аирдропы", callback_data="category_airdrop"))
+            builder.add(InlineKeyboardButton(text="🍬 CandyBomb", callback_data="category_candybomb"))
+            builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_categories"))
+            builder.adjust(2, 1)
+            
+            await callback.message.edit_text(
+                "🎁 <b>Дропы</b>\n\n"
+                "Выберите подкатегорию:",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+
         # Сохраняем категорию в navigation_stack
         current_nav = get_current_navigation(user_id)
         if current_nav:
@@ -2852,13 +4846,24 @@ async def handle_category_selection(callback: CallbackQuery):
 
         # Словарь названий категорий
         category_names = {
-            'airdrop': 'Аирдроп',
+            'launches': 'Лаучи',
+            'launchpad': 'Лаунчпады',
+            'launchpool': 'Лаунчпулы',
+            'drops': 'Дропы',
+            'airdrop': 'Аирдропы',
+            'candybomb': 'CandyBomb',
             'staking': 'Стейкинг',
-            'launchpool': 'Лаунчпул',
             'announcement': 'Анонс',
             'all': 'Все ссылки'
         }
         category_display = category_names.get(category, category)
+
+        # Определяем кнопку "Назад" в зависимости от категории
+        back_callback = "back_to_categories"
+        if category in ['launchpad', 'launchpool']:
+            back_callback = "category_launches"
+        elif category in ['airdrop', 'candybomb']:
+            back_callback = "category_drops"
 
         # Получаем ссылки из БД
         with get_db_session() as db:
@@ -2873,7 +4878,7 @@ async def handle_category_selection(callback: CallbackQuery):
                 await callback.message.edit_text(
                     f"📭 <b>В разделе '{category_display}' пока нет ссылок</b>",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="❌ Назад", callback_data="back_to_categories")]
+                        [InlineKeyboardButton(text="← Назад", callback_data=back_callback)]
                     ]),
                     parse_mode="HTML"
                 )
@@ -2889,7 +4894,7 @@ async def handle_category_selection(callback: CallbackQuery):
                     'is_active': link.is_active,
                     'check_interval': link.check_interval,
                     'parsing_type': link.parsing_type or 'combined',
-                    'category': link.category or 'general'
+                    'category': link.category or 'launches'
                 })())
 
             # Показываем список ссылок для управления
@@ -2972,13 +4977,8 @@ async def _show_link_management_by_id(callback: CallbackQuery, link_id: int):
         # Сохраняем link_id для использования в других обработчиках
         user_selections[user_id] = link_id
 
-        # Выбираем правильную клавиатуру в зависимости от категории
-        if link.category == 'staking':
-            keyboard = get_staking_management_keyboard()
-        elif link.category == 'airdrop':
-            keyboard = get_airdrop_management_keyboard()
-        else:
-            keyboard = get_management_keyboard(link=link)  # Передаем link для условной кнопки
+        # Используем унифицированную клавиатуру для всех категорий
+        keyboard = get_unified_link_management_keyboard(link)
 
         # Информация о ссылке
         status_text = "✅ Активна" if link.is_active else "❌ Остановлена"
@@ -2989,8 +4989,31 @@ async def _show_link_management_by_id(callback: CallbackQuery, link_id: int):
             'combined': 'Комбинированный',
             'telegram': 'Telegram'
         }.get(link.parsing_type, 'Комбинированный')
+        
+        # Категория с иконкой
+        category_icons = {
+            'launches': '🚀',
+            'launchpad': '🚀',
+            'launchpool': '🌊',
+            'drops': '🎁',
+            'airdrop': '🪂',
+            'candybomb': '🍬',
+            'staking': '💰',
+            'announcement': '📢'
+        }
+        category = link.category or 'launches'
+        category_icon = category_icons.get(category, '📁')
+        
+        # НОВОЕ: URL ссылки (укороченный если слишком длинный)
+        url_info = ""
+        display_url = link.url or link.html_url or link.api_url or ""
+        if display_url:
+            # Укорачиваем URL если он длиннее 50 символов
+            if len(display_url) > 50:
+                display_url = display_url[:47] + "..."
+            url_info = f"<b>🔗 URL:</b> <code>{display_url}</code>\n"
 
-        # НОВОЕ: Информация о Telegram аккаунте
+        # Информация о Telegram аккаунте
         telegram_info = ""
         if link.parsing_type == 'telegram':
             if link.telegram_account:
@@ -3016,16 +5039,17 @@ async def _show_link_management_by_id(callback: CallbackQuery, link_id: int):
 
                 # Канал
                 if link.telegram_channel:
-                    telegram_info += f"<b>🔗 Канал:</b> {link.telegram_channel}\n"
+                    telegram_info += f"<b>📡 Канал:</b> {link.telegram_channel}\n"
             else:
                 telegram_info = "<b>📱 Telegram аккаунт:</b> ⚠️ Не назначен\n"
 
         await callback.message.edit_text(
-            f"⚙️ <b>Управление ссылкой:</b> {link.name}\n\n"
+            f"📊 <b>Управление ссылкой:</b> {link.name}\n\n"
+            f"{url_info}"
+            f"<b>{category_icon} Категория:</b> {category}\n"
+            f"<b>⏱ Интервал:</b> {link.check_interval}с ({link.check_interval // 60} мин)\n"
+            f"<b>📡 Тип парсинга:</b> {parsing_type_text}\n"
             f"<b>Статус:</b> {status_text}\n"
-            f"<b>Категория:</b> {link.category or 'general'}\n"
-            f"<b>Интервал:</b> {link.check_interval}с ({link.check_interval // 60} мин)\n"
-            f"<b>Тип парсинга:</b> {parsing_type_text}\n"
             f"{telegram_info}\n"
             f"Выберите действие:",
             reply_markup=keyboard,
@@ -3195,8 +5219,8 @@ async def check_staking_pools(callback: CallbackQuery):
                     await callback.message.edit_text("❌ Ссылка не найдена")
                     return
 
-                if link.category != 'staking':
-                    await callback.message.edit_text("❌ Эта функция доступна только для ссылок категории 'Стейкинг'")
+                if link.category not in ['staking', 'launchpool']:
+                    await callback.message.edit_text("❌ Эта функция доступна только для стейкинг и launchpool ссылок")
                     return
 
                 # ВАЖНО: Сохраняем все нужные данные из link пока сессия открыта
@@ -3334,8 +5358,8 @@ async def view_current_stakings(callback: CallbackQuery):
             await callback.answer("❌ Ссылка не найдена", show_alert=True)
             return
 
-        if link.category != 'staking':
-            await callback.answer("❌ Эта функция доступна только для стейкинг-ссылок", show_alert=True)
+        if link.category not in ['staking', 'launchpool']:
+            await callback.answer("❌ Эта функция доступна только для стейкинг и launchpool ссылок", show_alert=True)
             return
 
         exchange_name = link.name
@@ -3357,6 +5381,18 @@ async def view_current_stakings(callback: CallbackQuery):
             logger.info(f"🔍 Автоопределение биржи: {exchange}")
 
         exchange_filter = exchange or exchange_name
+        
+        # Нормализация специальных парсеров -> базовое имя биржи для поиска в БД
+        # BitgetPoolx -> Bitget, т.к. стейкинги сохраняются с exchange='Bitget'
+        exchange_name_mapping = {
+            'bitgetpoolx': 'Bitget',
+            'bitget poolx': 'Bitget', 
+            'bitget_poolx': 'Bitget',
+        }
+        exchange_filter_lower = exchange_filter.lower().replace(' ', '')
+        if exchange_filter_lower in exchange_name_mapping:
+            exchange_filter = exchange_name_mapping[exchange_filter_lower]
+            logger.info(f"🔄 Нормализация биржи: {exchange_name} -> {exchange_filter}")
 
         # Получить стейкинги с дельтами
         from services.staking_snapshot_service import StakingSnapshotService
@@ -3642,6 +5678,17 @@ async def force_parse_stakings(callback: CallbackQuery):
 
         # Используем exchange для поиска стейкингов
         exchange_filter = exchange or exchange_name
+        
+        # Нормализация специальных парсеров -> базовое имя биржи для поиска в БД
+        exchange_name_mapping = {
+            'bitgetpoolx': 'Bitget',
+            'bitget poolx': 'Bitget', 
+            'bitget_poolx': 'Bitget',
+        }
+        exchange_filter_lower = exchange_filter.lower().replace(' ', '')
+        if exchange_filter_lower in exchange_name_mapping:
+            exchange_filter = exchange_name_mapping[exchange_filter_lower]
+            logger.info(f"🔄 Нормализация биржи: {exchange_name} -> {exchange_filter}")
 
         # Закрываем callback
         await callback.answer()
@@ -3942,8 +5989,8 @@ async def view_current_promos(callback: CallbackQuery):
             await callback.answer("❌ Ссылка не найдена", show_alert=True)
             return
 
-        if link.category != 'airdrop':
-            await callback.answer("❌ Эта функция доступна только для airdrop-ссылок", show_alert=True)
+        if link.category not in ('airdrop', 'candybomb', 'drops', 'launches', 'launchpool', 'launchpad', 'announcement'):
+            await callback.answer("❌ Эта функция доступна только для drops/launches-ссылок", show_alert=True)
             return
 
         exchange_name = link.name
@@ -4006,11 +6053,20 @@ async def view_current_promos(callback: CallbackQuery):
         
         # Определяем тип биржи
         is_okx_boost = exchange == 'okx' and 'boost' in (page_url or '').lower()
-        is_gate_candy = 'gatecandy' in exchange_name.lower().replace(' ', '').replace('.', '') or (api_url and 'candydrop' in api_url.lower())
+        is_gate_candy = 'gatecandy' in exchange_name.lower().replace(' ', '').replace('.', '') or (api_url and 'candydrop' in api_url.lower() and 'gate' in (check_url or '').lower())
+        is_bitget_candy = 'bitgetcandy' in exchange_name.lower().replace(' ', '').replace('.', '') or link.special_parser == 'bitget_candybomb' or ('bitget' in (check_url or '').lower() and 'candy-bomb' in (check_url or '').lower())
+        is_phemex_candy = 'phemexcandy' in exchange_name.lower().replace(' ', '').replace('.', '') or link.special_parser == 'phemex_candydrop' or ('phemex' in (check_url or '').lower() and 'candy-drop' in (check_url or '').lower())
         is_mexc_airdrop = (api_url and 'eftd' in api_url.lower()) or (page_url and 'token-airdrop' in page_url.lower())
         is_mexc_launchpad = (api_url and 'launchpad/list' in api_url.lower()) or (page_url and '/launchpad' in page_url.lower() and 'mexc' in exchange.lower())
         is_weex = exchange == 'weex'
         is_weex_rewards_page = is_weex and '/rewards' in (html_url or page_url or '').lower()
+        
+        # Определяем launchpool/launchpad парсеры по special_parser
+        is_launchpool = link.special_parser and (link.special_parser.endswith('_launchpool') or link.special_parser.endswith('_launchpad'))
+        is_bybit_launchpool = link.special_parser == 'bybit_launchpool' or (exchange == 'bybit' and 'launchpool' in (page_url or '').lower())
+        is_mexc_launchpool = link.special_parser == 'mexc_launchpool' or (exchange == 'mexc' and 'launchpool' in (page_url or '').lower())
+        is_gate_launchpool = link.special_parser == 'gate_launchpool' or (exchange == 'gate' and 'launchpool' in (page_url or '').lower())
+        is_gate_launchpad = link.special_parser == 'gate_launchpad' or (exchange == 'gate' and 'launchpad' in (page_url or '').lower())
 
         # Пагинация
         page = 1
@@ -4044,10 +6100,18 @@ async def view_current_promos(callback: CallbackQuery):
             'page_url': page_url,
             'is_okx_boost': is_okx_boost,
             'is_gate_candy': is_gate_candy,
+            'is_bitget_candy': is_bitget_candy,
+            'is_phemex_candy': is_phemex_candy,
             'is_mexc_airdrop': is_mexc_airdrop,
             'is_mexc_launchpad': is_mexc_launchpad,
             'is_weex': is_weex,
             'is_weex_rewards': is_weex_rewards_page,
+            'is_bybit_launchpool': is_bybit_launchpool,
+            'is_mexc_launchpool': is_mexc_launchpool,
+            'is_gate_launchpool': is_gate_launchpool,
+            'is_gate_launchpad': is_gate_launchpad,
+            'is_launchpool': is_launchpool,
+            'special_parser': link.special_parser,
             'last_checked': last_checked,
             'last_updated_str': last_updated_str,
             'participants_snapshot': {}
@@ -4060,6 +6124,22 @@ async def view_current_promos(callback: CallbackQuery):
         # Используем специальный форматтер для каждой биржи
         if is_gate_candy:
             message_text = notif_service.format_gate_candy_page(
+                promos=page_promos,
+                page=page,
+                total_pages=total_pages,
+                page_url=page_url,
+                prev_participants={}
+            )
+        elif is_bitget_candy:
+            message_text = notif_service.format_bitget_candy_page(
+                promos=page_promos,
+                page=page,
+                total_pages=total_pages,
+                page_url=page_url,
+                prev_participants={}
+            )
+        elif is_phemex_candy:
+            message_text = notif_service.format_phemex_candy_page(
                 promos=page_promos,
                 page=page,
                 total_pages=total_pages,
@@ -4080,6 +6160,27 @@ async def view_current_promos(callback: CallbackQuery):
                 total_pages=total_pages,
                 page_url=page_url
             )
+        elif is_launchpool:
+            # Для BingX и Bitget используем асинхронную версию (нужен браузер)
+            if link.special_parser in ['bingx_launchpool', 'bitget_launchpool']:
+                message_text = await notif_service.format_launchpool_page_async(
+                    promos=page_promos,
+                    page=page,
+                    total_pages=total_pages,
+                    page_url=page_url,
+                    special_parser=link.special_parser,
+                    exchange_name=exchange_name
+                )
+            else:
+                # Универсальный форматтер для других launchpool парсеров
+                message_text = notif_service.format_launchpool_page(
+                    promos=page_promos,
+                    page=page,
+                    total_pages=total_pages,
+                    page_url=page_url,
+                    special_parser=link.special_parser,
+                    exchange_name=exchange_name
+                )
         else:
             message_text = notif_service.format_current_promos_page(
                 promos=page_promos,
@@ -4136,8 +6237,8 @@ async def force_parse_promos(callback: CallbackQuery):
             await callback.answer("❌ Ссылка не найдена", show_alert=True)
             return
         
-        if link.category != 'airdrop':
-            await callback.answer("❌ Эта функция доступна только для airdrop-ссылок", show_alert=True)
+        if link.category not in ('airdrop', 'candybomb', 'drops', 'launches', 'launchpool', 'launchpad', 'announcement'):
+            await callback.answer("❌ Эта функция доступна только для drops/launches-ссылок", show_alert=True)
             return
         
         exchange_name = link.name
@@ -4177,32 +6278,95 @@ async def force_parse_promos(callback: CallbackQuery):
                 
                 await loading.update(f"🔄 <b>Парсинг {exchange_name}...</b>\n📊 Обработка данных")
                 
-                # Специальные парсеры для конкретных бирж
-                if exchange == 'weex':
-                    from parsers.weex_parser import WeexParser
+                # BINGX/BITGET/PHEMEX: используем асинхронный парсер напрямую
+                if link.special_parser in ['bingx_launchpool', 'bitget_launchpool', 'bitget_candybomb', 'phemex_candydrop']:
+                    logger.info(f"   🌊 Используем асинхронный парсер: {link.special_parser}")
                     
-                    def run_weex_parser():
-                        parser = WeexParser(html_url or api_url)
-                        return parser.get_promotions()
+                    if link.special_parser == 'bingx_launchpool':
+                        from parsers.bingx_launchpool_parser import BingxLaunchpoolParser
+                        parser = BingxLaunchpoolParser()
+                    elif link.special_parser == 'bitget_candybomb':
+                        from parsers.bitget_candybomb_parser import BitgetCandybombParser
+                        parser = BitgetCandybombParser()
+                    elif link.special_parser == 'phemex_candydrop':
+                        from parsers.phemex_candydrop_parser import PhemexCandydropParser
+                        parser = PhemexCandydropParser()
+                    else:
+                        from parsers.bitget_launchpool_parser import BitgetLaunchpoolParser
+                        parser = BitgetLaunchpoolParser()
                     
-                    loop = asyncio.get_event_loop()
-                    api_promos = await loop.run_in_executor(get_executor(), run_weex_parser)
-                    logger.info(f"   📊 Получено через WeexParser: {len(api_promos) if api_promos else 0} промоакций")
-                elif parsing_type == 'browser':
-                    from parsers.browser_parser import BrowserParser
+                    # Получаем проекты асинхронно
+                    projects = await parser.get_projects_async()
                     
-                    def run_browser_parser():
-                        parser = BrowserParser(api_url)
-                        return parser.get_promotions()
+                    # Конвертируем в формат промоакций
+                    api_promos = []
+                    for project in projects:
+                        if project.status in ['active', 'upcoming']:
+                            promo_id = f"{parser.EXCHANGE_NAME.lower()}_{parser.EXCHANGE_TYPE}_{project.id}"
+                            formatted_text = parser.format_project(project)
+                            
+                            # Формируем список типов заданий из pools
+                            task_types = []
+                            biz_labels = set()
+                            for pool in project.pools:
+                                if pool.stake_coin and pool.stake_coin not in task_types:
+                                    task_types.append(pool.stake_coin)
+                                if pool.labels:
+                                    biz_labels.update(pool.labels)
+                            
+                            # Определяем условия (SPOT/CONTRACT)
+                            conditions = list(biz_labels) if biz_labels else []
+                            
+                            # Определяем тип промо-акции
+                            is_candydrop = link.special_parser in ['bitget_candybomb', 'phemex_candydrop']
+                            
+                            api_promos.append({
+                                'promo_id': promo_id,
+                                'title': f"🌊 {project.token_name} ({project.token_symbol}) - {project.get_status_text()}",
+                                'description': formatted_text,
+                                'link': project.project_url or parser.BASE_URL,
+                                'award_token': project.token_symbol,
+                                'start_time': project.start_time,
+                                'end_time': project.end_time,
+                                'exchange': parser.EXCHANGE_NAME,
+                                'type': parser.EXCHANGE_TYPE,
+                                'status': project.status,
+                                'total_pool_tokens': project.total_pool_tokens,
+                                'total_pool_usd': project.total_pool_usd,
+                                'total_prize_pool': project.total_pool_tokens,
+                                'total_prize_pool_usd': project.total_pool_usd,
+                                'total_participants': project.total_participants,
+                                'participants_count': project.total_participants,
+                                'conditions': conditions,
+                                'task_types': task_types,
+                                'pools': [{'name': p.stake_coin, 'reward': p.pool_reward, 'labels': p.labels, 'extra': p.extra_data} for p in project.pools],
+                                'is_launchpool': not is_candydrop,
+                                'is_candybomb': link.special_parser == 'bitget_candybomb',
+                                'is_candydrop': link.special_parser == 'phemex_candydrop',
+                                'formatted_message': formatted_text,
+                            })
                     
-                    loop = asyncio.get_event_loop()
-                    api_promos = await loop.run_in_executor(get_executor(), run_browser_parser)
-                    logger.info(f"   📊 Получено через Browser: {len(api_promos)} промоакций")
+                    logger.info(f"   📊 Найдено проектов: {len(api_promos)}")
                 else:
-                    from parsers.universal_parser import UniversalParser
-                    parser = UniversalParser(api_url)
-                    api_promos = parser.get_promotions()
-                    logger.info(f"   📊 Получено через API: {len(api_promos)} промоакций")
+                    # Обычные парсеры через executor
+                    from bot.parser_service import ParserService
+                    
+                    def run_parser():
+                        parser_service = ParserService()
+                        parser = parser_service._select_parser(
+                            url=page_url or api_url or html_url,
+                            api_url=api_url,
+                            html_url=html_url,
+                            parsing_type=parsing_type,
+                            special_parser=link.special_parser,
+                            category=link.category
+                        )
+                        return parser.get_promotions()
+                    
+                    loop = asyncio.get_event_loop()
+                    api_promos = await loop.run_in_executor(get_executor(), run_parser)
+                
+                logger.info(f"   📊 Получено через API: {len(api_promos)} промоакций")
             except Exception as e:
                 logger.error(f"❌ Ошибка получения данных: {e}", exc_info=True)
                 api_promos = []
@@ -4261,7 +6425,9 @@ async def force_parse_promos(callback: CallbackQuery):
                         check_url = html_url or api_url or page_url or ''
                         is_mexc_airdrop = (api_url and 'eftd' in api_url.lower()) or (page_url and 'token-airdrop' in page_url.lower())
                         is_mexc_launchpad = (api_url and 'launchpad/list' in api_url.lower()) or (page_url and '/launchpad' in page_url.lower())
-                        is_gate_candy = 'gatecandy' in exchange_name.lower().replace(' ', '').replace('.', '') or (api_url and 'candydrop' in api_url.lower())
+                        is_gate_candy = 'gatecandy' in exchange_name.lower().replace(' ', '').replace('.', '') or (api_url and 'candydrop' in api_url.lower() and 'gate' in (check_url or '').lower())
+                        is_bitget_candy = 'bitgetcandy' in exchange_name.lower().replace(' ', '').replace('.', '') or link.special_parser == 'bitget_candybomb' or ('bitget' in (check_url or '').lower() and 'candy-bomb' in (check_url or '').lower())
+                        is_phemex_candy = 'phemexcandy' in exchange_name.lower().replace(' ', '').replace('.', '') or link.special_parser == 'phemex_candydrop' or ('phemex' in (check_url or '').lower() and 'candy-drop' in (check_url or '').lower())
                         is_weex = 'weex' in (check_url or '').lower()
                         
                         page = 1
@@ -4271,6 +6437,10 @@ async def force_parse_promos(callback: CallbackQuery):
                         
                         if is_gate_candy:
                             message_text = notif_service.format_gate_candy_page(promos=page_promos, page=page, total_pages=total_pages, page_url=page_url, prev_participants={})
+                        elif is_bitget_candy:
+                            message_text = notif_service.format_bitget_candy_page(promos=page_promos, page=page, total_pages=total_pages, page_url=page_url, prev_participants={})
+                        elif is_phemex_candy:
+                            message_text = notif_service.format_phemex_candy_page(promos=page_promos, page=page, total_pages=total_pages, page_url=page_url, prev_participants={})
                         elif is_weex:
                             message_text = notif_service.format_weex_airdrop_page(promos=page_promos, page=page, total_pages=total_pages, page_url=page_url)
                         elif is_mexc_launchpad:
@@ -4358,10 +6528,12 @@ async def navigate_promos_page(callback: CallbackQuery):
         # Проверяем тип для правильной пагинации
         is_okx_boost = state.get('is_okx_boost', False)
         is_gate_candy = state.get('is_gate_candy', False)
+        is_bitget_candy = state.get('is_bitget_candy', False)
         is_mexc_airdrop = state.get('is_mexc_airdrop', False)
         is_mexc_launchpad = state.get('is_mexc_launchpad', False)
         is_weex = state.get('is_weex', False)
         is_weex_rewards = state.get('is_weex_rewards', False)
+        is_bybit_launchpool = state.get('is_bybit_launchpool', False)
         prev_participants = state.get('participants_snapshot', {})
 
         # Пагинация - по 5 на страницу
@@ -4396,6 +6568,22 @@ async def navigate_promos_page(callback: CallbackQuery):
                 page_url=page_url,
                 prev_participants=prev_participants
             )
+        elif is_bitget_candy:
+            message_text = notif_service.format_bitget_candy_page(
+                promos=page_promos,
+                page=new_page,
+                total_pages=total_pages,
+                page_url=page_url,
+                prev_participants=prev_participants
+            )
+        elif state.get('is_phemex_candy'):
+            message_text = notif_service.format_phemex_candy_page(
+                promos=page_promos,
+                page=new_page,
+                total_pages=total_pages,
+                page_url=page_url,
+                prev_participants=prev_participants
+            )
         elif is_weex:
             message_text = notif_service.format_weex_airdrop_page(
                 promos=page_promos,
@@ -4410,6 +6598,28 @@ async def navigate_promos_page(callback: CallbackQuery):
                 total_pages=total_pages,
                 page_url=page_url
             )
+        elif state.get('is_launchpool'):
+            # Для BingX и Bitget используем асинхронную версию
+            special_parser = state.get('special_parser')
+            if special_parser in ['bingx_launchpool', 'bitget_launchpool']:
+                message_text = await notif_service.format_launchpool_page_async(
+                    promos=page_promos,
+                    page=new_page,
+                    total_pages=total_pages,
+                    page_url=page_url,
+                    special_parser=special_parser,
+                    exchange_name=exchange_name
+                )
+            else:
+                # Универсальный форматтер для других launchpool парсеров
+                message_text = notif_service.format_launchpool_page(
+                    promos=page_promos,
+                    page=new_page,
+                    total_pages=total_pages,
+                    page_url=page_url,
+                    special_parser=special_parser,
+                    exchange_name=exchange_name
+                )
         else:
             message_text = notif_service.format_current_promos_page(
                 promos=page_promos,
@@ -4928,6 +7138,207 @@ async def set_min_apr_preset(callback: CallbackQuery):
         logger.error(f"❌ Ошибка установки APR: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
 
+
+@router.callback_query(F.data == "notification_toggle_fill_changes")
+async def toggle_fill_changes(callback: CallbackQuery):
+    """Переключить уведомления о заполненности пулов"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+
+            link.notify_fill_changes = not link.notify_fill_changes
+            db.commit()
+
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+            status = "✅ Включены" if link.notify_fill_changes else "❌ Выключены"
+            await callback.answer(f"Уведомления о заполненности: {status}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка переключения заполненности: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# =============================================================================
+# НАСТРОЙКИ LAUNCHPOOL УВЕДОМЛЕНИЙ
+# =============================================================================
+
+@router.callback_query(F.data == "notification_toggle_period_changes")
+async def toggle_period_changes(callback: CallbackQuery):
+    """Переключить уведомления об изменении периода лаунчпула"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            link.notify_period_changes = not getattr(link, 'notify_period_changes', True)
+            db.commit()
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+            await callback.message.edit_text(message, parse_mode="HTML", reply_markup=keyboard)
+            status = "✅ Включены" if link.notify_period_changes else "❌ Выключены"
+            await callback.answer(f"Уведомления об изменении периода: {status}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка переключения уведомлений периода: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "notification_toggle_reward_pool_changes")
+async def toggle_reward_pool_changes(callback: CallbackQuery):
+    """Переключить уведомления об изменении общего пула наград лаунчпула"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            link.notify_reward_pool_changes = not getattr(link, 'notify_reward_pool_changes', True)
+            db.commit()
+            message = format_notification_settings_message(link)
+            keyboard = get_notification_settings_keyboard()
+            await callback.message.edit_text(message, parse_mode="HTML", reply_markup=keyboard)
+            status = "✅ Включены" if link.notify_reward_pool_changes else "❌ Выключены"
+            await callback.answer(f"Уведомления об изменении пула наград: {status}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка переключения уведомлений пула наград: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "notification_other_settings")
+async def show_other_settings(callback: CallbackQuery):
+    """Показать остальные настройки launchpool уведомлений"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            # Используем функцию для создания клавиатуры
+            keyboard = get_other_notification_settings_keyboard(link)
+        
+        await callback.message.edit_text(
+            "⚙️ <b>Другие настройки уведомлений</b>\n\n"
+            "Выберите опцию для переключения:",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка показа других настроек: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# =============================================================================
+# ПОДМЕНЮ НАСТРОЕК ССЫЛКИ (НОВЫЙ РЕФАКТОРИНГ)
+# =============================================================================
+
+@router.callback_query(F.data == "manage_settings_submenu")
+async def manage_settings_submenu(callback: CallbackQuery):
+    """Показывает подменю настроек для текущей ссылки"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            
+            if not link:
+                await callback.message.edit_text("❌ Ссылка не найдена")
+                await callback.answer()
+                return
+            
+            # Информация о ссылке
+            parsing_type_text = {
+                'api': 'API',
+                'html': 'HTML',
+                'browser': 'Browser',
+                'combined': 'Комбинированный',
+                'telegram': 'Telegram'
+            }.get(link.parsing_type, 'Комбинированный')
+            
+            # Клавиатура подменю настроек
+            keyboard = get_link_settings_submenu_keyboard(link)
+            
+            await callback.message.edit_text(
+                f"⚙️ <b>Настройки ссылки:</b> {link.name}\n\n"
+                f"<b>⏱ Интервал:</b> {link.check_interval}с ({link.check_interval // 60} мин)\n"
+                f"<b>📡 Тип парсинга:</b> {parsing_type_text}\n\n"
+                f"Выберите что настроить:",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка при открытии настроек: {e}", exc_info=True)
+        await callback.message.edit_text("❌ Ошибка при открытии настроек")
+        await callback.answer()
+
+
+@router.callback_query(F.data == "manage_change_category")
+async def manage_change_category(callback: CallbackQuery):
+    """Быстрая смена категории из главного меню управления"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        # Перенаправляем на существующий обработчик редактирования категории
+        from unittest.mock import Mock
+        edit_callback = Mock()
+        edit_callback.data = f"edit_category_{link_id}"
+        edit_callback.message = callback.message
+        edit_callback.answer = callback.answer
+        edit_callback.from_user = callback.from_user
+        
+        await edit_category(edit_callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при смене категории: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
 @router.callback_query(F.data == "manage_delete")
 async def manage_delete(callback: CallbackQuery):
     try:
@@ -5266,10 +7677,19 @@ async def manage_rename(callback: CallbackQuery, state: FSMContext):
                 if link:
                     # СРАЗУ запрашиваем новое имя
                     await state.update_data(link_id=link_id, current_name=link.name)
+                    
+                    # Клавиатура с кнопкой отмены
+                    cancel_kb = InlineKeyboardBuilder()
+                    cancel_kb.add(InlineKeyboardButton(
+                        text="❌ Отмена", 
+                        callback_data=f"cancel_rename_{link_id}"
+                    ))
+                    
                     await callback.message.edit_text(
                         f"✏️ <b>Переименование ссылки</b>\n\n"
                         f"<b>Текущее имя:</b> {link.name}\n\n"
                         f"Введите новое имя для ссылки:",
+                        reply_markup=cancel_kb.as_markup(),
                         parse_mode="HTML"
                     )
                     await state.set_state(RenameLinkStates.waiting_for_new_name)
@@ -5318,10 +7738,19 @@ async def process_rename_selection(callback: CallbackQuery, state: FSMContext):
                 return
 
             await state.update_data(link_id=link_id, current_name=link.name)
+            
+            # Клавиатура с кнопкой отмены
+            cancel_kb = InlineKeyboardBuilder()
+            cancel_kb.add(InlineKeyboardButton(
+                text="❌ Отмена", 
+                callback_data=f"cancel_rename_{link_id}"
+            ))
+            
             await callback.message.edit_text(
                 f"✏️ <b>Переименование ссылки</b>\n\n"
                 f"<b>Текущее имя:</b> {link.name}\n\n"
                 f"Введите новое имя для ссылки:",
+                reply_markup=cancel_kb.as_markup(),
                 parse_mode="HTML"
             )
             await state.set_state(RenameLinkStates.waiting_for_new_name)
@@ -5332,6 +7761,24 @@ async def process_rename_selection(callback: CallbackQuery, state: FSMContext):
         logger.error(f"❌ Ошибка при выборе ссылки для переименования: {e}")
         await callback.message.edit_text("❌ Ошибка при выборе ссылки")
         await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cancel_rename_"))
+async def cancel_rename(callback: CallbackQuery, state: FSMContext):
+    """Отмена переименования ссылки"""
+    try:
+        link_id = int(callback.data.split("_")[2])
+        
+        # Очищаем состояние
+        await state.clear()
+        
+        # Возвращаемся к управлению ссылкой
+        await _show_link_management_by_id(callback, link_id)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отмене переименования: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
 
 @router.message(RenameLinkStates.waiting_for_new_name)
 async def process_new_name_input(message: Message, state: FSMContext):
@@ -5361,38 +7808,51 @@ async def process_new_name_input(message: Message, state: FSMContext):
 
         await state.clear()
 
-        # Показываем обновленный список ссылок для продолжения переименования
-        with get_db_session() as db:
-            links = db.query(ApiLink).all()
+        # Проверяем, был ли вызван из меню управления конкретной ссылкой
+        user_id = message.from_user.id
+        if user_id in user_selections:
+            # Возвращаемся к настройкам ссылки
+            keyboard = get_back_to_settings_keyboard(link_id)
+            await message.answer(
+                f"✅ <b>Ссылка переименована!</b>\n\n"
+                f"<b>Было:</b> {current_name}\n"
+                f"<b>Стало:</b> {new_name}",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        else:
+            # Старое поведение - показываем список для продолжения
+            with get_db_session() as db:
+                links = db.query(ApiLink).all()
 
-            if links:
-                links_data = []
-                for link in links:
-                    links_data.append(type('Link', (), {
-                        'id': link.id,
-                        'name': link.name,
-                        'is_active': link.is_active,
-                        'check_interval': link.check_interval,
-                        'parsing_type': link.parsing_type or 'combined'
-                    })())
+                if links:
+                    links_data = []
+                    for link in links:
+                        links_data.append(type('Link', (), {
+                            'id': link.id,
+                            'name': link.name,
+                            'is_active': link.is_active,
+                            'check_interval': link.check_interval,
+                            'parsing_type': link.parsing_type or 'combined'
+                        })())
 
-                keyboard = get_links_keyboard(links_data, "rename")
-                await message.answer(
-                    f"✅ <b>Ссылка переименована!</b>\n"
-                    f"'{current_name}' → '{new_name}'\n\n"
-                    f"✏️ Выберите следующую ссылку для переименования:",
-                    reply_markup=keyboard,
-                    parse_mode="HTML"
-                )
-            else:
-                navigation_keyboard = get_cancel_keyboard_with_navigation()
-                await message.answer(
-                    f"✅ <b>Ссылка переименована!</b>\n\n"
-                    f"<b>Старое имя:</b> {current_name}\n"
-                    f"<b>Новое имя:</b> {new_name}",
-                    parse_mode="HTML",
-                    reply_markup=navigation_keyboard
-                )
+                    keyboard = get_links_keyboard(links_data, "rename")
+                    await message.answer(
+                        f"✅ <b>Ссылка переименована!</b>\n"
+                        f"'{current_name}' → '{new_name}'\n\n"
+                        f"✏️ Выберите следующую ссылку для переименования:",
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
+                    )
+                else:
+                    navigation_keyboard = get_cancel_keyboard_with_navigation()
+                    await message.answer(
+                        f"✅ <b>Ссылка переименована!</b>\n\n"
+                        f"<b>Старое имя:</b> {current_name}\n"
+                        f"<b>Новое имя:</b> {new_name}",
+                        parse_mode="HTML",
+                        reply_markup=navigation_keyboard
+                    )
 
     except Exception as e:
         logger.error(f"❌ Ошибка при переименовании ссылки: {e}")
@@ -5446,39 +7906,52 @@ async def process_interval_preset(callback: CallbackQuery):
         link_name = atomic_operation(update_interval_operation)
 
         interval_minutes = interval_seconds // 60
+        
+        # Проверяем, был ли вызван из меню управления конкретной ссылкой
+        user_id = callback.from_user.id
+        if user_id in user_selections:
+            # Возвращаемся к настройкам ссылки
+            keyboard = get_back_to_settings_keyboard(link_id)
+            await callback.message.edit_text(
+                f"✅ <b>Интервал обновлен!</b>\n\n"
+                f"<b>Ссылка:</b> {link_name}\n"
+                f"<b>Новый интервал:</b> {interval_seconds} сек ({interval_minutes} мин)",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        else:
+            # Старое поведение - показываем список для продолжения
+            with get_db_session() as db:
+                links = db.query(ApiLink).all()
 
-        # Показываем обновленный список ссылок для продолжения изменения интервалов
-        with get_db_session() as db:
-            links = db.query(ApiLink).all()
+                if links:
+                    links_data = []
+                    for link in links:
+                        links_data.append(type('Link', (), {
+                            'id': link.id,
+                            'name': link.name,
+                            'is_active': link.is_active,
+                            'check_interval': link.check_interval,
+                            'parsing_type': link.parsing_type or 'combined'
+                        })())
 
-            if links:
-                links_data = []
-                for link in links:
-                    links_data.append(type('Link', (), {
-                        'id': link.id,
-                        'name': link.name,
-                        'is_active': link.is_active,
-                        'check_interval': link.check_interval,
-                        'parsing_type': link.parsing_type or 'combined'
-                    })())
-
-                keyboard = get_links_keyboard(links_data, "interval")
-                await callback.message.edit_text(
-                    f"✅ <b>Интервал обновлен для '{link_name}'!</b>\n"
-                    f"<b>Новый интервал:</b> {interval_seconds} сек ({interval_minutes} мин)\n\n"
-                    f"⏰ Выберите следующую ссылку для изменения интервала:",
-                    reply_markup=keyboard,
-                    parse_mode="HTML"
-                )
-            else:
-                navigation_keyboard = get_cancel_keyboard_with_navigation()
-                await callback.message.edit_text(
-                    f"✅ <b>Интервал обновлен!</b>\n\n"
-                    f"<b>Ссылка:</b> {link_name}\n"
-                    f"<b>Новый интервал:</b> {interval_seconds} сек ({interval_minutes} мин)",
-                    parse_mode="HTML",
-                    reply_markup=navigation_keyboard
-                )
+                    keyboard = get_links_keyboard(links_data, "interval")
+                    await callback.message.edit_text(
+                        f"✅ <b>Интервал обновлен для '{link_name}'!</b>\n"
+                        f"<b>Новый интервал:</b> {interval_seconds} сек ({interval_minutes} мин)\n\n"
+                        f"⏰ Выберите следующую ссылку для изменения интервала:",
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
+                    )
+                else:
+                    navigation_keyboard = get_cancel_keyboard_with_navigation()
+                    await callback.message.edit_text(
+                        f"✅ <b>Интервал обновлен!</b>\n\n"
+                        f"<b>Ссылка:</b> {link_name}\n"
+                        f"<b>Новый интервал:</b> {interval_seconds} сек ({interval_minutes} мин)",
+                        parse_mode="HTML",
+                        reply_markup=navigation_keyboard
+                    )
 
         await callback.answer("✅ Интервал обновлен")
         
@@ -5566,36 +8039,14 @@ async def manage_pause(callback: CallbackQuery):
 
             link_name = atomic_operation(pause_link_operation)
 
-            # Показываем обновленный список активных ссылок для продолжения остановки
-            with get_db_session() as db:
-                active_links = db.query(ApiLink).filter(ApiLink.is_active == True).all()
-
-                if active_links:
-                    links_data = []
-                    for link in active_links:
-                        links_data.append(type('Link', (), {
-                            'id': link.id,
-                            'name': link.name,
-                            'is_active': link.is_active,
-                            'check_interval': link.check_interval,
-                            'parsing_type': link.parsing_type or 'combined'
-                        })())
-
-                    keyboard = get_toggle_parsing_keyboard(links_data, "pause")
-                    await callback.message.edit_text(
-                        f"⏸️ <b>Парсинг остановлен для '{link_name}'!</b>\n\n"
-                        f"Выберите следующую ссылку для остановки:",
-                        reply_markup=keyboard,
-                        parse_mode="HTML"
-                    )
-                else:
-                    navigation_keyboard = get_cancel_keyboard_with_navigation()
-                    await callback.message.edit_text(
-                        f"⏸️ <b>Парсинг остановлен для '{link_name}'!</b>\n\n"
-                        f"Все ссылки остановлены.",
-                        parse_mode="HTML",
-                        reply_markup=navigation_keyboard
-                    )
+            # Возвращаемся к управлению ссылкой с обновленной клавиатурой
+            keyboard = get_back_to_link_keyboard(link_id)
+            await callback.message.edit_text(
+                f"⏸️ <b>Парсинг остановлен!</b>\n\n"
+                f"<b>Ссылка:</b> {link_name}",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
 
             await callback.answer("⏸️ Парсинг остановлен")
             return
@@ -5647,38 +8098,16 @@ async def manage_resume(callback: CallbackQuery):
 
             link_name = atomic_operation(resume_link_operation)
 
-            # Показываем обновленный список неактивных ссылок для продолжения возобновления
-            with get_db_session() as db:
-                inactive_links = db.query(ApiLink).filter(ApiLink.is_active == False).all()
+            # Возвращаемся к управлению ссылкой с обновленной клавиатурой
+            keyboard = get_back_to_link_keyboard(link_id)
+            await callback.message.edit_text(
+                f"▶️ <b>Парсинг включен!</b>\n\n"
+                f"<b>Ссылка:</b> {link_name}",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
 
-                if inactive_links:
-                    links_data = []
-                    for link in inactive_links:
-                        links_data.append(type('Link', (), {
-                            'id': link.id,
-                            'name': link.name,
-                            'is_active': link.is_active,
-                            'check_interval': link.check_interval,
-                            'parsing_type': link.parsing_type or 'combined'
-                        })())
-
-                    keyboard = get_toggle_parsing_keyboard(links_data, "resume")
-                    await callback.message.edit_text(
-                        f"▶️ <b>Парсинг возобновлен для '{link_name}'!</b>\n\n"
-                        f"Выберите следующую ссылку для возобновления:",
-                        reply_markup=keyboard,
-                        parse_mode="HTML"
-                    )
-                else:
-                    navigation_keyboard = get_cancel_keyboard_with_navigation()
-                    await callback.message.edit_text(
-                        f"▶️ <b>Парсинг возобновлен для '{link_name}'!</b>\n\n"
-                        f"Все ссылки активны.",
-                        parse_mode="HTML",
-                        reply_markup=navigation_keyboard
-                    )
-
-            await callback.answer("▶️ Парсинг возобновлен")
+            await callback.answer("▶️ Парсинг включен")
             return
 
         # Если link_id не выбран - показываем список (старое поведение)
@@ -5974,14 +8403,15 @@ async def show_parsing_configuration(callback: CallbackQuery):
 
         # Словарь для отображения категории
         category_names = {
+            'launches': '🚀 Лаучи',
+            'launchpad': '🚀 Лаунчпады',
+            'launchpool': '🌊 Лаунчпулы',
             'airdrop': '🪂 Аирдроп',
             'staking': '💰 Стейкинг',
-            'launchpool': '🚀 Лаунчпул',
-            'announcement': '📢 Анонс',
-            'general': '📁 Общее'
+            'announcement': '📢 Анонс'
         }
-        current_category = link_data['category'] or 'general'
-        category_display = category_names.get(current_category, '📁 Общее')
+        current_category = link_data['category'] or 'launches'
+        category_display = category_names.get(current_category, '🚀 Лаучи')
 
         message_parts = [
             f"🎯 <b>Настройка парсинга для:</b> {link_data['name']}\n\n",
@@ -6112,23 +8542,30 @@ async def edit_category(callback: CallbackQuery):
                 return
             
             link_name = link.name
-            current_category = link.category or 'general'
+            current_category = link.category or 'launches'
+            is_favorite = link.is_favorite
         
         category_names = {
-            'airdrop': '🪂 Аирдроп',
+            'launches': '🚀 Лаучи',
+            'launchpad': '🚀 Лаунчпады',
+            'launchpool': '🌊 Лаунчпулы',
+            'drops': '🎁 Дропы',
+            'airdrop': '🪂 Аирдропы',
+            'candybomb': '🍬 CandyBomb',
             'staking': '💰 Стейкинг',
-            'launchpool': '🚀 Лаунчпул',
-            'announcement': '📢 Анонс',
-            'general': '📁 Общее'
+            'announcement': '📢 Анонс'
         }
-        current_category_display = category_names.get(current_category, '📁 Общее')
+        current_category_display = category_names.get(current_category, '🚀 Лаучи')
+        favorite_status = "⭐ В избранном" if is_favorite else ""
         
         keyboard = get_category_edit_keyboard(link_id)
         await callback.message.edit_text(
             f"🗂️ <b>Изменение категории</b>\n\n"
             f"<b>Ссылка:</b> {link_name}\n"
-            f"<b>Текущая категория:</b> {current_category_display}\n\n"
-            f"Выберите новую категорию:",
+            f"<b>Текущая категория:</b> {current_category_display}\n"
+            f"{favorite_status}\n\n"
+            f"Выберите новую категорию:\n"
+            f"<i>⭐ Избранные - добавит в избранное, сохранив текущую категорию</i>",
             reply_markup=keyboard,
             parse_mode="HTML"
         )
@@ -6142,7 +8579,7 @@ async def edit_category(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("set_category_"))
 async def set_category(callback: CallbackQuery):
-    """Сохраняет выбранную категорию"""
+    """Сохраняет выбранную категорию или добавляет/убирает из избранного"""
     try:
         parts = callback.data.split("_")
         link_id = int(parts[2])
@@ -6153,31 +8590,58 @@ async def set_category(callback: CallbackQuery):
             if not link:
                 raise ValueError("Ссылка не найдена")
             
-            old_category = link.category or 'general'
-            link.category = new_category
-            return link.name, old_category
+            old_category = link.category or 'launches'
+            old_is_favorite = link.is_favorite
+            
+            # Если выбрали "favorite" - только меняем флаг, категория остаётся прежней
+            if new_category == 'favorite':
+                link.is_favorite = True
+                return link.name, old_category, old_category, old_is_favorite, True
+            else:
+                # Иначе меняем категорию и убираем из избранного
+                link.category = new_category
+                link.is_favorite = False
+                return link.name, old_category, new_category, old_is_favorite, False
         
-        link_name, old_category = atomic_operation(update_category)
+        link_name, old_category, result_category, old_is_favorite, is_now_favorite = atomic_operation(update_category)
         
         category_names = {
+            'launches': '🚀 Лаучи',
+            'launchpad': '🚀 Лаунчпады',
+            'launchpool': '🌊 Лаунчпулы',
             'airdrop': '🪂 Аирдроп',
+            'candybomb': '🍬 CandyBomb',
             'staking': '💰 Стейкинг',
-            'launchpool': '🚀 Лаунчпул',
-            'announcement': '📢 Анонс',
-            'general': '📁 Общее'
+            'announcement': '📢 Анонс'
         }
-        old_category_display = category_names.get(old_category, '📁 Общее')
-        new_category_display = category_names.get(new_category, '📁 Общее')
+        old_category_display = category_names.get(old_category, '🚀 Лаучи')
+        new_category_display = category_names.get(result_category, '🚀 Лаучи')
         
-        await callback.message.edit_text(
-            f"✅ <b>Категория успешно изменена!</b>\n\n"
-            f"<b>Ссылка:</b> {link_name}\n"
-            f"<b>Было:</b> {old_category_display}\n"
-            f"<b>Стало:</b> {new_category_display}",
-            parse_mode="HTML"
-        )
+        # Клавиатура возврата к ссылке
+        keyboard = get_back_to_link_keyboard(link_id)
         
-        await callback.answer("✅ Категория обновлена")
+        if is_now_favorite:
+            # Добавили в избранное
+            favorite_text = "⭐ <b>Добавлено в избранное!</b>\n\n" if not old_is_favorite else ""
+            await callback.message.edit_text(
+                f"✅ {favorite_text}"
+                f"<b>Ссылка:</b> {link_name}\n"
+                f"<b>Категория:</b> {new_category_display}\n"
+                f"<b>Статус:</b> ⭐ В избранном",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            await callback.answer("⭐ Добавлено в избранное")
+        else:
+            await callback.message.edit_text(
+                f"✅ <b>Категория успешно изменена!</b>\n\n"
+                f"<b>Ссылка:</b> {link_name}\n"
+                f"<b>Было:</b> {old_category_display}\n"
+                f"<b>Стало:</b> {new_category_display}",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            await callback.answer("✅ Категория обновлена")
         
     except Exception as e:
         logger.error(f"❌ Ошибка при сохранении категории: {e}")
@@ -6231,10 +8695,14 @@ async def set_parsing_type(callback: CallbackQuery, state: FSMContext):
             'browser': '🌐 Только Browser'
         }.get(parsing_type, parsing_type)
 
+        # Клавиатура возврата к настройкам
+        keyboard = get_back_to_settings_keyboard(link_id)
+        
         await callback.message.edit_text(
             f"✅ <b>Тип парсинга успешно изменён!</b>\n\n"
             f"<b>Ссылка:</b> {link_name}\n"
             f"<b>Новый тип:</b> {parsing_type_display}",
+            reply_markup=keyboard,
             parse_mode="HTML"
         )
 
@@ -8121,15 +10589,34 @@ def format_notification_settings_message(link) -> str:
     def bool_emoji(value):
         return "✅ Включено" if value else "❌ Выключено"
 
+    # Определяем категорию для правильного отображения
+    category = getattr(link, 'category', 'staking')
+    category_names = {
+        'staking': 'Стейкинг',
+        'launchpool': 'Launchpool',
+        'launchpad': 'Launchpad',
+        'launches': 'Запуски',
+        'airdrop': 'Airdrop',
+        'candybomb': 'CandyBomb',
+        'announcement': 'Анонсы'
+    }
+    category_display = category_names.get(category, category.title())
+    
+    # Получаем значения настроек launchpool
+    notify_period = getattr(link, 'notify_period_changes', True)
+    notify_reward_pool = getattr(link, 'notify_reward_pool_changes', True)
+
     message = (
         f"⚙️ <b>НАСТРОЙКИ УМНЫХ УВЕДОМЛЕНИЙ</b>\n\n"
         f"🏦 <b>Биржа:</b> {link.name}\n"
-        f"📌 <b>Категория:</b> Стейкинг\n\n"
+        f"📌 <b>Категория:</b> {category_display}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 <b>ТЕКУЩИЕ НАСТРОЙКИ:</b>\n\n"
         f"🔔 <b>Новые стейкинги:</b> {bool_emoji(link.notify_new_stakings)}\n"
         f"📈 <b>Изменения APR:</b> {bool_emoji(link.notify_apr_changes)}\n"
-        f"📊 <b>Заполненность:</b> {bool_emoji(link.notify_fill_changes)}\n\n"
+        f"📊 <b>Заполненность:</b> {bool_emoji(link.notify_fill_changes)}\n"
+        f"📅 <b>Изменения периода:</b> {bool_emoji(notify_period)}\n"
+        f"🎁 <b>Изменения пула наград:</b> {bool_emoji(notify_reward_pool)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⏱️ <b>FLEXIBLE СТЕЙКИНГИ:</b>\n"
         f"├─ <b>Время стабилизации:</b> {link.flexible_stability_hours} часов\n"
@@ -8138,7 +10625,7 @@ def format_notification_settings_message(link) -> str:
         f"├─ <b>Уведомлять сразу:</b> {bool_emoji(link.fixed_notify_immediately)}\n"
         f"└─ <b>Combined как Fixed:</b> {bool_emoji(link.notify_combined_as_fixed)}\n\n"
         f"📊 <b>ИЗМЕНЕНИЯ APR:</b>\n"
-        f"└─ <b>Минимальное изменение:</b> {link.notify_min_apr_change}%\n\n"
+        f"└─ <b>Минимальный порог:</b> {link.notify_min_apr_change}%\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💡 <i>Combined стейкинги содержат Fixed И Flexible опции.\n"
         f"При включенной настройке \"Combined как Fixed\" они уведомляют сразу.</i>\n\n"
@@ -8167,11 +10654,13 @@ async def show_top_activity_menu(callback: CallbackQuery):
     try:
         from services.top_activity_service import get_top_activity_service
         from bot.keyboards import get_top_activity_menu_keyboard
+        from aiogram.exceptions import TelegramBadRequest
         
         service = get_top_activity_service()
         stats = service.get_statistics()
         
-        now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+        # Добавляем секунды для уникальности при обновлении
+        now = datetime.utcnow().strftime("%d.%m.%Y %H:%M:%S")
         
         message = (
             f"📊 <b>ТОП АКТИВНОСТИ</b>\n"
@@ -8186,11 +10675,17 @@ async def show_top_activity_menu(callback: CallbackQuery):
             f"Выберите раздел:"
         )
         
-        await callback.message.edit_text(
-            message,
-            parse_mode="HTML",
-            reply_markup=get_top_activity_menu_keyboard()
-        )
+        try:
+            await callback.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=get_top_activity_menu_keyboard()
+            )
+        except TelegramBadRequest as e:
+            # Игнорируем ошибку "message is not modified"
+            if "message is not modified" not in str(e):
+                raise
+        
         await safe_answer_callback(callback)
         
     except Exception as e:
@@ -8592,5 +11087,6 @@ def format_top_promos_page(promos: list, page: int, total_pages: int, items_per_
     message += f"📄 {page}/{total_pages}"
     
     return message
+
 
 

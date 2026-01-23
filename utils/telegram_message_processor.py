@@ -65,7 +65,7 @@ class TelegramMessageProcessor:
                 if keyword_lower in terms:
                     return promo_type
 
-        return 'general'
+        return 'launches'
 
     @staticmethod
     def extract_requirements(text: str) -> List[str]:

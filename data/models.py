@@ -26,7 +26,7 @@ class ApiLink(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # НОВЫЕ ПОЛЯ ДЛЯ СТЕЙКИНГА:
-    category = Column(String, default='general')  # 'staking', 'launchpool', 'airdrop', 'announcement'
+    category = Column(String, default='launches')  # 'staking', 'launchpool', 'airdrop', 'announcement'
     page_url = Column(String, nullable=True)  # Ссылка на страницу акций
 
     # Фильтры для стейкинга (только для category='staking'):
@@ -51,6 +51,10 @@ class ApiLink(Base):
     notify_combined_as_fixed = Column(Boolean, default=True)  # Combined как Fixed (сразу)
     last_notification_sent = Column(DateTime, nullable=True)  # Последнее уведомление
 
+    # НАСТРОЙКИ УМНЫХ УВЕДОМЛЕНИЙ ДЛЯ LAUNCHPOOL (для category='launchpool'):
+    notify_period_changes = Column(Boolean, default=True)  # Уведомлять об изменении периода лаунчпула
+    notify_reward_pool_changes = Column(Boolean, default=True)  # Уведомлять об изменении общего пула наград
+
     # ПОЛЯ ДЛЯ УМНОГО ПАРСИНГА АНОНСОВ (для category='announcement'):
     announcement_strategy = Column(String, nullable=True)  # Стратегия парсинга: 'any_change', 'element_change', 'any_keyword', 'all_keywords', 'regex'
     announcement_keywords = Column(Text, nullable=True, default='[]')  # JSON список ключевых слов для поиска
@@ -61,6 +65,9 @@ class ApiLink(Base):
 
     # СПЕЦИАЛЬНЫЙ ПАРСЕР (переопределяет стандартную логику):
     special_parser = Column(String, nullable=True)  # 'weex', 'okx_boost', etc. - использовать специальный парсер вместо стандартного
+
+    # ИЗБРАННЫЕ:
+    is_favorite = Column(Boolean, default=False)  # Ссылка добавлена в избранное
 
     # Связи
     telegram_account = relationship("TelegramAccount", backref="assigned_links")

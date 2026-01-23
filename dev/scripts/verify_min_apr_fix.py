@@ -51,7 +51,7 @@ def verify_fix():
             'check_interval': gate_link.check_interval,
             'last_checked': gate_link.last_checked,
             'exchange': gate_link.exchange or 'Unknown',
-            'category': gate_link.category or 'general',
+            'category': gate_link.category or 'launches',
             'api_url': gate_link.api_url,
             'page_url': gate_link.page_url,
             'min_apr': gate_link.min_apr

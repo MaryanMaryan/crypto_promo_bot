@@ -44,7 +44,7 @@ class ParsingTask:
     link_id: int = field(default=0, compare=False)
     link_name: str = field(default="", compare=False)
     url: str = field(default="", compare=False)
-    category: str = field(default="general", compare=False)
+    category: str = field(default="launches", compare=False)
     parsing_type: str = field(default="combined", compare=False)
     exchange: str = field(default="", compare=False)
     api_url: Optional[str] = field(default=None, compare=False)
@@ -109,7 +109,7 @@ class ParsingQueue:
         link_id: int,
         link_name: str,
         url: str,
-        category: str = "general",
+        category: str = "launches",
         parsing_type: str = "combined",
         exchange: str = "",
         api_url: Optional[str] = None,

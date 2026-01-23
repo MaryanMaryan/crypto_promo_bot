@@ -26,4 +26,14 @@ try:
 except ImportError:
     pass
 
-__all__ = ['BaseParser', 'UniversalParser', 'UniversalFallbackParser', 'WeexParser', 'BrowserParser', 'AsyncBrowserParser']
+try:
+    from .bitget_poolx_parser import BitgetPoolxParser
+except ImportError:
+    pass
+
+try:
+    from .bitget_candybomb_parser import BitgetCandybombParser
+except ImportError:
+    pass
+
+__all__ = ['BaseParser', 'UniversalParser', 'UniversalFallbackParser', 'WeexParser', 'BrowserParser', 'AsyncBrowserParser', 'BitgetPoolxParser', 'BitgetCandybombParser']

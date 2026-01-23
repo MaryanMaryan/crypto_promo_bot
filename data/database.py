@@ -1,4 +1,5 @@
 # data/database.py
+from __future__ import annotations
 from sqlalchemy import create_engine, Index, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session, joinedload
@@ -171,7 +172,8 @@ class DatabaseMigration:
             self._migration_010_add_announcement_fields,
             self._migration_011_add_exchange_credentials,
             self._migration_012_add_combined_staking_fields,
-            self._migration_013_add_promo_raw_data
+            self._migration_013_add_promo_raw_data,
+            self._migration_014_add_is_favorite
         ])
 
     def _migration_010_add_announcement_fields(self, session):
@@ -381,7 +383,7 @@ class DatabaseMigration:
 
             # Добавление новых полей для стейкинга
             fields_to_add = {
-                'category': "TEXT DEFAULT 'general'",
+                'category': "TEXT DEFAULT 'launches'",
                 'page_url': "TEXT",
                 'min_apr': "REAL",
                 'track_fill': "INTEGER DEFAULT 0",
@@ -528,6 +530,24 @@ class DatabaseMigration:
                 
         except Exception as e:
             logging.error(f"❌ Ошибка в миграции 013: {e}")
+            raise
+
+    def _migration_014_add_is_favorite(self, session):
+        """Миграция 014: Добавление поля is_favorite для избранных ссылок"""
+        try:
+            result = session.execute(text("PRAGMA table_info(api_links)"))
+            columns = [row[1] for row in result.fetchall()]
+            
+            if 'is_favorite' not in columns:
+                session.execute(text("ALTER TABLE api_links ADD COLUMN is_favorite INTEGER DEFAULT 0"))
+                logging.info("✅ Добавлен столбец is_favorite")
+                session.commit()
+                logging.info("✅ Миграция 014: Добавлено поле is_favorite")
+            else:
+                logging.info("ℹ️ Столбец is_favorite уже существует")
+                
+        except Exception as e:
+            logging.error(f"❌ Ошибка в миграции 014: {e}")
             raise
 
     def run_migrations(self):
@@ -754,6 +774,43 @@ async def get_links_by_category_async(category: str) -> List[ApiLink]:
         category: Категория ('airdrop', 'staking', 'launchpool', 'announcement')
     """
     return await get_links_async(category=category)
+
+
+async def get_favorite_links_async() -> List[ApiLink]:
+    """
+    Асинхронно получить избранные ссылки
+    
+    Returns:
+        Список ApiLink объектов с is_favorite=True
+    """
+    from utils.cache import get_cache_manager
+    
+    cache_key = "links:favorites"
+    cache = get_cache_manager()
+    
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    
+    def _get_favorites():
+        with get_db_session() as db:
+            query = db.query(ApiLink).options(
+                joinedload(ApiLink.telegram_account)
+            ).filter(ApiLink.is_favorite == True)
+            
+            links = query.all()
+            
+            for link in links:
+                if link.telegram_account:
+                    db.expunge(link.telegram_account)
+                db.expunge(link)
+            
+            return links
+    
+    links = await run_in_db_executor(_get_favorites)
+    cache.set(cache_key, links, ttl=30)
+    
+    return links
 
 
 async def update_link_async(link_id: int, **updates) -> bool:
