@@ -7,6 +7,7 @@ import io
 import requests
 import json
 from typing import Dict
+from pathlib import Path
 
 # Настройка UTF-8 для Windows консоли
 if sys.platform == 'win32':
@@ -246,7 +247,7 @@ def main():
         print(f"{unknown_ids}\n")
 
     # Сохраняем маппинг в Python файл
-    output_file = "bybit_coin_mapping.py"
+    output_file = Path(__file__).parent.parent.parent / "utils" / "bybit_coin_mapping.py"
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write('"""\n')
         f.write('Маппинг Bybit Coin ID → Symbol\n')
@@ -266,7 +267,7 @@ def main():
     print(f"\n{'='*80}")
     print(f"📖 ПРИМЕР ИСПОЛЬЗОВАНИЯ:")
     print(f"{'='*80}")
-    print(f"from bybit_coin_mapping import BYBIT_COIN_MAPPING")
+    print(f"from utils.bybit_coin_mapping import BYBIT_COIN_MAPPING")
     print(f"")
     print(f"coin_id = 1")
     print(f"coin_name = BYBIT_COIN_MAPPING.get(coin_id, f'COIN_{{coin_id}}')")

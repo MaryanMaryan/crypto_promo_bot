@@ -3,11 +3,11 @@
 """
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import requests
 import json
-from bybit_coin_mapping import BYBIT_COIN_MAPPING
+from utils.bybit_coin_mapping import BYBIT_COIN_MAPPING
 
 API_URL = "https://api2.bybit.com/fapi/beehive/public/v1/common/product/list"
 

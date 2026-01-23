@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from utils.price_fetcher import get_price_fetcher
 from utils.exchange_auth_manager import get_exchange_auth_manager
-from bybit_coin_mapping import BYBIT_COIN_MAPPING
+from utils.bybit_coin_mapping import BYBIT_COIN_MAPPING
 
 logger = logging.getLogger(__name__)
 

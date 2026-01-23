@@ -121,9 +121,9 @@ def extract_coin_mapping(data):
 
 def update_mapping_file(new_mapping):
     """Обновляет файл bybit_coin_mapping.py"""
-    # Путь к файлу маппинга (в корне проекта)
+    # Путь к файлу маппинга (в utils/)
     project_root = Path(__file__).parent.parent.parent
-    mapping_file = project_root / "bybit_coin_mapping.py"
+    mapping_file = project_root / "utils" / "bybit_coin_mapping.py"
 
     logger.info(f"📝 Обновление файла: {mapping_file}")
 
