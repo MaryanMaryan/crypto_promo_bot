@@ -183,7 +183,7 @@ class PromoHistory(Base):
     
     id = Column(Integer, primary_key=True)
     api_link_id = Column(Integer, ForeignKey('api_links.id'))
-    promo_id = Column(String)
+    promo_id = Column(String, unique=True, index=True)  # Унікальний індекс для запобігання дублікатам
     exchange = Column(String)
     title = Column(String)
     description = Column(Text)

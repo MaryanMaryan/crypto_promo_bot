@@ -915,6 +915,18 @@ class ParserService:
                         if '_fallback_' in promo_id:
                             self.stats['fallback_accepted'] += 1
 
+                        # === ГЛОБАЛЬНА ПЕРЕВІРКА НА ДУБЛІКАТИ ===
+                        # Перевіряємо чи існує promo_id в БД (незалежно від api_link_id)
+                        existing = db.query(PromoHistory).filter(
+                            PromoHistory.promo_id == promo_id
+                        ).first()
+                        
+                        if existing:
+                            # Запис вже існує - оновлюємо raw_data та інші динамічні дані
+                            logger.debug(f"⏭️ Пропускаємо дублікат promo_id: {promo_id}")
+                            self._update_existing_promo(db, promo_id, promo)
+                            continue
+
                         history_item = PromoHistory(
                             api_link_id=link_id,
                             promo_id=promo.get('promo_id'),
