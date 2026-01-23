@@ -485,6 +485,7 @@ class LaunchpoolBaseParser(ABC):
             'start_time': project.start_time.isoformat() if project.start_time else None,
             'end_time': project.end_time.isoformat() if project.end_time else None,
             'days_left': project.days_left,
+            'hours_left': project.hours_left,  # Додано для розрахунку коли days_left = 0
             'max_apr': project.max_apr,
             'total_participants': project.total_participants,
             'project_url': project.project_url,

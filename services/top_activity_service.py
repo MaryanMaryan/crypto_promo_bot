@@ -948,7 +948,8 @@ class TopActivityService:
         """
         Розраховує заробіток з лаунчпулу.
         
-        Формула: earnings = max_stake * (apr / 100) * (days_left / 365) * token_price
+        Формула: earnings = max_stake * (apr / 100) * (time_fraction) * token_price
+        де time_fraction = days_left / 365 або hours_left / 8760 якщо days_left = 0
         """
         result = {
             'expected_reward': 0,
@@ -956,6 +957,7 @@ class TopActivityService:
             'max_apr': 0,
             'best_pool': None,
             'days_left': 0,
+            'hours_left': 0,
             'has_user_reward': False,
         }
         
@@ -966,9 +968,19 @@ class TopActivityService:
             
             pools = raw_data.get('pools', [])
             days_left = raw_data.get('days_left', 0)
+            hours_left = raw_data.get('hours_left', 0)
             token_symbol = raw_data.get('token_symbol', promo.get('award_token', ''))
             
-            if not pools or not days_left:
+            # Розраховуємо time_fraction - частку року для розрахунку APR
+            # Якщо є дні - використовуємо дні, якщо тільки години - використовуємо години
+            if days_left > 0:
+                time_fraction = days_left / 365
+            elif hours_left > 0:
+                time_fraction = hours_left / 8760  # 8760 = 365 * 24 годин на рік
+            else:
+                time_fraction = 0
+            
+            if not pools or time_fraction <= 0:
                 return result
             
             # Отримуємо ціну токена
@@ -988,9 +1000,9 @@ class TopActivityService:
                 max_stake = pool.get('max_stake', 0) or 0
                 stake_coin = pool.get('stake_coin', '')
                 
-                if apr > 0 and max_stake > 0 and days_left > 0:
-                    # Розрахунок заробітку в токенах
-                    earnings_tokens = max_stake * (apr / 100) * (days_left / 365)
+                if apr > 0 and max_stake > 0 and time_fraction > 0:
+                    # Розрахунок заробітку в токенах з використанням time_fraction
+                    earnings_tokens = max_stake * (apr / 100) * time_fraction
                     
                     # Конвертуємо в USD якщо є ціна
                     if token_price:
@@ -1004,6 +1016,7 @@ class TopActivityService:
                         result['max_apr'] = apr
                         result['best_pool'] = stake_coin
                         result['days_left'] = days_left
+                        result['hours_left'] = hours_left
                         result['expected_reward'] = earnings_usd
                         
                         if earnings_usd > 0:
@@ -1021,18 +1034,21 @@ class TopActivityService:
     def _sort_promos_by_reward_and_date(self, promos: List[Dict]) -> List[Dict]:
         """
         Сортує промо: спочатку з USD (за спаданням), потім без USD (за датою закінчення).
+        Використовуємо raw_reward (тільки USD) для коректного порівняння.
         """
         with_usd = []
         without_usd = []
         
         for p in promos:
-            if p.get('expected_reward', 0) > 0:
+            # Використовуємо raw_reward (тільки USD) для сортування
+            raw_usd = p.get('raw_reward', 0) or 0
+            if raw_usd > 0:
                 with_usd.append(p)
             else:
                 without_usd.append(p)
         
-        # Сортуємо з USD за нагородою
-        with_usd.sort(key=lambda x: x.get('expected_reward', 0), reverse=True)
+        # Сортуємо з USD за нагородою (raw_reward = тільки USD)
+        with_usd.sort(key=lambda x: x.get('raw_reward', 0) or 0, reverse=True)
         
         # Сортуємо без USD за датою закінчення
         def get_end_time_sort_key(p):

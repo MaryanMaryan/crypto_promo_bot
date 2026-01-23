@@ -624,6 +624,14 @@ class ParserService:
                 existing.bonus_usdt = self._safe_float(bonus_usdt)
                 updated = True
 
+            # === RAW_DATA ДЛЯ LAUNCHPOOL (pools, APR, заробіток) ===
+            # Оновлюємо raw_data для лаунчпулів - це динамічні дані які потрібно оновлювати
+            raw_data = promo.get('raw_data')
+            if raw_data and promo.get('is_launchpool'):
+                existing.raw_data = self._serialize_raw_data(raw_data)
+                updated = True
+                logger.debug(f"📊 Оновлено raw_data для launchpool: {promo.get('title')}")
+
             # === РАСЧЁТ ЦЕНЫ ТОКЕНА ДЛЯ MEXC AIRDROP ===
             # Если есть token_pool_currency - получаем цену токена для расчёта USD эквивалента
             if token_pool_currency and (not existing.token_price or not hasattr(existing, 'token_price')):
