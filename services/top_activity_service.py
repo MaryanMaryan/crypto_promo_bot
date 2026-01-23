@@ -775,7 +775,8 @@ class TopActivityService:
     def get_top_promos_by_category(
         self,
         category: str,
-        limit: int = 50
+        limit: int = 50,
+        min_apr: float = 0
     ) -> List[Dict]:
         """
         Отримує ТОП промоакцій конкретної категорії.
@@ -783,6 +784,7 @@ class TopActivityService:
         Args:
             category: Категорія (airdrop, candybomb, launchpad, launchpool, other)
             limit: Максимальна кількість
+            min_apr: Мінімальний APR для фільтрації (для launchpool)
             
         Returns:
             Список промоакцій з розрахунками
@@ -850,8 +852,12 @@ class TopActivityService:
                     
                     result.append(promo_dict)
                 
-                # Сортування: спочатку з USD, потім за датою
-                result = self._sort_promos_by_reward_and_date(result)
+                # Фільтрація по мінімальному APR для launchpool
+                if category == 'launchpool' and min_apr > 0:
+                    result = [p for p in result if p.get('max_apr', 0) >= min_apr]
+                
+                # Сортування по нагороді на переможця
+                result = self._sort_promos_by_reward_per_winner(result)
                 
                 return result[:limit]
                 
@@ -946,7 +952,7 @@ class TopActivityService:
     
     def _calculate_launchpool_earnings(self, promo: Dict) -> Dict:
         """
-        Розраховує заробіток з лаунчпулу.
+        Розраховує заробіток з лаунчпулу для ВСІХ пулів.
         
         Формула: earnings = max_stake * (apr / 100) * (time_fraction) * token_price
         де time_fraction = days_left / 365 або hours_left / 8760 якщо days_left = 0
@@ -959,6 +965,7 @@ class TopActivityService:
             'days_left': 0,
             'hours_left': 0,
             'has_user_reward': False,
+            'pool_earnings': [],  # Заробіток по кожному пулу
         }
         
         try:
@@ -993,43 +1000,141 @@ class TopActivityService:
                 except:
                     pass
             
-            # Знаходимо найкращий пул
+            # Розраховуємо заробіток для ВСІХ пулів
             best_earnings = 0
+            pool_earnings_list = []
+            
             for pool in pools:
                 apr = pool.get('apr', 0) or 0
                 max_stake = pool.get('max_stake', 0) or 0
                 stake_coin = pool.get('stake_coin', '')
                 
-                if apr > 0 and max_stake > 0 and time_fraction > 0:
+                if apr > 0 and time_fraction > 0:
                     # Розрахунок заробітку в токенах з використанням time_fraction
-                    earnings_tokens = max_stake * (apr / 100) * time_fraction
+                    if max_stake > 0:
+                        earnings_tokens = max_stake * (apr / 100) * time_fraction
+                    else:
+                        earnings_tokens = 0
                     
                     # Конвертуємо в USD якщо є ціна
-                    if token_price:
-                        earnings_usd = earnings_tokens * token_price
-                    else:
-                        # Якщо ціни немає, показуємо в токенах
-                        earnings_usd = 0
+                    earnings_usd = earnings_tokens * token_price if token_price and earnings_tokens > 0 else 0
                     
+                    # Формуємо дисплей заробітку
+                    if earnings_usd > 0:
+                        earnings_str = f"~${earnings_usd:,.2f}"
+                    elif earnings_tokens > 0:
+                        earnings_str = f"~{earnings_tokens:,.2f} {token_symbol}"
+                    else:
+                        earnings_str = None
+                    
+                    pool_earnings_list.append({
+                        'stake_coin': stake_coin,
+                        'apr': apr,
+                        'max_stake': max_stake,
+                        'earnings_tokens': earnings_tokens,
+                        'earnings_usd': earnings_usd,
+                        'earnings_display': earnings_str,
+                    })
+                    
+                    # Оновлюємо найкращий результат
                     if earnings_usd > best_earnings or (earnings_usd == 0 and apr > result['max_apr']):
                         best_earnings = earnings_usd
                         result['max_apr'] = apr
                         result['best_pool'] = stake_coin
-                        result['days_left'] = days_left
-                        result['hours_left'] = hours_left
                         result['expected_reward'] = earnings_usd
+                        result['has_user_reward'] = earnings_usd > 0
                         
                         if earnings_usd > 0:
                             result['earnings_display'] = f"~${earnings_usd:,.2f}"
-                            result['has_user_reward'] = True
-                        else:
+                        elif earnings_tokens > 0:
                             result['earnings_display'] = f"~{earnings_tokens:,.2f} {token_symbol}"
-                            result['has_user_reward'] = False
+            
+            result['days_left'] = days_left
+            result['hours_left'] = hours_left
+            result['pool_earnings'] = pool_earnings_list
             
         except Exception as e:
             self.logger.debug(f"⚠️ Помилка розрахунку launchpool earnings: {e}")
         
         return result
+    
+    def _sort_promos_by_reward_per_winner(self, promos: List[Dict]) -> List[Dict]:
+        """
+        Сортує промо по нагороді на переможця.
+        Якщо raw_reward = 0, розраховуємо з пулу/кількості учасників.
+        """
+        def get_reward_per_winner(p):
+            # Спочатку пробуємо raw_reward
+            raw = p.get('raw_reward', 0) or 0
+            if raw > 0:
+                return raw
+            
+            # Якщо немає - розраховуємо з пулу / учасників (як у форматері)
+            pool_usd = p.get('total_prize_pool_usd', 0) or 0
+            participants = p.get('participants_count', 0) or p.get('participants', 0) or 0
+            
+            if pool_usd > 0 and participants > 0:
+                return pool_usd / participants
+            
+            return 0
+        
+        with_reward = []
+        without_reward = []
+        
+        for p in promos:
+            reward = get_reward_per_winner(p)
+            p['_sort_reward'] = reward  # Зберігаємо для сортування
+            if reward > 0:
+                with_reward.append(p)
+            else:
+                without_reward.append(p)
+        
+        # Сортуємо по нагороді на переможця
+        with_reward.sort(key=lambda x: x.get('_sort_reward', 0), reverse=True)
+        
+        # Сортуємо без нагороди за датою закінчення
+        def get_end_time_sort_key(p):
+            end_time = p.get('end_time')
+            if end_time is None:
+                return datetime.max
+            if isinstance(end_time, datetime):
+                return end_time
+            return datetime.max
+        
+        without_reward.sort(key=get_end_time_sort_key)
+        
+        return with_reward + without_reward
+    
+    def _sort_promos_by_pool_usd(self, promos: List[Dict]) -> List[Dict]:
+        """
+        Сортує промо по загальному пулу USD (total_prize_pool_usd).
+        Для candybomb та інших категорій де важливий розмір пулу.
+        """
+        with_usd = []
+        without_usd = []
+        
+        for p in promos:
+            pool_usd = p.get('total_prize_pool_usd', 0) or 0
+            if pool_usd > 0:
+                with_usd.append(p)
+            else:
+                without_usd.append(p)
+        
+        # Сортуємо по загальному пулу USD
+        with_usd.sort(key=lambda x: x.get('total_prize_pool_usd', 0) or 0, reverse=True)
+        
+        # Сортуємо без USD за датою закінчення
+        def get_end_time_sort_key(p):
+            end_time = p.get('end_time')
+            if end_time is None:
+                return datetime.max
+            if isinstance(end_time, datetime):
+                return end_time
+            return datetime.max
+        
+        without_usd.sort(key=get_end_time_sort_key)
+        
+        return with_usd + without_usd
     
     def _sort_promos_by_reward_and_date(self, promos: List[Dict]) -> List[Dict]:
         """

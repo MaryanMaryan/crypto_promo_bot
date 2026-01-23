@@ -8,6 +8,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
+from utils.price_fetcher import get_price_fetcher
 from parsers.launchpool_base import (
     LaunchpoolBaseParser, 
     LaunchpoolProject, 
@@ -74,6 +75,7 @@ class BybitLaunchpoolParser(LaunchpoolBaseParser):
         """
         super().__init__()
         self.url = url  # Сохраняем для совместимости
+        self.price_fetcher = get_price_fetcher()
         # Улучшенные заголовки для Bybit (обход защиты)
         self.session.headers.update({
             'Accept': 'application/json, text/plain, */*',
@@ -167,6 +169,19 @@ class BybitLaunchpoolParser(LaunchpoolBaseParser):
                 pools.append(pool)
                 total_participants += pool.participants
         
+        # Получаем цену токена награды для расчёта USD
+        total_pool_tokens = self.safe_float(item.get('totalPoolAmount'))
+        total_pool_usd = 0.0
+        
+        if total_pool_tokens > 0:
+            try:
+                token_price = self.price_fetcher.get_token_price(token_symbol, preferred_exchange='bybit')
+                if token_price:
+                    total_pool_usd = total_pool_tokens * token_price
+                    self.logger.debug(f"💰 {token_symbol}: ${token_price:.6f} × {total_pool_tokens:.0f} = ${total_pool_usd:.2f}")
+            except Exception as e:
+                self.logger.debug(f"⚠️ Не удалось получить цену {token_symbol}: {e}")
+        
         # Создаём проект
         project = LaunchpoolProject(
             id=code,
@@ -176,7 +191,8 @@ class BybitLaunchpoolParser(LaunchpoolBaseParser):
             token_name=token_symbol,  # Bybit не даёт полное имя
             token_icon=item.get('returnCoinIcon', ''),
             status=status,
-            total_pool_tokens=self.safe_float(item.get('totalPoolAmount')),
+            total_pool_tokens=total_pool_tokens,
+            total_pool_usd=total_pool_usd,
             start_time=start_time,
             end_time=end_time,
             pools=pools,

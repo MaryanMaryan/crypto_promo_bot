@@ -10869,11 +10869,11 @@ async def show_category_promos(callback: CallbackQuery):
         
         # Отримуємо конфіг категорії
         CATEGORY_CONFIG = {
-            'airdrop': {'icon': '🪂', 'name': 'Аірдропи'},
-            'candybomb': {'icon': '🍬', 'name': 'Кендибомби'},
-            'launchpad': {'icon': '🚀', 'name': 'Лаунчпади'},
-            'launchpool': {'icon': '🌊', 'name': 'Лаунчпули'},
-            'other': {'icon': '🗂️', 'name': 'Інші'},
+            'airdrop': {'icon': '🪂', 'name': 'Аирдропы'},
+            'candybomb': {'icon': '🍬', 'name': 'Кендибомбы'},
+            'launchpad': {'icon': '🚀', 'name': 'Лаунчпады'},
+            'launchpool': {'icon': '🌊', 'name': 'Лаунчпулы'},
+            'other': {'icon': '🗂️', 'name': 'Другие'},
         }
         
         config = CATEGORY_CONFIG.get(category, {'icon': '📋', 'name': category.title()})
@@ -10881,12 +10881,14 @@ async def show_category_promos(callback: CallbackQuery):
         # Використовуємо LoadingContext
         async with LoadingContext(
             callback,
-            f"⏳ <b>Завантаження {config['name']}...</b>",
+            f"⏳ <b>Загрузка {config['name']}...</b>",
             delete_on_complete=True,
             edit_original=True
         ) as loading:
             service = get_top_activity_service()
-            promos = service.get_top_promos_by_category(category, limit=50)
+            # Для лаунчпулів фільтруємо по мінімальному APR 10%
+            min_apr = 10 if category == 'launchpool' else 0
+            promos = service.get_top_promos_by_category(category, limit=50, min_apr=min_apr)
         
         items_per_page = 5
         total_pages = max(1, (len(promos) + items_per_page - 1) // items_per_page)
@@ -11399,7 +11401,19 @@ def format_candybomb_page(
         reward_per_winner = None
         reward_per_winner_usd = None
         
-        if participants > 0 and total_pool:
+        # Спочатку пробуємо взяти з готових даних
+        raw_reward_usd = promo.get('raw_reward', 0) or 0
+        if raw_reward_usd > 0:
+            reward_per_winner_usd = raw_reward_usd
+            # Розраховуємо токени якщо є пул і USD
+            if total_pool and total_pool_usd > 0:
+                try:
+                    pool_value = float(str(total_pool).replace(',', ''))
+                    reward_per_winner = pool_value * (raw_reward_usd / total_pool_usd)
+                except:
+                    pass
+        # Якщо немає - розраховуємо з пулу / учасників
+        elif participants > 0 and total_pool:
             try:
                 pool_value = float(str(total_pool).replace(',', ''))
                 reward_per_winner = pool_value / participants
@@ -11594,8 +11608,9 @@ def format_launchpool_page(
         earnings_display = promo.get('earnings_display')
         expected_reward = promo.get('expected_reward', 0)
         total_participants = promo.get('participants_count', 0)
+        pool_earnings = promo.get('pool_earnings', [])  # Заробіток по кожному пулу
         
-        # Формуємо список пулів
+        # Формуємо список пулів з заробітком
         pools_str = ""
         if pools:
             pool_parts = []
@@ -11624,13 +11639,57 @@ def format_launchpool_page(
         elif max_apr:
             message += f"   📈 APR: {max_apr:.0f}%\n"
         
-        # 🎁 Пул наград
+        # 🎁 Пул наград с USD эквивалентом (берем из raw_data если нет в основных полях)
         total_pool = promo.get('total_prize_pool')
-        if total_pool:
-            message += f"   🎁 Пул наград: {total_pool} {award_token}\n"
+        total_pool_usd = promo.get('total_prize_pool_usd', 0)
         
-        # 💰 Заработок
-        if expected_reward > 0:
+        # Fallback на raw_data если основные поля пустые
+        if not total_pool and raw_data:
+            total_pool = raw_data.get('total_pool_tokens')
+        if (not total_pool_usd or total_pool_usd == 0) and raw_data:
+            total_pool_usd = raw_data.get('total_pool_usd', 0)
+        
+        # Fallback на price_fetcher если USD всё ещё нет
+        if (not total_pool_usd or total_pool_usd == 0) and total_pool and award_token:
+            try:
+                from utils.price_fetcher import get_price_fetcher
+                pf = get_price_fetcher()
+                token_price = pf.get_token_price(award_token, exchange.lower() if exchange else None)
+                if token_price:
+                    total_pool_usd = float(total_pool) * token_price
+            except:
+                pass
+        
+        if total_pool:
+            # Форматируем число
+            try:
+                pool_num = float(total_pool)
+                if pool_num >= 1_000_000:
+                    pool_display = f"{pool_num/1_000_000:.1f}M"
+                elif pool_num >= 1_000:
+                    pool_display = f"{pool_num/1_000:.1f}K"
+                else:
+                    pool_display = f"{pool_num:,.0f}"
+            except:
+                pool_display = str(total_pool)
+            
+            pool_str = f"{pool_display} {award_token}"
+            if total_pool_usd and total_pool_usd > 0:
+                pool_str += f" (~${total_pool_usd:,.2f})"
+            message += f"   🎁 Пул наград: {pool_str}\n"
+        
+        # 💰 Заработок - показуємо по кожному пулу або загальний
+        if pool_earnings:
+            # Показуємо заробіток по кожному пулу
+            earnings_parts = []
+            for pe in pool_earnings[:3]:  # Макс 3 пули
+                stake_coin = pe.get('stake_coin', '')
+                earnings_str = pe.get('earnings_display', '')
+                if stake_coin and earnings_str:
+                    earnings_parts.append(f"{stake_coin}: {earnings_str}")
+            if earnings_parts:
+                message += f"   💰 Заработок: {', '.join(earnings_parts)}\n"
+        elif expected_reward > 0:
             message += f"   💰 Заработок: {earnings_display or f'~${expected_reward:,.2f}'}\n"
         elif earnings_display:
             message += f"   💰 Заработок: {earnings_display}\n"
