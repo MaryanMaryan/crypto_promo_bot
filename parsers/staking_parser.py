@@ -59,6 +59,9 @@ class StakingParser:
         elif 'mexc.com' in url_lower:
             logger.info("🔍 Автоопределение: биржа MEXC")
             return 'mexc'
+        elif 'bitget.com' in url_lower:
+            logger.info("🔍 Автоопределение: биржа Bitget")
+            return 'bitget'
         
         # Если URL не помог, пробуем exchange_name
         if exchange_name and exchange_name.lower() not in ['none', 'unknown', '']:
@@ -76,6 +79,8 @@ class StakingParser:
                 return 'gate'
             elif 'mexc' in name_lower:
                 return 'mexc'
+            elif 'bitget' in name_lower:
+                return 'bitget'
             else:
                 return name_lower
         
@@ -126,6 +131,11 @@ class StakingParser:
             elif 'binance' in self.exchange_name:
                 # Binance использует обычный GET
                 return self._parse_binance()
+
+            elif 'bitget' in self.exchange_name:
+                # Bitget PoolX использует отдельный парсер
+                logger.info("📡 Bitget: перенаправление на BitgetPoolxParser")
+                return self._parse_bitget_poolx()
 
             else:
                 logger.warning(f"⚠️ Неизвестная биржа: {self.exchange_name}")
@@ -1855,6 +1865,109 @@ class StakingParser:
         return []
 
     # ==================== END BINANCE PARSING ====================
+    
+    # ==================== BITGET PARSING ====================
+    
+    def _parse_bitget_poolx(self) -> List[Dict[str, Any]]:
+        """
+        Парсинг Bitget PoolX через BitgetPoolxParser
+        
+        Returns:
+            Список стейкингов в унифицированном формате
+        """
+        try:
+            from parsers.bitget_poolx_parser import BitgetPoolxParser
+            import asyncio
+            
+            parser = BitgetPoolxParser(self.api_url)
+            
+            # get_promotions() может быть sync или async
+            promotions = parser.get_promotions()
+            
+            # Если вернулась корутина - запускаем
+            if asyncio.iscoroutine(promotions):
+                try:
+                    loop = asyncio.get_running_loop()
+                    # Если уже в async контексте
+                    logger.warning("⚠️ Bitget PoolX требует async контекста")
+                    return []
+                except RuntimeError:
+                    pass
+                promotions = asyncio.run(promotions)
+            
+            # Конвертируем промоакции в формат стейкингов
+            stakings = []
+            for promo in promotions:
+                raw = promo.get('raw_data', {})
+                staking = {
+                    'exchange': 'Bitget',
+                    'coin': raw.get('token_symbol', promo.get('award_token', 'Unknown')),
+                    'apr': raw.get('max_apr', 0) or 0,
+                    'term_days': raw.get('days_left', 0),
+                    'start_time': promo.get('start_time'),
+                    'end_time': promo.get('end_time'),
+                    'total_pool_tokens': raw.get('total_pool_tokens', 0),
+                    'raw_data': raw,
+                }
+                stakings.append(staking)
+            
+            logger.info(f"✅ Bitget PoolX: найдено {len(stakings)} стейкингов")
+            return stakings
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга Bitget PoolX: {e}", exc_info=True)
+            return []
+    
+    # ==================== END BITGET PARSING ====================
+    
+    def get_promotions(self) -> List[Dict[str, Any]]:
+        """
+        Метод для совместимости с ParserService.
+        Возвращает стейкинги в формате промоакций.
+        
+        Returns:
+            Список промоакций (стейкингов)
+        """
+        stakings = self.parse()
+        
+        # Конвертируем стейкинги в формат промоакций
+        promotions = []
+        for staking in stakings:
+            promo = {
+                'promo_id': f"staking_{staking.get('product_id', '')}_{staking.get('coin', '')}",
+                'title': f"💰 {staking.get('coin', 'Unknown')} Staking - APR {staking.get('apr', 0):.1f}%",
+                'description': self._format_staking_description(staking),
+                'link': staking.get('link', self.api_url),
+                'exchange': staking.get('exchange', self.exchange_name),
+                'type': 'staking',
+                'promo_type': 'staking',
+                'is_staking': True,
+                'start_time': staking.get('start_time'),
+                'end_time': staking.get('end_time'),
+                'raw_data': staking,
+            }
+            promotions.append(promo)
+        
+        logger.info(f"✅ StakingParser: конвертировано {len(promotions)} стейкингов в промоакции")
+        return promotions
+    
+    def _format_staking_description(self, staking: Dict[str, Any]) -> str:
+        """Форматирует описание стейкинга"""
+        lines = [
+            f"💰 STAKING",
+            f"",
+            f"🏦 Биржа: {staking.get('exchange', 'Unknown')}",
+            f"🪙 Монета: {staking.get('coin', 'Unknown')}",
+            f"📈 APR: {staking.get('apr', 0):.1f}%",
+        ]
+        
+        if staking.get('term_days'):
+            lines.append(f"📅 Срок: {staking.get('term_days')} дней")
+        
+        if staking.get('user_limit_usd'):
+            lines.append(f"💵 Лимит: ${staking.get('user_limit_usd'):,.0f}")
+        
+        return "\n".join(lines)
 
     def get_pool_fills(self) -> List[Dict[str, Any]]:
         """
@@ -1873,3 +1986,30 @@ class StakingParser:
 
         logger.info(f"📊 Найдено {len(pools_with_fill)} пулов с данными о заполненности")
         return pools_with_fill
+    def get_strategy_info(self) -> Dict[str, Any]:
+        """
+        Возвращает информацию о стратегии парсинга.
+        Метод для совместимости с ParserService.
+        
+        Returns:
+            Словарь с информацией о стратегии
+        """
+        return {
+            'strategy_used': f'{self.exchange_name.capitalize()}_staking_api',
+            'exchange': self.exchange_name,
+            'api_url': self.api_url,
+            'parser_type': 'StakingParser'
+        }
+    
+    def get_error_stats(self) -> Dict[str, Any]:
+        """
+        Возвращает статистику ошибок.
+        Метод для совместимости с ParserService.
+        
+        Returns:
+            Словарь со статистикой ошибок
+        """
+        return {
+            'total_errors': 0,
+            'errors': []
+        }

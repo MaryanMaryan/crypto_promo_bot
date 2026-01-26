@@ -434,6 +434,16 @@ class UniversalParser(BaseParser):
                 'publish_time': self._get_value(obj, [
                     'publishTime', 'announceTime', 'resultTime', 'drawTime'
                 ]),
+                # Новые поля для торговых условий (Bybit Token Splash Trading)
+                'min_trade_amount': self._get_value(obj, [
+                    'minTradeAmount', 'minimumTrade', 'tradeThreshold', 'minVolume'
+                ]),
+                'trade_token': self._get_value(obj, [
+                    'tradeToken', 'tradingToken', 'targetToken'
+                ]),
+                'splash_type': self._get_value(obj, [
+                    'splashType', 'tokenSplashType'
+                ]),  # trading или regular
                 'raw_data': obj  # Сохраняем исходные данные
             }
 
@@ -719,6 +729,22 @@ class UniversalParser(BaseParser):
                 if details:
                     # Перезаписываем данные из Detail API (они более точные)
                     self._extract_bybit_prizes(promo_data, details, prize_token)
+            
+            # Обновляем raw_data с обогащёнными данными для калькулятора
+            # Важно: raw_data используется в Trading промо для отображения калькулятора
+            enriched_raw_data = promo_data.get('raw_data', {})
+            if isinstance(enriched_raw_data, dict):
+                enriched_raw_data = dict(enriched_raw_data)  # Копия
+            else:
+                enriched_raw_data = {}
+            
+            # Добавляем важные поля для калькулятора и форматирования
+            for key in ['splash_type', 'total_trade_volume', 'trade_prize_pool', 
+                        'min_trade_amount', 'trade_token', 'new_user_winners_count']:
+                if key in promo_data:
+                    enriched_raw_data[key] = promo_data[key]
+            
+            promo_data['raw_data'] = enriched_raw_data
                 
         except Exception as e:
             logger.warning(f"⚠️ Ошибка обработки Bybit Token Splash: {e}")
@@ -834,6 +860,8 @@ class UniversalParser(BaseParser):
                         count = int(total / prize)
                         total_winners += count
                         rewards_info.append(('New Users', count, prize, new_user_token))
+                        # Сохраняем количество мест для новых пользователей отдельно
+                        promo_data['new_user_winners_count'] = count
                         logger.debug(f"📊 Bybit New Users: {count} мест по {prize} {new_user_token}")
                 except (ValueError, TypeError):
                     pass
@@ -860,6 +888,23 @@ class UniversalParser(BaseParser):
             trade_airdrop_top = details.get('tradeAirdropTop')
             trade_prize_token = details.get('tradePrizeToken') or prize_token
             
+            # Извлекаем общий объём торговли (для расчёта награды)
+            total_trade_value = details.get('totalTradeValue')
+            if total_trade_value:
+                try:
+                    promo_data['total_trade_volume'] = float(total_trade_value)
+                    logger.info(f"📊 Bybit: общий объём торговли = ${promo_data['total_trade_volume']:,.2f}")
+                except (ValueError, TypeError):
+                    pass
+            
+            # Извлекаем призовой пул трейдингового задания
+            if trade_prize_total:
+                try:
+                    promo_data['trade_prize_pool'] = float(str(trade_prize_total).replace(',', ''))
+                    logger.info(f"📊 Bybit: призовой пул трейдинга = {promo_data['trade_prize_pool']:,.0f} {trade_prize_token}")
+                except (ValueError, TypeError):
+                    pass
+            
             if trade_prize_total and trade_airdrop_top:
                 try:
                     total = float(str(trade_prize_total).replace(',', ''))
@@ -872,17 +917,80 @@ class UniversalParser(BaseParser):
                 except (ValueError, TypeError):
                     pass
             
+            # === ОПРЕДЕЛЕНИЕ ТИПА ТОКЕНСПЛЕША ===
+            # trading - только трейдинговое задание (нет наград для новых)
+            # regular - только для новых пользователей (нет трейдингового задания)
+            # combined - оба задания (и для новых, и трейдинговое)
+            has_new_user_rewards = new_user_total and new_user_prize and float(str(new_user_total).replace(',', '')) > 0
+            has_trade_competition = trade_prize_total and float(str(trade_prize_total).replace(',', '')) > 0
+            
+            if has_new_user_rewards and has_trade_competition:
+                promo_data['splash_type'] = 'combined'
+                logger.info(f"📊 Bybit: определён тип токенсплеша - Combined (и для новых, и трейдинговое)")
+            elif not has_new_user_rewards and has_trade_competition:
+                promo_data['splash_type'] = 'trading'
+                logger.info(f"📊 Bybit: определён тип токенсплеша - Trading (нет наград для новых пользователей)")
+            else:
+                promo_data['splash_type'] = 'regular'
+                logger.info(f"📊 Bybit: определён тип токенсплеша - Regular (только для новых пользователей)")
+            
+            # === ИЗВЛЕЧЕНИЕ ТОРГОВЫХ УСЛОВИЙ ===
+            # Для Trading Token Splash извлекаем минимальную сумму торговли
+            # Проверяем различные возможные названия полей
+            min_trade = (
+                details.get('minTradeAmount') or 
+                details.get('tradeThreshold') or
+                details.get('minTradingAmount') or
+                details.get('minTradeVolume') or
+                details.get('minVolume') or
+                details.get('tradeMinAmount') or
+                details.get('minOrderAmount')
+            )
+            
+            # Токен для торговли (обычно USDT)
+            trade_token_symbol = (
+                details.get('tradeToken') or 
+                details.get('awardToken') or 
+                details.get('tradingToken') or
+                'USDT'
+            )
+            
+            if min_trade:
+                try:
+                    min_trade_num = float(str(min_trade).replace(',', ''))
+                    promo_data['min_trade_amount'] = int(min_trade_num)
+                    promo_data['trade_token'] = trade_token_symbol
+                    logger.info(f"📊 Bybit: минимальная сумма торговли = {int(min_trade_num)} {trade_token_symbol}")
+                except (ValueError, TypeError):
+                    pass
+            else:
+                # Fallback: если не нашли в details, ищем в основном obj
+                # Для Trading Token Splash минимальная сумма обычно 500 USDT
+                if promo_data.get('splash_type') == 'trading':
+                    # Устанавливаем значение по умолчанию для Trading Token Splash
+                    promo_data['min_trade_amount'] = 500
+                    promo_data['trade_token'] = trade_token_symbol
+                    logger.debug(f"📊 Bybit: установлена стандартная минимальная сумма торговли = 500 {trade_token_symbol}")
+            
             # Устанавливаем результаты
             if total_winners > 0:
                 promo_data['winners_count'] = total_winners
                 logger.info(f"✅ Bybit (details): {total_winners} призовых мест")
             
-            # Формируем reward_per_winner - берём награду New Users (если есть)
+            # Формируем reward_per_winner - берём ТОЛЬКО награду New Users (НЕ Trade Competition!)
             if rewards_info:
-                # Приоритет: New Users, потом Old Users
-                category, count, prize, token = rewards_info[0]
-                promo_data['reward_per_winner'] = f"{int(prize):,} {token}"
-                logger.info(f"✅ Bybit (details): награда = {int(prize):,} {token} ({category})")
+                # Ищем именно New Users награду
+                new_user_reward = None
+                for category, count, prize, token in rewards_info:
+                    if category == 'New Users':
+                        new_user_reward = (category, count, prize, token)
+                        break
+                
+                # Если есть награда для новых пользователей - устанавливаем её
+                if new_user_reward:
+                    category, count, prize, token = new_user_reward
+                    promo_data['reward_per_winner'] = f"{int(prize):,} {token}"
+                    logger.info(f"✅ Bybit (details): награда для новых = {int(prize):,} {token}")
                 
                 # Если есть несколько категорий, добавляем в conditions
                 if len(rewards_info) > 1:
@@ -1379,16 +1487,18 @@ class UniversalParser(BaseParser):
                     settle_days = airdrop.get('settleDays', 0)  # Дни до выплаты
                     
                     # === ИЗВЛЕКАЕМ НАГРАДЫ ===
-                    # 1. BONUS pool (USDT) из taskVOList
-                    bonus_usdt = 0
-                    # 2. TOKEN pool из rewardPoolVOList
+                    # 1. BONUS pool (USDT) из taskVOList - это фиксированный бонус за задания
+                    bonus_usdt_from_tasks = 0
+                    # 2. USDT pool из rewardPoolVOList - это призовой пул в USDT
+                    usdt_pool = 0
+                    # 3. TOKEN pool из rewardPoolVOList - это призовой пул в токенах проекта
                     token_pool = 0
                     token_pool_currency = token  # Обычно совпадает с токеном акции
                     total_winners = 0  # Общее количество призовых мест
                     
                     eftd_vos = airdrop.get('eftdVOS', [])
                     for eftd in eftd_vos:
-                        # Извлекаем USDT бонус из tasks
+                        # Извлекаем USDT бонус из tasks (это бонус за выполнение заданий)
                         tasks = eftd.get('taskVOList', [])
                         for task in tasks:
                             task_type = task.get('firstProfitCurrencyType', '')
@@ -1397,11 +1507,12 @@ class UniversalParser(BaseParser):
                             
                             if task_type == 'BONUS' and task_currency in ('USDT', 'USDC'):
                                 try:
-                                    bonus_usdt += float(task_reward) if task_reward else 0
+                                    bonus_usdt_from_tasks += float(task_reward) if task_reward else 0
                                 except (ValueError, TypeError):
                                     pass
                         
-                        # Извлекаем токен-пул из rewardPoolVOList
+                        # Извлекаем пулы наград из rewardPoolVOList
+                        # ВАЖНО: здесь могут быть награды И в USDT, И в токенах проекта!
                         reward_pools = eftd.get('rewardPoolVOList', [])
                         for pool in reward_pools:
                             reward_type = pool.get('rewardType', '')
@@ -1414,10 +1525,18 @@ class UniversalParser(BaseParser):
                             
                             if single_amount > 0 and total_stock > 0:
                                 pool_total = single_amount * total_stock
-                                token_pool += pool_total
                                 total_winners += total_stock
-                                if currency:
-                                    token_pool_currency = currency
+                                
+                                # Разделяем USDT и токены проекта
+                                if currency in ('USDT', 'USDC'):
+                                    usdt_pool += pool_total
+                                else:
+                                    token_pool += pool_total
+                                    if currency:
+                                        token_pool_currency = currency
+                    
+                    # Общий USDT пул = бонус из заданий + призовой пул в USDT
+                    bonus_usdt = bonus_usdt_from_tasks + usdt_pool
                     
                     # Формируем данные о наградах
                     # Основной пул - токены проекта (если есть), иначе USDT бонус

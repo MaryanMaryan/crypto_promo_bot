@@ -8,7 +8,15 @@ from typing import List, Dict, Any, Optional, Tuple
 from utils.promo_formatter import format_promo_header, format_promo_header_simple, get_exchange_icon, get_category_icon
 
 # Новые универсальные форматтеры по категориям
-from utils.message_formatters import LaunchpadFormatter, LaunchpoolFormatter, format_promo_by_category, format_time_remaining
+from utils.message_formatters import (
+    LaunchpadFormatter, 
+    LaunchpoolFormatter, 
+    BybitTokenSplashFormatter,
+    AirdropFormatter,
+    format_promo_by_category, 
+    format_time_remaining,
+    format_universal_header
+)
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +212,24 @@ class NotificationService:
             promo_type = promo.get('promo_type', '').lower()
             promo_id = str(promo.get('promo_id', '')).lower()
             exchange_type = promo.get('type', '').lower()
+            exchange = promo.get('exchange', '').lower()
+            
+            # BYBIT TOKEN SPLASH - универсальный форматтер для всех типов
+            # Определяем по exchange='bybit' И по promo_id (начинается с 'bybit_' и содержит числовой код)
+            is_bybit = 'bybit' in exchange
+            is_tokensplash_id = promo_id.startswith('bybit_') and promo_id.replace('bybit_', '').replace('_', '').isdigit()
+            
+            # Также проверяем наличие характерных полей Token Splash
+            has_tokensplash_fields = (
+                promo.get('min_trade_amount') or 
+                promo.get('reward_per_winner') or 
+                promo.get('splash_type')
+            )
+            
+            if is_bybit and (is_tokensplash_id or has_tokensplash_fields):
+                # Проверяем что это НЕ launchpool
+                if 'launchpool' not in promo_type and 'launchpool' not in promo_id:
+                    return BybitTokenSplashFormatter.format(promo, is_new=True)
             
             # Launchpool - новый форматтер
             if 'launchpool' in promo_type or 'launchpool' in promo_id or exchange_type == 'launchpool':
@@ -212,6 +238,14 @@ class NotificationService:
             # Launchpad - существующий форматтер
             if 'launchpad' in promo_type or 'launchpad' in promo_id or exchange_type == 'launchpad':
                 return LaunchpadFormatter.format(promo, is_new=True)
+            
+            # OKX Boost - используем AirdropFormatter (это airdrop-like промо)
+            if 'okx_boost' in promo_type or 'okx_boost' in promo_id:
+                return AirdropFormatter.format(promo, is_new=True)
+            
+            # MEXC Airdrop - используем AirdropFormatter
+            if 'mexc_airdrop' in promo_type or 'mexc_airdrop' in promo_id:
+                return AirdropFormatter.format(promo, is_new=True)
             
             # СТАРЫЙ КОД ДЛЯ ОСТАЛЬНЫХ ТИПОВ
             # НОВЫЙ УНИВЕРСАЛЬНЫЙ ЗАГОЛОВОК
@@ -3253,19 +3287,27 @@ class NotificationService:
                         if join_num:
                             message += f"      • Участников: <b>{fmt_number(join_num)}</b>\n"
                         
-                        # === РАСЧЁТ АЛЛОКАЦИИ (компактный формат) ===
+                        # === РАСЧЁТ АЛЛОКАЦИИ И ПРОФИТА ===
                         try:
                             supply_num = float(str(supply).replace(',', ''))
                             amount_num = float(str(taking_amount).replace(',', ''))
                             price_num = float(str(taking_price).replace(',', ''))
                             max_limit = float(str(taking_max).replace(',', '')) if taking_max else 5000
+                            min_limit = float(str(taking_min).replace(',', '')) if taking_min else 100
                             
-                            if price_num > 0 and supply_num > 0 and amount_num > 0:
+                            # Рыночная цена для расчёта профита
+                            market_price = 0
+                            try:
+                                market_price = float(str(line_price).replace(',', '')) if line_price else 0
+                            except:
+                                pass
+                            
+                            if price_num > 0 and supply_num > 0:
                                 # Сколько токенов забронировано
-                                tokens_booked = amount_num / price_num
+                                tokens_booked = amount_num / price_num if amount_num > 0 else 0
                                 
                                 # Коэффициент переподписки
-                                oversubscription = tokens_booked / supply_num
+                                oversubscription = tokens_booked / supply_num if tokens_booked > 0 else 0
                                 
                                 if oversubscription > 1:
                                     # Переподписка есть - рассчитываем аллокацию
@@ -3274,23 +3316,57 @@ class NotificationService:
                                     # При максимальном вкладе
                                     max_tokens_requested = max_limit / price_num
                                     tokens_received = max_tokens_requested * (allocation_pct / 100)
-                                    usdt_equivalent = tokens_received * price_num
+                                    usdt_allocated = tokens_received * price_num
                                     
-                                    # Форматируем токены (K для тысяч)
-                                    if tokens_received >= 1000:
-                                        tokens_str = f"{tokens_received/1000:.0f}K"
-                                    else:
-                                        tokens_str = f"{tokens_received:.0f}"
+                                    message += f"\n      📊 <b>АЛЛОКАЦИЯ:</b> {allocation_pct:.1f}% ({oversubscription:.1f}x)\n"
                                     
-                                    message += f"\n      📊 <b>АЛЛОКАЦИЯ:</b>\n"
-                                    message += f"         • Подписка: {fmt_number(max_limit)}{invest_curr} {oversubscription:.1f}x\n"
-                                    message += f"         • <b>АЛЛОКА: {usdt_equivalent:.0f}$ ({tokens_str} {token})</b>\n"
+                                    # Профит по рыночной цене
+                                    if market_price > price_num:
+                                        profit_per_token = market_price - price_num
+                                        total_profit = tokens_received * profit_per_token
+                                        market_value = tokens_received * market_price
+                                        roi = ((market_price - price_num) / price_num) * 100
+                                        
+                                        message += f"\n      💰 <b>РАСЧЁТ ДОХОДА (депозит {fmt_number(max_limit)} {invest_curr}):</b>\n"
+                                        message += f"         📥 Депозит: {fmt_number(max_limit)} {invest_curr}\n"
+                                        message += f"         📤 Аллокация: {usdt_allocated:.2f} {invest_curr}\n"
+                                        tokens_fmt = f"{tokens_received/1000:.1f}K" if tokens_received >= 1000 else f"{tokens_received:.0f}"
+                                        message += f"         🪙 Токены: {tokens_fmt} {token}\n"
+                                        message += f"         💵 <b>По рынку: {market_value:.2f} {invest_curr} (+{total_profit:.2f} / +{roi:.0f}%)</b>\n"
                                 else:
                                     # Пока недоподписка - 100% аллокация
-                                    fill_pct = (tokens_booked / supply_num) * 100
+                                    fill_pct = (tokens_booked / supply_num) * 100 if tokens_booked > 0 else 0
                                     message += f"\n      📊 <b>АЛЛОКАЦИЯ:</b> 100% <i>(заполнено {fill_pct:.0f}%)</i>\n"
+                                    
+                                    # Показываем потенциальный профит при 100% аллокации
+                                    if market_price > price_num:
+                                        profit_per_token = market_price - price_num
+                                        roi = ((market_price - price_num) / price_num) * 100
+                                        
+                                        # Примеры расчёта для разных депозитов
+                                        example_amounts = []
+                                        if min_limit:
+                                            example_amounts.append(min_limit)
+                                        mid = (min_limit + max_limit) / 2
+                                        mid = round(mid / 100) * 100  # округляем
+                                        if mid not in example_amounts and mid != max_limit:
+                                            example_amounts.append(mid)
+                                        example_amounts.append(max_limit)
+                                        
+                                        message += f"\n      💰 <b>РАСЧЁТ ДОХОДА (100% аллока, ROI +{roi:.0f}%):</b>\n"
+                                        
+                                        for i, dep_amount in enumerate(example_amounts[:3]):
+                                            tokens_get = dep_amount / price_num
+                                            market_value = tokens_get * market_price
+                                            profit = tokens_get * profit_per_token
+                                            tokens_fmt = f"{tokens_get/1000:.1f}K" if tokens_get >= 1000 else f"{tokens_get:.0f}"
+                                            
+                                            prefix = "└─" if i == len(example_amounts) - 1 else "├─"
+                                            star = " ⭐" if i == len(example_amounts) - 1 else ""
+                                            message += f"         {prefix} {fmt_number(dep_amount)}$ → {tokens_fmt} {token} → <b>{market_value:.0f}$ (+{profit:.0f}$)</b>{star}\n"
                         except Exception as e:
                             # Не удалось рассчитать - пропускаем
+                            logger.debug(f"⚠️ Не удалось рассчитать аллокацию: {e}")
                             pass
                 
                 # === ПЕРИОД АКЦИИ ===

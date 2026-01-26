@@ -86,7 +86,7 @@ CATEGORY_CONFIG = {
     },
     'candybomb': {
         'icon': '🍬',
-        'name': 'CANDYBOMB',
+        'name': 'CANDY BOMB',
         'patterns': ['candybomb', 'candy_bomb', 'candy-bomb', 'candydrop', 'candy_drop', 'candy-drop'],
     },
     'staking': {

@@ -43,7 +43,75 @@ CATEGORY_ICONS = {
     'boost': '📈',
     'rewards': '🎁',
     'telegram': '📢',
+    'promo': '📌',
+    'token_splash': '🎯',
+    'poolx': '💧',
 }
+
+# Названия категорий для заголовков
+CATEGORY_NAMES = {
+    'launchpad': 'LAUNCHPAD',
+    'launchpool': 'LAUNCHPOOL',
+    'drops': 'DROPS',
+    'airdrop': 'AIRDROP',
+    'candybomb': 'CANDY BOMB',
+    'staking': 'STAKING',
+    'candy': 'CANDY',
+    'boost': 'BOOST',
+    'rewards': 'REWARDS',
+    'telegram': 'TELEGRAM',
+    'promo': 'PROMO',
+    'token_splash': 'TOKEN SPLASH',
+    'poolx': 'POOLX',
+}
+
+
+def format_universal_header(
+    exchange: str,
+    category: str,
+    is_new: bool = True,
+    token_symbol: str = None
+) -> str:
+    """
+    Формирует универсальный заголовок в формате:
+    🔴 BITGET | 🌊 LAUNCHPOOL | 🆕 NEW
+    или с токеном:
+    🔴 BITGET | 🌊 LAUNCHPOOL | SPACE
+    
+    Args:
+        exchange: Название биржи (Bybit, MEXC, Bitget, etc.)
+        category: Категория промоакции (launchpad, launchpool, candybomb, etc.)
+        is_new: Показывать метку NEW
+        token_symbol: Символ токена (если нужно показывать вместо/вместе с NEW)
+        
+    Returns:
+        Отформатированный заголовок
+    """
+    # Получаем иконку биржи
+    exchange_lower = exchange.lower().replace('.io', '').replace(' ', '')
+    exchange_icon = EXCHANGE_ICONS.get(exchange_lower, '🎉')
+    exchange_name = get_exchange_name(exchange)
+    
+    # Получаем иконку и название категории
+    category_lower = category.lower().replace(' ', '_').replace('-', '_')
+    category_icon = CATEGORY_ICONS.get(category_lower, '📌')
+    category_name = CATEGORY_NAMES.get(category_lower, category.upper())
+    
+    # Формируем заголовок
+    header = f"{exchange_icon} <b>{exchange_name}</b> | {category_icon} <b>{category_name}</b>"
+    
+    # Добавляем токен или метку NEW
+    if token_symbol and not is_new:
+        # Только токен без NEW
+        header += f" | <b>{escape_html(token_symbol)}</b>"
+    elif token_symbol and is_new:
+        # И токен, и NEW
+        header += f" | <b>{escape_html(token_symbol)}</b> | 🆕 <b>NEW</b>"
+    elif is_new:
+        # Только NEW
+        header += " | 🆕 <b>NEW</b>"
+    
+    return header
 
 
 def escape_html(text: Any) -> str:
@@ -290,9 +358,9 @@ class LaunchpadFormatter:
             # ФОРМИРОВАНИЕ СООБЩЕНИЯ
             # ═══════════════════════════════════════════════════════════════
             
-            # Заголовок
-            new_badge = " │ 🆕 NEW" if is_new else ""
-            message = f"🚀 {exchange_name} LAUNCHPAD{new_badge}\n"
+            # Заголовок с универсальным форматом: 🔵 MEXC | 🚀 LAUNCHPAD | 🆕 NEW
+            header = format_universal_header(exchange, 'launchpad', is_new)
+            message = f"{header}\n"
             message += f"{DIVIDER}\n\n"
             
             # Название токена
@@ -641,9 +709,9 @@ class LaunchpoolFormatter:
             # ФОРМИРОВАНИЕ СООБЩЕНИЯ
             # ═══════════════════════════════════════════════════════════════
             
-            # Заголовок
-            new_badge = " │ 🆕 NEW" if is_new else ""
-            message = f"🌊 {exchange_name} LAUNCHPOOL{new_badge}\n"
+            # Заголовок с универсальным форматом: 🔴 BITGET | 🌊 LAUNCHPOOL | 🆕 NEW
+            header = format_universal_header(exchange, 'launchpool', is_new)
+            message = f"{header}\n"
             message += f"{DIVIDER}\n"
             
             # Название токена
@@ -671,11 +739,20 @@ class LaunchpoolFormatter:
             # Пулы для фарминга
             if pools:
                 message += "\n"
+                # Проверяем, это Bitget - используем специальный формат
+                is_bitget = 'bitget' in exchange.lower()
+                
                 # Находим максимальный APR для пометки 🔥
                 max_apr = max(p.get('apr', 0) for p in pools) if pools else 0
                 
-                for pool in pools[:4]:  # Максимум 4 пула
-                    pool_msg = LaunchpoolFormatter._format_pool(pool, max_apr, days_left)
+                for i, pool in enumerate(pools[:4]):  # Максимум 4 пула
+                    if is_bitget:
+                        # Специальный формат для Bitget с таблицей заработка
+                        pool_msg = LaunchpoolFormatter._format_bitget_pool(
+                            pool, max_apr, days_left, token_symbol, pool_num=i+1
+                        )
+                    else:
+                        pool_msg = LaunchpoolFormatter._format_pool(pool, max_apr, days_left)
                     if pool_msg:
                         message += pool_msg + "\n"
             
@@ -859,7 +936,7 @@ class LaunchpoolFormatter:
         if limit_str:
             line += f" │ {limit_str}"
         
-        # Расчёт дохода
+        # Расчёт дохода (для НЕ-Bitget)
         if days_left and days_left > 0 and apr > 0 and max_stake:
             earnings_block = LaunchpoolFormatter._calculate_earnings(
                 apr, max_stake, days_left, stake_coin
@@ -869,6 +946,125 @@ class LaunchpoolFormatter:
         
         return line
     
+    @staticmethod
+    def _format_bitget_pool(pool: Dict[str, Any], max_apr: float, days_left: int, 
+                            reward_token: str, pool_num: int = 1) -> str:
+        """
+        Форматирует пул для Bitget Launchpool в уникальном стиле.
+        
+        Формат:
+        ━━ ПУЛ #1: BTC
+        📊 APR: 5.00%
+        📦 Макс. депозит: 50 BTC
+        
+        💵 ЗАРАБОТОК ЗА 6д:
+           Депозит      │ Заработок
+           12 BTC       │ ~0.01 BTC
+           25 BTC       │ ~0.02 BTC
+           50 BTC       │ ~0.04 BTC ⭐
+        """
+        stake_coin = pool.get('stake_coin', 'TOKEN')
+        apr = pool.get('apr', 0)
+        max_stake = pool.get('max_stake', 0)
+        min_stake = pool.get('min_stake', 0)
+        
+        if not stake_coin:
+            return ""
+        
+        lines = []
+        
+        # Заголовок пула с иконкой монеты
+        coin_icon = "🪙" if stake_coin in ('BTC', 'ETH', 'USDT', 'USDC') else "💰"
+        lines.append(f"━━ ПУЛ #{pool_num}: {stake_coin}")
+        lines.append("")
+        
+        # APR
+        apr_str = f"{apr:.2f}%" if apr < 100 else f"{apr:.0f}%"
+        lines.append(f"📊 APR: {apr_str}")
+        
+        # Макс. депозит
+        if max_stake:
+            if max_stake >= 1000:
+                max_str = f"{format_number(max_stake, 0)}"
+            else:
+                max_str = f"{max_stake:.2f}" if max_stake < 10 else f"{max_stake:.0f}"
+            lines.append(f"📦 Макс. депозит: {max_str} {stake_coin}")
+        
+        # Блок заработка
+        if days_left and days_left > 0 and apr > 0 and max_stake:
+            lines.append("")
+            lines.append(f"💵 ЗАРАБОТОК ЗА {days_left}д:")
+            lines.append("   Депозит      │ Заработок")
+            
+            # Определяем суммы для расчёта (3 уровня депозита)
+            amounts = []
+            
+            # Определяем "красивые" суммы в зависимости от монеты и max_stake
+            if stake_coin in ('BTC',):
+                # Для BTC: маленькие числа
+                if max_stake >= 50:
+                    amounts = [12, 25, max_stake]
+                elif max_stake >= 10:
+                    amounts = [3, 5, max_stake]
+                else:
+                    amounts = [max_stake * 0.25, max_stake * 0.5, max_stake]
+            elif stake_coin in ('ETH',):
+                # Для ETH
+                if max_stake >= 1500:
+                    amounts = [375, 750, max_stake]
+                elif max_stake >= 100:
+                    amounts = [25, 50, max_stake]
+                else:
+                    amounts = [max_stake * 0.25, max_stake * 0.5, max_stake]
+            elif stake_coin in ('USDT', 'USDC'):
+                # Для стейблкоинов: стандартные суммы
+                if max_stake >= 10000:
+                    amounts = [1000, 5000, max_stake]
+                elif max_stake >= 1000:
+                    amounts = [100, 500, max_stake]
+                else:
+                    amounts = [max_stake * 0.25, max_stake * 0.5, max_stake]
+            else:
+                # Для других монет
+                if max_stake >= 10000:
+                    amounts = [max_stake * 0.25, max_stake * 0.5, max_stake]
+                elif max_stake >= 1000:
+                    amounts = [max_stake * 0.2, max_stake * 0.5, max_stake]
+                else:
+                    amounts = [max_stake * 0.25, max_stake * 0.5, max_stake]
+            
+            # Убираем дубликаты и нули
+            amounts = [a for a in amounts if a > 0]
+            amounts = sorted(set(amounts))
+            
+            for i, amount in enumerate(amounts[:3]):
+                # Расчёт заработка: сумма * (APR/100) * (дни/365)
+                earnings = amount * (apr / 100) * (days_left / 365)
+                
+                # Форматирование суммы депозита
+                if amount >= 1000:
+                    amount_str = f"{amount:,.0f}"
+                elif amount >= 1:
+                    amount_str = f"{amount:.0f}"
+                else:
+                    amount_str = f"{amount:.2f}"
+                
+                # Форматирование заработка (~ для приблизительного значения)
+                if earnings >= 1:
+                    earnings_str = f"~{earnings:.2f}"
+                elif earnings >= 0.01:
+                    earnings_str = f"~{earnings:.2f}"
+                else:
+                    earnings_str = f"~{earnings:.4f}"
+                
+                # Звёздочка для максимальной суммы
+                star = " ⭐" if i == len(amounts) - 1 else ""
+                
+                # Выравнивание столбцов
+                lines.append(f"   {amount_str} {stake_coin:<4} │ {earnings_str} {reward_token}{star}")
+        
+        return "\n".join(lines)
+
     @staticmethod
     def _calculate_earnings(apr: float, max_stake: float, days: int, stake_coin: str) -> str:
         """Рассчитывает доход для разных сумм"""
@@ -1039,9 +1235,18 @@ class AirdropFormatter:
             # ФОРМИРОВАНИЕ СООБЩЕНИЯ
             # ═══════════════════════════════════════════════════════════════
             
-            # Заголовок: 🟡 BYBIT | 📌 PROMO | 🆕 NEW
-            new_badge = " | 🆕 NEW" if is_new else ""
-            message = f"{exchange_icon} <b>{exchange_name}</b> | 📌 <b>{promo_type}</b>{new_badge}\n\n"
+            # Определяем категорию для заголовка на основе типа промо
+            category_map = {
+                'PROMO': 'promo',
+                'BOOST': 'boost',
+                'AIRDROP+': 'airdrop',
+                'AIRDROP': 'airdrop'
+            }
+            category = category_map.get(promo_type, 'airdrop')
+            
+            # Заголовок с универсальным форматом: 🟡 BYBIT | 📌 PROMO | 🆕 NEW
+            header = format_universal_header(exchange, category, is_new)
+            message = f"{header}\n\n"
             
             # 📛 Название
             if title and token_symbol and title.upper() != token_symbol.upper():
@@ -1052,7 +1257,16 @@ class AirdropFormatter:
                 message += f"📛 <b>Название:</b> {escape_html(token_symbol)}\n"
             
             # 💰 Призовой фонд
-            if total_prize_pool:
+            # Для MEXC Airdrop: показываем оба пула (токены + USDT) если есть
+            token_pool = promo.get('token_pool')
+            token_pool_currency = promo.get('token_pool_currency', prize_token)
+            bonus_usdt = promo.get('bonus_usdt')
+            
+            if token_pool and bonus_usdt:
+                # MEXC Airdrop с двумя пулами: "200,000 3KDS & 45,000 USDT"
+                prize_str = f"{format_number(token_pool)} {token_pool_currency} & {format_number(bonus_usdt)} USDT"
+                message += f"💰 <b>Призовой фонд:</b> {prize_str}\n"
+            elif total_prize_pool:
                 prize_str = f"{format_number(total_prize_pool)} {prize_token}"
                 if usd_value:
                     prize_str += f" (~${format_number(usd_value)})"
@@ -1269,12 +1483,12 @@ class CandybombFormatter:
         'phemex': '🟪',
     }
     
-    # Типи промо
-    PROMO_TYPES = {
-        'gate': 'CANDY DROP',
-        'gate.io': 'CANDY DROP',
-        'bitget': 'CANDY BOMB',
-        'phemex': 'CANDY DROP',
+    # Типи промо (для маппинга категорії)
+    PROMO_CATEGORIES = {
+        'gate': 'candybomb',
+        'gate.io': 'candybomb',
+        'bitget': 'candybomb',
+        'phemex': 'candybomb',
     }
     
     @staticmethod
@@ -1303,19 +1517,20 @@ class CandybombFormatter:
                 else:
                     exchange = 'unknown'
             
-            # Іконка та тип
-            icon = CandybombFormatter.EXCHANGE_ICONS.get(exchange, '🍬')
-            promo_type = CandybombFormatter.PROMO_TYPES.get(exchange, 'CANDY')
+            # Нормалізуємо назву біржі
             exchange_name = exchange.upper().replace('.IO', '.io')
             if exchange == 'gate':
-                exchange_name = 'GATE.IO'
-            
-            new_badge = " | 🆕 NEW" if is_new else ""
+                exchange_name = 'Gate.io'
+            elif exchange == 'bitget':
+                exchange_name = 'Bitget'
+            elif exchange == 'phemex':
+                exchange_name = 'Phemex'
             
             lines = []
             
-            # Заголовок
-            lines.append(f"{icon} <b>{exchange_name}</b> | 🍬 <b>{promo_type}</b>{new_badge}")
+            # Заголовок з універсальним форматом: 🔴 BITGET | 🍬 CANDY BOMB | 🆕 NEW
+            header = format_universal_header(exchange_name, 'candybomb', is_new)
+            lines.append(header)
             lines.append("")
             
             # Токен
@@ -1873,6 +2088,284 @@ def format_promo_by_category(promo: Dict[str, Any], category: str = None, is_new
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# BYBIT TOKEN SPLASH UNIVERSAL FORMATTER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class BybitTokenSplashFormatter:
+    """
+    Универсальный форматтер для Bybit Token Splash промоакций.
+    
+    Поддерживает все типы токенсплешей:
+    1. Только для новых пользователей (New Users) - фиксированная награда
+    2. Только трейдинговый (Trading) - пропорциональная награда за объем торговли
+    3. Комбинированный - оба типа заданий в одном уведомлении
+    """
+    
+    @staticmethod
+    def _get_token_price(token_symbol: str) -> Optional[float]:
+        """Получает цену токена через PriceFetcher"""
+        try:
+            from utils.price_fetcher import get_price_fetcher
+            fetcher = get_price_fetcher()
+            price = fetcher.get_token_price(token_symbol, preferred_exchange='bybit')
+            return price
+        except Exception as e:
+            logger.debug(f"⚠️ Не удалось получить цену {token_symbol}: {e}")
+            return None
+    
+    @staticmethod
+    def _format_token_amount(amount: float, token_symbol: str, token_price: Optional[float] = None) -> str:
+        """Форматирует сумму токенов с USD эквивалентом"""
+        amount_str = format_number(amount, 0)
+        
+        if token_price and token_price > 0:
+            usd_value = amount * token_price
+            if usd_value >= 1_000_000:
+                usd_str = f"~${usd_value/1_000_000:.2f}M"
+            elif usd_value >= 1_000:
+                usd_str = f"~${usd_value:,.0f}"
+            elif usd_value >= 1:
+                usd_str = f"~${usd_value:.2f}"
+            else:
+                usd_str = f"~${usd_value:.4f}"
+            return f"{amount_str} {escape_html(token_symbol)} ({usd_str})"
+        else:
+            return f"{amount_str} {escape_html(token_symbol)}"
+    
+    @staticmethod
+    def format(promo: Dict[str, Any], is_new: bool = True) -> str:
+        """
+        Форматирует Token Splash промоакцию.
+        """
+        try:
+            # ═══════════════════════════════════════════════════════════════
+            # ИЗВЛЕЧЕНИЕ ДАННЫХ
+            # ═══════════════════════════════════════════════════════════════
+            
+            exchange = promo.get('exchange', 'Bybit')
+            exchange_name = get_exchange_name(exchange)
+            exchange_icon = get_exchange_icon(exchange)
+            
+            # Токен награды
+            token_symbol = promo.get('award_token', '') or promo.get('token_symbol', '')
+            token_name = promo.get('title', token_symbol)
+            
+            # Очищаем название от дублирования символа
+            if token_symbol and f"({token_symbol})" in token_name:
+                token_name = token_name.replace(f" ({token_symbol})", "").replace(f"({token_symbol})", "")
+            
+            # Получаем цену токена ОДИН раз
+            token_price = BybitTokenSplashFormatter._get_token_price(token_symbol) if token_symbol else None
+            
+            # Призовой фонд
+            prize_pool = promo.get('total_prize_pool')
+            prize_pool_num = None
+            
+            # Парсим prize_pool
+            if prize_pool:
+                if isinstance(prize_pool, (int, float)):
+                    prize_pool_num = float(prize_pool)
+                elif isinstance(prize_pool, str):
+                    parts = str(prize_pool).replace(',', '').split()
+                    if parts:
+                        try:
+                            prize_pool_num = float(parts[0])
+                        except (ValueError, IndexError):
+                            pass
+            
+            # Участники
+            participants = promo.get('participants_count')
+            
+            # Данные для новых пользователей
+            reward_per_winner = promo.get('reward_per_winner')
+            reward_per_winner_num = None
+            new_user_winners = promo.get('new_user_winners_count')  # Количество мест для новых
+            
+            # Парсим reward_per_winner
+            if reward_per_winner:
+                if isinstance(reward_per_winner, (int, float)):
+                    reward_per_winner_num = float(reward_per_winner)
+                elif isinstance(reward_per_winner, str):
+                    parts = str(reward_per_winner).replace(',', '').split()
+                    if parts:
+                        try:
+                            reward_per_winner_num = float(parts[0])
+                        except (ValueError, IndexError):
+                            pass
+            
+            # Проверяем наличие заданий
+            has_new_user_task = bool(reward_per_winner)
+            has_trading_task = bool(promo.get('min_trade_amount')) or promo.get('splash_type') == 'trading'
+            
+            # Время
+            start_time = promo.get('start_time')
+            end_time = promo.get('end_time')
+            
+            # Ссылка
+            link = promo.get('link', '')
+            promo_id = promo.get('promo_id', '')
+            
+            # ═══════════════════════════════════════════════════════════════
+            # ФОРМИРОВАНИЕ СООБЩЕНИЯ
+            # ═══════════════════════════════════════════════════════════════
+            
+            # Заголовок с универсальным форматом: 🟡 BYBIT | 📌 PROMO | 🆕 NEW
+            header = format_universal_header(exchange, 'promo', is_new)
+            message = f"{header}\n\n"
+            
+            # Название токена
+            message += f"📛 <b>Название:</b> {escape_html(token_name)}\n"
+            
+            # Призовой фонд с USD
+            if prize_pool_num:
+                prize_formatted = BybitTokenSplashFormatter._format_token_amount(prize_pool_num, token_symbol, token_price)
+                message += f"💰 <b>Призовой фонд:</b> {prize_formatted}\n"
+            
+            # Участники
+            if participants:
+                message += f"👥 <b>Участники:</b> {format_number(participants, 0)}\n"
+            
+            # ═══════════════════════════════════════════════════════════════
+            # БЛОК 1: ЗАДАНИЕ ДЛЯ НОВЫХ ПОЛЬЗОВАТЕЛЕЙ
+            # ═══════════════════════════════════════════════════════════════
+            if has_new_user_task:
+                message += f"\n<b>🎁 Задание для новых пользователей:</b>\n"
+                
+                # Награда с USD
+                if reward_per_winner_num:
+                    reward_formatted = BybitTokenSplashFormatter._format_token_amount(reward_per_winner_num, token_symbol, token_price)
+                    message += f"├ <b>Награда:</b> {reward_formatted}\n"
+                elif reward_per_winner:
+                    message += f"├ <b>Награда:</b> {escape_html(reward_per_winner)}\n"
+                
+                # Количество призовых мест для новых пользователей
+                if new_user_winners:
+                    message += f"└ <b>Мест:</b> {format_number(new_user_winners, 0)}\n"
+                elif prize_pool_num and reward_per_winner_num and reward_per_winner_num > 0:
+                    # Рассчитываем количество мест
+                    calculated_winners = int(prize_pool_num / reward_per_winner_num)
+                    if calculated_winners > 0 and calculated_winners < 1_000_000:  # Адекватное число
+                        message += f"└ <b>Мест:</b> ~{format_number(calculated_winners, 0)}\n"
+            
+            # ═══════════════════════════════════════════════════════════════
+            # БЛОК 2: ТРЕЙДИНГОВОЕ ЗАДАНИЕ (ДЛЯ ВСЕХ)
+            # ═══════════════════════════════════════════════════════════════
+            if has_trading_task:
+                min_trade = promo.get('min_trade_amount')
+                trade_token = promo.get('trade_token', 'USDT')
+                total_trade_volume = promo.get('total_trade_volume')  # Общий объём торговли
+                trade_prize_pool = promo.get('trade_prize_pool') or prize_pool_num  # Призовой пул трейдинга
+                
+                if has_new_user_task:
+                    message += f"\n<b>📊 Трейдинговое задание (для всех):</b>\n"
+                else:
+                    message += f"\n<b>📊 Условие участия:</b>\n"
+                
+                if min_trade:
+                    message += f"├ <b>Мін. об'єм:</b> {format_number(min_trade, 0)} {escape_html(trade_token)} токеном {escape_html(token_symbol)}\n"
+                
+                # Максимальная награда с USD (это весь пул трейдинга)
+                if trade_prize_pool:
+                    max_reward_formatted = BybitTokenSplashFormatter._format_token_amount(trade_prize_pool, token_symbol, token_price)
+                    message += f"├ <b>Призовий пул:</b> {max_reward_formatted}\n"
+                
+                # Показываем текущий общий объём торговли (если есть)
+                if total_trade_volume and total_trade_volume > 0:
+                    message += f"├ <b>Загальний об'єм:</b> ${format_number(total_trade_volume, 2)}\n"
+                
+                # Калькулятор примерного заработка
+                # Работает даже без total_trade_volume - показываем для разных сценариев
+                if trade_prize_pool and token_price:
+                    prize_usd = trade_prize_pool * token_price
+                    
+                    # Если известен общий объём - точный расчёт
+                    if total_trade_volume and total_trade_volume > 0:
+                        message += f"├ <b>💰 Калькулятор прибутку:</b>\n"
+                        test_volumes = [5000, 10000, 25000, 50000]
+                        for vol in test_volumes:
+                            # Награда = (мой объём / общий объём) × пул × цена
+                            reward_tokens = (vol / total_trade_volume) * trade_prize_pool
+                            reward_usd = reward_tokens * token_price
+                            if reward_usd >= 0.01:
+                                message += f"│  ${format_number(vol, 0)} → ~${format_number(reward_usd, 2)}\n"
+                    else:
+                        # Без общего объёма - показываем % от пула
+                        message += f"├ <b>💰 Калькулятор (% від пулу):</b>\n"
+                        # Показываем сколько получит пользователь при разных % от общего объёма
+                        percentages = [(0.1, "0.1%"), (0.5, "0.5%"), (1.0, "1%"), (2.0, "2%")]
+                        for pct, label in percentages:
+                            reward_usd = (pct / 100) * prize_usd
+                            if reward_usd >= 0.01:
+                                message += f"│  {label} пулу → ~${format_number(reward_usd, 2)}\n"
+                        message += f"│  <i>💡 Ваш % = Ваш об'єм / Загальний об'єм</i>\n"
+                else:
+                    message += f"└ <i>💡 Нагорода = (Ваш об'єм / Загальний об'єм) × Пул</i>\n"
+            
+            # Период
+            if start_time and end_time:
+                time_line = BybitTokenSplashFormatter._format_time_period(start_time, end_time)
+                if time_line:
+                    message += f"\n{time_line}\n"
+            
+            # Ссылка
+            if link:
+                message += f"🔗 <b>Ссылка:</b> {link}\n"
+            
+            # ID
+            if promo_id:
+                message += f"\n<code>ID: {escape_html(promo_id)}</code>"
+            
+            return message
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка форматирования Token Splash: {e}", exc_info=True)
+            return f"🟡 <b>BYBIT PROMO</b>\n\n❌ Ошибка форматирования"
+    
+    @staticmethod
+    def _format_time_period(start_time: Any, end_time: Any) -> str:
+        """Форматирует период выполнения задачи"""
+        try:
+            # Конвертируем в datetime
+            if isinstance(start_time, (int, float)):
+                if start_time > 10000000000:  # миллисекунды
+                    start_dt = datetime.fromtimestamp(start_time / 1000)
+                else:
+                    start_dt = datetime.fromtimestamp(start_time)
+            elif isinstance(start_time, datetime):
+                start_dt = start_time
+            else:
+                start_dt = None
+            
+            if isinstance(end_time, (int, float)):
+                if end_time > 10000000000:  # миллисекунды
+                    end_dt = datetime.fromtimestamp(end_time / 1000)
+                else:
+                    end_dt = datetime.fromtimestamp(end_time)
+            elif isinstance(end_time, datetime):
+                end_dt = end_time
+            else:
+                end_dt = None
+            
+            if not start_dt or not end_dt:
+                return ""
+            
+            # Форматируем даты
+            start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+            end_str = end_dt.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Оставшееся время
+            remaining = format_time_remaining(end_time)
+            if remaining:
+                return f"📅 <b>Период:</b> {start_str} - {end_str} (⏳ {remaining})"
+            else:
+                return f"📅 <b>Период:</b> {start_str} - {end_str}"
+                
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка форматирования времени: {e}")
+            return ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ТЕСТИРОВАНИЕ
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1947,6 +2440,7 @@ if __name__ == '__main__':
             {'stake_coin': 'USDT', 'apr': 35, 'min_stake': 100, 'max_stake': 50000, 'participants': 800},
         ]
     }
+
     
     def clean_html(text):
         return text.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace('<i>', '').replace('</i>', '')

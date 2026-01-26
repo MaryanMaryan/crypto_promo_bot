@@ -25,7 +25,7 @@ def get_links_keyboard(links):
             callback_data=f"link_{link.id}"
         ))
     
-    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main"))
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -292,7 +292,7 @@ def get_top_activity_menu_keyboard():
     builder.add(InlineKeyboardButton(text="🔥 Стейкинги", callback_data="top_activity_stakings"))
     builder.add(InlineKeyboardButton(text="🎁 Промоакции", callback_data="top_activity_promos"))
     builder.add(InlineKeyboardButton(text="🔄 Обновить", callback_data="top_activity_refresh"))
-    builder.add(InlineKeyboardButton(text="🔙 Меню", callback_data="back_to_main"))
+    builder.add(InlineKeyboardButton(text="🔙 Меню", callback_data="back_to_main_menu"))
     
     builder.adjust(2, 2)
     return builder.as_markup()

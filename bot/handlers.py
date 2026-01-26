@@ -213,6 +213,7 @@ def get_unified_link_management_keyboard(link):
     
     Структура:
     - Текущие промоакции/стейкинги (если применимо)
+    - Trading промо (для BybitTS)
     - Сменить категорию
     - Настройки (подменю)
     - Остановить/Включить парсинг (динамическая кнопка)
@@ -224,6 +225,13 @@ def get_unified_link_management_keyboard(link):
     category = link.category or 'launches'
     has_promo_parser = link.special_parser and link.special_parser not in ('announcement', 'telegram')
     
+    # Определяем BybitTS по URL (deposit-activity API)
+    is_bybit_tokensplash = (
+        link.api_url and 'deposit-activity' in link.api_url.lower()
+    ) or (
+        link.url and 'deposit-activity' in link.url.lower()
+    )
+    
     if category == 'staking':
         builder.add(InlineKeyboardButton(
             text="📈 Текущие стейкинги", 
@@ -234,6 +242,12 @@ def get_unified_link_management_keyboard(link):
             text="🎁 Текущие промоакции", 
             callback_data="manage_view_current_promos"
         ))
+        # Для BybitTS добавляем отдельную кнопку Trading промо с калькулятором
+        if is_bybit_tokensplash:
+            builder.add(InlineKeyboardButton(
+                text="📊 Trading промо (калькулятор)", 
+                callback_data="manage_view_trading_promos"
+            ))
     elif category == 'announcement' and has_promo_parser:
         # Announcement со special_parser показываем кнопку текущих промо
         builder.add(InlineKeyboardButton(
@@ -1325,13 +1339,9 @@ async def favorite_manage_handler(callback: CallbackQuery):
         cat_icon = category_icons.get(category, '📁')
         status = "✅ Активна" if link.is_active else "❌ Остановлена"
         
-        # Определяем тип клавиатуры в зависимости от категории
-        if category == 'staking':
-            keyboard = get_staking_management_keyboard()
-        elif category in ('airdrop', 'candybomb', 'drops', 'launches', 'launchpool', 'launchpad', 'announcement'):
-            keyboard = get_airdrop_management_keyboard()
-        else:
-            keyboard = get_management_keyboard(link)
+        # Используем унифицированную клавиатуру для всех категорий
+        # Это включает кнопку Trading промо для BybitTS
+        keyboard = get_unified_link_management_keyboard(link)
         
         # Добавляем кнопку "Убрать из избранного"
         builder = InlineKeyboardBuilder()
@@ -6216,6 +6226,152 @@ async def view_current_promos(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"❌ Ошибка просмотра промоакций: {e}", exc_info=True)
         await callback.answer("❌ Ошибка загрузки данных", show_alert=True)
+
+
+@router.callback_query(F.data == "manage_view_trading_promos")
+async def view_trading_promos(callback: CallbackQuery):
+    """Показать Trading Token Splash с калькулятором заработка"""
+    logger.info(f"📊 ОТКРЫТИЕ TRADING ПРОМО (BybitTS с калькулятором)")
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        logger.info(f"   User ID: {user_id}, Link ID: {link_id}")
+
+        if not link_id:
+            await callback.answer("❌ Ошибка: ссылка не выбрана", show_alert=True)
+            return
+
+        link = await get_link_by_id_async(link_id)
+        
+        if not link:
+            await callback.answer("❌ Ссылка не найдена", show_alert=True)
+            return
+
+        exchange_name = link.name
+        page_url = link.page_url
+
+        # Закрываем callback сразу для отзывчивости UI
+        await callback.answer()
+
+        # Получаем данные из БД
+        promos_data = get_promos_from_db(link_id, exchange_name)
+        
+        # Фильтруем только Trading Token Splash
+        # Определяем по: splash_type = 'trading'/'combined' ИЛИ taskType = 4 (трейдинговое задание)
+        trading_promos = []
+        import json
+        for promo in promos_data:
+            raw_data = promo.get('raw_data')
+            is_trading = False
+            
+            if raw_data:
+                try:
+                    if isinstance(raw_data, str):
+                        raw_data = json.loads(raw_data)
+                    
+                    # Способ 1: Проверяем обогащённое поле splash_type
+                    splash_type = raw_data.get('splash_type', '')
+                    if splash_type in ('trading', 'combined'):
+                        is_trading = True
+                        promo['splash_type'] = splash_type
+                    
+                    # Способ 2: Для старых данных проверяем taskType из API
+                    # taskType=4 означает Trading Task
+                    task_type = raw_data.get('taskType')
+                    if task_type == 4 or task_type == '4':
+                        is_trading = True
+                        promo['splash_type'] = 'trading'
+                    
+                    if is_trading:
+                        # Добавляем данные из raw_data в promo для форматтера
+                        promo['min_trade_amount'] = raw_data.get('min_trade_amount') or raw_data.get('minTradeAmount')
+                        promo['trade_token'] = raw_data.get('trade_token') or raw_data.get('tradeToken', 'USDT')
+                        promo['total_trade_volume'] = raw_data.get('total_trade_volume') or raw_data.get('totalTradeValue')
+                        promo['trade_prize_pool'] = raw_data.get('trade_prize_pool') or raw_data.get('tradeUserPrizeTotal')
+                        promo['new_user_winners_count'] = raw_data.get('new_user_winners_count')
+                        trading_promos.append(promo)
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка парсинга raw_data: {e}")
+        
+        if not trading_promos:
+            message_text = (
+                f"📊 <b>TRADING ПРОМО</b>\n\n"
+                f"<b>🏦 Біржа:</b> {exchange_name}\n\n"
+                f"📭 <i>Немає активних Trading Token Splash.</i>\n"
+                f"<i>Trading промо - це токенсплеші з трейдинговим завданням.</i>"
+            )
+            
+            # Кнопка назад
+            from aiogram.utils.keyboard import InlineKeyboardBuilder
+            back_builder = InlineKeyboardBuilder()
+            back_builder.add(InlineKeyboardButton(
+                text="⬅️ Назад", 
+                callback_data="back_to_link_management"
+            ))
+            
+            await callback.message.edit_text(
+                message_text,
+                parse_mode="HTML",
+                reply_markup=back_builder.as_markup()
+            )
+            return
+
+        # Форматируем Trading Token Splash с калькулятором
+        from utils.message_formatters import BybitTokenSplashFormatter
+        
+        message_parts = [
+            f"📊 <b>TRADING TOKEN SPLASH</b>",
+            f"<b>🏦 Біржа:</b> {exchange_name}",
+            f"<i>Активних Trading промо: {len(trading_promos)}</i>",
+            ""
+        ]
+        
+        for promo in trading_promos:
+            # Форматируем через BybitTokenSplashFormatter
+            promo_text = BybitTokenSplashFormatter.format(promo)
+            message_parts.append(promo_text)
+            message_parts.append("")  # Разделитель
+        
+        if page_url:
+            message_parts.append(f"🔗 <a href=\"{page_url}\">Відкрити на біржі</a>")
+        
+        message_text = '\n'.join(message_parts)
+        
+        # Обрезаем если слишком длинное
+        if len(message_text) > 4000:
+            message_text = message_text[:4000] + "\n\n<i>... (повідомлення обрізано)</i>"
+        
+        # Кнопка назад
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        back_builder = InlineKeyboardBuilder()
+        back_builder.add(InlineKeyboardButton(
+            text="🔄 Оновити", 
+            callback_data="manage_view_trading_promos"
+        ))
+        back_builder.add(InlineKeyboardButton(
+            text="⬅️ Назад", 
+            callback_data="back_to_link_management"
+        ))
+        back_builder.adjust(1)
+
+        try:
+            await callback.message.edit_text(
+                message_text,
+                parse_mode="HTML",
+                reply_markup=back_builder.as_markup(),
+                disable_web_page_preview=True
+            )
+        except Exception as edit_err:
+            if "message is not modified" in str(edit_err):
+                # Сообщение не изменилось - просто уведомляем
+                await callback.answer("✅ Дані актуальні", show_alert=False)
+            else:
+                raise edit_err
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка просмотра Trading промо: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка загрузки даних", show_alert=True)
 
 
 @router.callback_query(F.data == "promos_force_parse")

@@ -16,6 +16,7 @@ BROWSER POOL - Пул переиспользуемых браузеров Playwr
 import asyncio
 import logging
 import time
+import sys
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
@@ -93,8 +94,10 @@ class BrowserPool:
         self.health_check_interval = health_check_interval or getattr(config, 'BROWSER_HEALTH_CHECK_INTERVAL', 60)
         
         self._pool: Dict[int, BrowserInstance] = {}
-        self._lock = asyncio.Lock()
-        self._condition = asyncio.Condition(self._lock)
+        # Ленивая инициализация lock/condition для корректной работы с разными event loops
+        self._lock: Optional[asyncio.Lock] = None
+        self._condition: Optional[asyncio.Condition] = None
+        self._loop_id: Optional[int] = None  # ID event loop для которого созданы примитивы
         self._started = False
         self._shutting_down = False
         self._health_check_task: Optional[asyncio.Task] = None
@@ -122,8 +125,33 @@ class BrowserPool:
         
         logger.info(f"🌐 BrowserPool инициализирован: size={self.size}, max_age={self.max_age_seconds}s, max_requests={self.max_requests}")
     
+    def _ensure_primitives(self):
+        """
+        Создаёт asyncio примитивы для текущего event loop если нужно.
+        Это решает проблему 'is bound to a different event loop'.
+        """
+        try:
+            current_loop = asyncio.get_running_loop()
+            current_loop_id = id(current_loop)
+        except RuntimeError:
+            # Нет running loop - создадим примитивы при первом вызове
+            current_loop_id = None
+        
+        # Если примитивы уже созданы для этого loop - ничего не делаем
+        if self._loop_id == current_loop_id and self._lock is not None:
+            return
+        
+        # Создаём новые примитивы для текущего loop
+        self._lock = asyncio.Lock()
+        self._condition = asyncio.Condition(self._lock)
+        self._loop_id = current_loop_id
+        logger.debug(f"🔧 Созданы asyncio примитивы для event loop #{current_loop_id}")
+    
     async def start(self):
         """Запускает пул браузеров"""
+        # Инициализируем примитивы для текущего event loop
+        self._ensure_primitives()
+        
         if self._started:
             logger.warning("⚠️ BrowserPool уже запущен")
             return
@@ -155,6 +183,9 @@ class BrowserPool:
         """Останавливает пул и закрывает все браузеры"""
         if not self._started:
             return
+        
+        # Инициализируем примитивы для текущего event loop если нужно
+        self._ensure_primitives()
         
         logger.info("🛑 Остановка BrowserPool...")
         self._shutting_down = True
@@ -218,8 +249,18 @@ class BrowserPool:
         """Закрывает экземпляр браузера"""
         try:
             logger.debug(f"🔄 Закрытие браузера #{instance.id} (requests: {instance.request_count}, age: {instance.age_seconds:.0f}s)")
-            await instance.browser.close()
+            
+            # Закрываем браузер
+            if instance.browser.is_connected():
+                await instance.browser.close()
+            
+            # Останавливаем Playwright
             await instance.playwright.stop()
+            
+            # Даём время на cleanup subprocess на Windows
+            if sys.platform == 'win32':
+                await asyncio.sleep(0.1)
+                
         except Exception as e:
             logger.warning(f"⚠️ Ошибка закрытия браузера #{instance.id}: {e}")
     
@@ -266,6 +307,9 @@ class BrowserPool:
     
     async def _health_check_loop(self):
         """Фоновая проверка здоровья браузеров"""
+        # Инициализируем примитивы для текущего event loop
+        self._ensure_primitives()
+        
         while not self._shutting_down:
             try:
                 await asyncio.sleep(self.health_check_interval)
@@ -305,6 +349,9 @@ class BrowserPool:
                 # ...
                 await context.close()
         """
+        # Инициализируем примитивы для текущего event loop
+        self._ensure_primitives()
+        
         if not self._started:
             raise RuntimeError("BrowserPool не запущен! Вызовите await pool.start()")
         
@@ -484,16 +531,76 @@ class BrowserPool:
     @property
     def is_running(self) -> bool:
         """Проверяет, запущен ли пул"""
-        return self._started and not self._shutting_down
+        if not self._started or self._shutting_down:
+            return False
+        
+        # Проверяем, не закрыт ли event loop в котором были созданы браузеры
+        if self._loop_id is not None:
+            try:
+                current_loop = asyncio.get_running_loop()
+                if id(current_loop) != self._loop_id:
+                    # Пул был создан в другом event loop - считаем его не запущенным
+                    logger.warning(f"⚠️ BrowserPool был создан в другом event loop (old: {self._loop_id}, current: {id(current_loop)})")
+                    self._started = False
+                    self._pool.clear()  # Очищаем старые браузеры
+                    return False
+            except RuntimeError:
+                # Нет running loop - пока не можем проверить
+                pass
+        
+        return True
 
 
 # Глобальный экземпляр пула (singleton)
 _browser_pool: Optional[BrowserPool] = None
+_main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def reset_browser_pool():
+    """Сбрасывает глобальный пул браузеров (для пересоздания в новом event loop)"""
+    global _browser_pool
+    if _browser_pool is not None:
+        logger.info("🔄 Сброс глобального BrowserPool для пересоздания")
+        _browser_pool._started = False
+        _browser_pool._pool.clear()
+        _browser_pool = None
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop = None):
+    """Устанавливает главный event loop для использования парсерами из ThreadPool"""
+    global _main_loop
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+    _main_loop = loop
+    logger.debug(f"🔧 Главный event loop установлен: #{id(loop)}")
+
+
+def get_main_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """Возвращает главный event loop"""
+    return _main_loop
 
 
 def get_browser_pool() -> BrowserPool:
     """Получает глобальный экземпляр пула браузеров"""
     global _browser_pool
+    
+    # Если пул существует, проверяем что он не привязан к мёртвому event loop
+    if _browser_pool is not None:
+        try:
+            current_loop = asyncio.get_running_loop()
+            if _browser_pool._loop_id is not None and id(current_loop) != _browser_pool._loop_id:
+                # Пул создан в другом loop - пересоздаём
+                logger.warning(f"🔄 BrowserPool привязан к другому event loop, пересоздаём...")
+                _browser_pool._started = False
+                _browser_pool._pool.clear()
+                _browser_pool = None
+        except RuntimeError:
+            # Нет running loop - проверка невозможна
+            pass
+    
     if _browser_pool is None:
         _browser_pool = BrowserPool()
     return _browser_pool
@@ -501,6 +608,9 @@ def get_browser_pool() -> BrowserPool:
 
 async def init_browser_pool():
     """Инициализирует глобальный пул браузеров"""
+    # Сохраняем главный event loop для использования парсерами из ThreadPool
+    set_main_loop()
+    
     pool = get_browser_pool()
     if not pool.is_running:
         await pool.start()

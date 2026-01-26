@@ -103,7 +103,6 @@ def _configure_third_party_loggers(app_level: int) -> None:
         'httpx',
         'httpcore',
         'aiohttp',
-        'asyncio',
         'apscheduler',
         'playwright',
         'sqlalchemy.engine',
@@ -114,6 +113,15 @@ def _configure_third_party_loggers(app_level: int) -> None:
     if app_level > logging.DEBUG:
         for logger_name in quiet_loggers:
             logging.getLogger(logger_name).setLevel(logging.WARNING)
+    
+    # asyncio - підвищуємо до ERROR для Windows subprocess cleanup warnings
+    import sys
+    if sys.platform == 'win32':
+        logging.getLogger('asyncio').setLevel(logging.ERROR)
+        logging.info("🪟 Windows: asyncio logger встановлено на ERROR (subprocess cleanup)")
+    else:
+        if app_level > logging.DEBUG:
+            logging.getLogger('asyncio').setLevel(logging.WARNING)
     
     # aiogram — оставляем INFO для важных событий
     if app_level >= logging.INFO:

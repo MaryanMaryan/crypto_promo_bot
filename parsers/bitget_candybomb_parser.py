@@ -295,18 +295,18 @@ class BitgetCandybombParser(LaunchpoolBaseParser):
             is_new_user_only = project_data.get('newUserLabel', False)
             signup_condition = project_data.get('signupConditionConfigLabel', False)
             
-            # Добавляем метки
+            # Добавляем метки (на русском)
             condition_labels = []
             if is_new_contract_only:
-                condition_labels.append("Нові користувачі ф'ючерсів")
+                condition_labels.append("Новые пользователи фьючерсов")
             if is_new_user_only:
-                condition_labels.append("Нові користувачі")
+                condition_labels.append("Новые пользователи")
             if signup_condition:
                 condition_type = project_data.get('signupConditionType', 0)
                 if condition_type == 1:
-                    condition_labels.append("Потрібна KYC")
+                    condition_labels.append("Требуется KYC")
                 elif condition_type == 2:
-                    condition_labels.append("Потрібна торгівля ф'ючерсами")
+                    condition_labels.append("Требуется торговля фьючерсами")
             
             return LaunchpoolProject(
                 id=project_id,
@@ -332,89 +332,116 @@ class BitgetCandybombParser(LaunchpoolBaseParser):
             return None
     
     def _get_task_type_name(self, target_type: int) -> str:
-        """Получение названия типа задания"""
+        """Получение названия типа задания на русском"""
         type_names = {
-            4: "Загальні завдання",
-            39: "Торгівля ф'ючерсами",
-            99: "Реферальний бонус",
+            4: "Общие задания",
+            39: "Торговля фьючерсами",
+            99: "Реферальный бонус",
         }
-        return type_names.get(target_type, f"Завдання #{target_type}")
+        return type_names.get(target_type, f"Задание #{target_type}")
     
     def _get_status_text(self, status: str, condition_labels: List[str]) -> str:
         """Получение текста статуса с условиями"""
         status_map = {
-            'active': 'Активний',
-            'upcoming': 'Скоро почнеться',
-            'ended': 'Завершено',
+            'active': 'Активный',
+            'upcoming': 'Скоро начнётся',
+            'ended': 'Завершён',
         }
-        base_text = status_map.get(status, 'Невідомо')
+        base_text = status_map.get(status, 'Неизвестно')
         
         if condition_labels:
-            return f"{base_text} ({', '.join(condition_labels)})"
+            # Переводим условия на русский
+            ru_labels = []
+            for label in condition_labels:
+                label_map = {
+                    "Нові користувачі ф'ючерсів": "Новые пользователи фьючерсов",
+                    "Нові користувачі": "Новые пользователи",
+                    "Потрібна KYC": "Требуется KYC",
+                    "Потрібна торгівля ф'ючерсами": "Требуется торговля фьючерсами",
+                }
+                ru_labels.append(label_map.get(label, label))
+            return f"{base_text} ({', '.join(ru_labels)})"
         return base_text
+    
+    def _get_task_type_name_ru(self, target_type: int) -> str:
+        """Получение названия типа задания на русском"""
+        type_names = {
+            4: "Общие задания",
+            39: "Торговля фьючерсами",
+            99: "Реферальный бонус",
+        }
+        return type_names.get(target_type, f"Задание #{target_type}")
     
     def format_project(self, project: LaunchpoolProject) -> str:
         """
         Специальное форматирование для Candy Bomb (airdrop с заданиями).
-        Отличается от обычного launchpool - нет стейкинга, есть задания.
+        Компактный формат на русском языке с HTML разметкой.
         """
         lines = []
         
-        # Заголовок
-        lines.append(f"🎁 BITGET CANDY BOMB")
-        lines.append("")
-        lines.append(f"🏦 Біржа: Bitget Airdrop")
-        lines.append(f"⏱️ Оновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-        lines.append("━" * 34)
+        # Заголовок в стиле Gate (с выделением)
+        lines.append(f"<b>🟠 BITGET | 🍬 CANDY BOMB | {project.token_symbol}</b>")
         lines.append("")
         
-        # Токен
-        lines.append(f"🪙 {project.token_symbol}")
+        # Статус
         lines.append(f"📊 Статус: {project.get_status_emoji()} {project.status_text or project.get_status_text()}")
         
-        # Награды
-        if project.total_pool_usd > 0:
-            lines.append(f"💰 Загальний пул: ${project.total_pool_usd:,.2f}")
-        if project.total_pool_tokens > 0:
-            lines.append(f"🎯 Всього токенів: {project.total_pool_tokens:,.0f} {project.token_symbol}")
+        # Пул (токены первые, USD в скобках, с выделением)
+        if project.total_pool_usd > 0 and project.total_pool_tokens > 0:
+            lines.append(f"<b>💰 Пул: {project.total_pool_tokens:,.0f} {project.token_symbol} (${project.total_pool_usd:,.2f})</b>")
+        elif project.total_pool_usd > 0:
+            lines.append(f"<b>💰 Пул: ${project.total_pool_usd:,.2f}</b>")
+        elif project.total_pool_tokens > 0:
+            lines.append(f"<b>💰 Пул: {project.total_pool_tokens:,.0f} {project.token_symbol}</b>")
         
         # Участники
         if project.total_participants > 0:
-            lines.append(f"👥 Учасників: {project.total_participants:,}")
+            lines.append(f"👥 Участников: {project.total_participants:,}")
         
-        lines.append(f"⏰ Залишилось: {project.time_remaining_str}")
+        # Осталось времени
+        lines.append(f"⏰ Осталось: {project.time_remaining_str}")
         
-        # Задания (pools в нашем случае содержат задания)
+        # Задания с USD стоимостью
         if project.pools:
             lines.append("")
-            lines.append("━" * 34)
-            lines.append("🎯 НАГОРОДИ ЗА ЗАВДАННЯ:")
-            lines.append("━" * 34)
+            lines.append("🎯 Задания:")
+            
+            # Рассчитываем цену за токен
+            token_price = 0.0
+            if project.total_pool_usd > 0 and project.total_pool_tokens > 0:
+                token_price = project.total_pool_usd / project.total_pool_tokens
             
             for pool in project.pools:
                 reward_coin = pool.extra_data.get('reward_coin', project.token_symbol) if pool.extra_data else project.token_symbol
                 biz_line = pool.labels[0] if pool.labels else ""
                 
-                # Форматируем тип задания
+                # Переводим название задания на русский
                 task_name = pool.stake_coin
+                task_map = {
+                    "Загальні завдання": "Общие задания",
+                    "Торгівля ф'ючерсами": "Торговля фьючерсами",
+                    "Реферальний бонус": "Реферальный бонус",
+                    "Airdrop": "Airdrop",
+                }
+                task_name_ru = task_map.get(task_name, task_name)
                 
-                # Добавляем метку SPOT/CONTRACT если есть
+                # Метка SPOT/CONTRACT
                 biz_label = f" [{biz_line}]" if biz_line else ""
                 
-                lines.append(f"   • {task_name}: {pool.pool_reward:,.0f} {reward_coin}{biz_label}")
+                # Рассчитываем USD стоимость награды
+                reward_usd = pool.pool_reward * token_price if token_price > 0 else 0
+                usd_str = f" (~${reward_usd:,.2f})" if reward_usd > 0 else ""
+                
+                lines.append(f"  • {task_name_ru} → {pool.pool_reward:,.0f} {reward_coin}{biz_label}{usd_str}")
         
-        # Период
-        lines.append("")
-        lines.append("⏰ ПЕРІОД:")
-        if project.start_time:
-            lines.append(f"   • Старт: {project.start_time.strftime('%d.%m.%Y %H:%M')} UTC")
-        if project.end_time:
-            lines.append(f"   • Кінець: {project.end_time.strftime('%d.%m.%Y %H:%M')} UTC")
+        # Период (компактно в одну строку)
+        if project.start_time and project.end_time:
+            lines.append("")
+            lines.append(f"📅 {project.start_time.strftime('%d.%m.%Y %H:%M')} — {project.end_time.strftime('%d.%m.%Y %H:%M')} UTC")
         
-        # Ссылка
+        # Ссылка (сокращённая)
         lines.append("")
-        lines.append(f"🔗 {project.project_url}")
-        lines.append("━" * 34)
+        lines.append(f"🔗 bitget.com/uk/events/candy-bomb")
         
         return "\n".join(lines)
     

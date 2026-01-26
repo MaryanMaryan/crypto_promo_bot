@@ -17,6 +17,7 @@ from parsers.bingx_launchpool_parser import BingxLaunchpoolParser
 from parsers.bitget_launchpool_parser import BitgetLaunchpoolParser
 from parsers.bitget_poolx_parser import BitgetPoolxParser
 from parsers.bitget_candybomb_parser import BitgetCandybombParser
+from parsers.phemex_candydrop_parser import PhemexCandydropParser
 from services.stability_tracker_service import StabilityTrackerService
 from utils.price_fetcher import get_price_fetcher
 
@@ -36,6 +37,7 @@ class ParserService:
         'bitget_launchpool': BitgetLaunchpoolParser,
         'bitget_poolx': BitgetPoolxParser,
         'bitget_candybomb': BitgetCandybombParser,
+        'phemex_candydrop': PhemexCandydropParser,
     }
     
     # Стейблкоины для которых цена = 1 USD
@@ -446,6 +448,7 @@ class ParserService:
             stats = {
                 'total': len(promotions),
                 'existing': 0,
+                'existing_global': 0,  # Существует глобально (в другой ссылке)
                 'new': 0,
                 'invalid': 0,
                 'fallback_rejected': 0,
@@ -454,23 +457,43 @@ class ParserService:
 
             with get_db_session() as db:
                 # Получаем ID существующих промоакций для этой ссылки
-                existing_promo_ids = {
+                existing_promo_ids_for_link = {
                     promo.promo_id for promo in
                     db.query(PromoHistory.promo_id)
                     .filter(PromoHistory.api_link_id == link_id)
                     .all()
                 }
+                
+                # ГЛОБАЛЬНА ПЕРЕВІРКА: получаем ВСЕ promo_id из базы (для любых ссылок)
+                all_existing_promo_ids = {
+                    promo.promo_id for promo in
+                    db.query(PromoHistory.promo_id).all()
+                }
 
-                logger.info(f"📊 В базе данных уже есть {len(existing_promo_ids)} промоакций для ссылки {link_id}")
-                if existing_promo_ids:
-                    logger.debug(f"   Существующие ID: {list(existing_promo_ids)[:10]}{'...' if len(existing_promo_ids) > 10 else ''}")
+                logger.info(f"📊 В базе данных уже есть {len(existing_promo_ids_for_link)} промоакций для ссылки {link_id}")
+                if existing_promo_ids_for_link:
+                    logger.debug(f"   Существующие ID: {list(existing_promo_ids_for_link)[:10]}{'...' if len(existing_promo_ids_for_link) > 10 else ''}")
 
-                # НОВОЕ: Очистка устаревших промо (есть в БД, но нет в API)
+                # ЗАЩИТА ОТ ЛОЖНЫХ УДАЛЕНИЙ:
+                # Если парсер вернул значительно меньше промоакций чем есть в БД,
+                # это может означать проблему с парсером (сбой сети, Cloudflare блокировка),
+                # а не реальное удаление промоакций. В этом случае НЕ удаляем "устаревшие".
                 current_promo_ids = {p.get('promo_id') for p in promotions if p.get('promo_id')}
-                outdated_ids = existing_promo_ids - current_promo_ids
+                outdated_ids = existing_promo_ids_for_link - current_promo_ids
+                
+                # Если бы мы удалили более 50% существующих промоакций - это подозрительно
+                # Скорее всего парсер вернул неполные данные
+                max_safe_delete_ratio = 0.5
+                if existing_promo_ids_for_link and len(outdated_ids) > len(existing_promo_ids_for_link) * max_safe_delete_ratio:
+                    logger.warning(
+                        f"⚠️ Защита от ложных удалений: парсер вернул значительно меньше промо "
+                        f"({len(current_promo_ids)} vs {len(existing_promo_ids_for_link)} в БД). "
+                        f"Удаление {len(outdated_ids)} промоакций отменено - возможная проблема с парсером."
+                    )
+                    outdated_ids = set()  # Не удаляем ничего
                 
                 if outdated_ids:
-                    # Удаляем устаревшие промо
+                    # Удаляем устаревшие промо (только если прошла проверка выше)
                     deleted = db.query(PromoHistory).filter(
                         PromoHistory.promo_id.in_(outdated_ids)
                     ).delete(synchronize_session=False)
@@ -478,7 +501,8 @@ class ParserService:
                     stats['outdated_removed'] = deleted
                     logger.info(f"🗑️ Удалено {deleted} устаревших промоакций (нет в API)")
 
-                # Фильтруем только новые промоакции с валидными ID
+                # Фільтруємо тільки нові промоакції з валідними ID
+                # ВАЖНО: Перевіряємо ГЛОБАЛЬНО по all_existing_promo_ids, а не тільки для цієї ссилки
                 new_promos = []
                 for promo in promotions:
                     promo_id = promo.get('promo_id')
@@ -505,21 +529,30 @@ class ParserService:
                             stats['fallback_rejected'] += 1
                             continue
 
-                    if promo_id in existing_promo_ids:
-                        # НОВОЕ: Обновляем данные существующей промоакции (winners_count, reward_per_winner и т.д.)
+                    # ГЛОБАЛЬНА ПЕРЕВІРКА: чи існує promo_id в БД (незалежно від api_link_id)
+                    if promo_id in all_existing_promo_ids:
+                        # Оновлюємо дані існуючої промоакції
                         self._update_existing_promo(db, promo_id, promo)
-                        logger.debug(f"   ⏭️ Существующая промоакция (обновлены данные): {promo.get('title', 'Без названия')} ({promo_id})")
-                        stats['existing'] += 1
+                        
+                        # Визначаємо тип існування
+                        if promo_id in existing_promo_ids_for_link:
+                            logger.debug(f"   ⏭️ Існуюча промоакція (для цієї ссилки): {promo.get('title', 'Без названия')} ({promo_id})")
+                            stats['existing'] += 1
+                        else:
+                            logger.debug(f"   ⏭️ Існуюча промоакція (з іншої ссилки): {promo.get('title', 'Без названия')} ({promo_id})")
+                            stats['existing_global'] += 1
                     else:
-                        logger.debug(f"   ✅ НОВАЯ промоакция: {promo.get('title', 'Без названия')} ({promo_id})")
+                        logger.debug(f"   ✅ НОВА промоакція: {promo.get('title', 'Без названия')} ({promo_id})")
                         new_promos.append(promo)
                         stats['new'] += 1
 
                 # Выводим детальную статистику
                 logger.info(f"📊 Результат фильтрации:")
                 logger.info(f"   Всего промоакций: {stats['total']}")
-                logger.info(f"   Уже существуют в БД: {stats['existing']}")
-                logger.info(f"   Новых промоакций: {stats['new']}")
+                logger.info(f"   Уже існують (для цієї ссилки): {stats['existing']}")
+                if stats['existing_global'] > 0:
+                    logger.info(f"   Уже існують (з іншої ссилки): {stats['existing_global']}")
+                logger.info(f"   Нових промоакцій: {stats['new']}")
                 if stats['invalid'] > 0:
                     logger.info(f"   Без promo_id: {stats['invalid']}")
                 if stats['fallback_rejected'] > 0:
@@ -882,9 +915,14 @@ class ParserService:
             if not token_price:
                 return None
             
-            # Парсим сумму
+            # Парсим сумму - извлекаем только числовую часть
             amount_str = str(amount).replace(',', '').replace(' ', '')
-            amount_num = float(amount_str)
+            # Убираем все нечисловые символы кроме точки (для decimal)
+            amount_match = re.search(r'[\d.]+', amount_str)
+            if not amount_match:
+                logger.debug(f"⚠️ Не удалось извлечь число из: {amount}")
+                return None
+            amount_num = float(amount_match.group())
             
             return amount_num * token_price
             
