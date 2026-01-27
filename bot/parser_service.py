@@ -308,8 +308,10 @@ class ParserService:
             
             logger.info(f"📦 Специальный парсер вернул {len(promotions)} промоакций")
             
-            # Фильтруем новые промоакции
-            new_promos = self._filter_new_promotions(link_id, promotions)
+            # Фильтруем новые промоакции и проверяем изменения названий
+            new_promos, title_changes = self._filter_new_promotions(link_id, promotions, target_url)
+            
+            result = None
             
             if new_promos:
                 logger.info(f"🎉 Найдено {len(new_promos)} НОВЫХ промоакций!")
@@ -327,7 +329,7 @@ class ParserService:
                 if len(new_promos) > 3:
                     message += f"\n...и ещё {len(new_promos) - 3}"
                 
-                return {
+                result = {
                     'changed': True,
                     'message': message,
                     'matched_content': str(new_promos),
@@ -335,6 +337,21 @@ class ParserService:
                     'url': url,
                     'new_promos': new_promos  # Добавляем сами промоакции для форматирования
                 }
+            
+            # Добавляем информацию об изменениях названий (если есть)
+            if title_changes:
+                logger.info(f"📝 Обнаружено {len(title_changes)} изменений названий!")
+                if result is None:
+                    result = {
+                        'changed': True,
+                        'message': f"Изменились названия {len(title_changes)} промоакций",
+                        'strategy': f'special_parser:{special_parser}',
+                        'url': url,
+                    }
+                result['title_changes'] = title_changes
+            
+            if result:
+                return result
             else:
                 logger.info(f"ℹ️ Все промоакции уже известны")
                 return None
@@ -403,9 +420,15 @@ class ParserService:
             for i, promo in enumerate(promotions, 1):
                 logger.info(f"   {i}. {promo.get('title', 'Без названия')} (promo_id: {promo.get('promo_id', 'N/A')})")
 
-            # Фильтруем только новые промоакции
+            # Определяем URL для проверки изменений названий
+            check_url = html_url or api_url or url
+
+            # Фильтруем только новые промоакции и проверяем изменения названий
             logger.info(f"🔍 Фильтрация новых промоакций...")
-            new_promos = self._filter_new_promotions(link_id, promotions)
+            new_promos, title_changes = self._filter_new_promotions(link_id, promotions, check_url)
+            
+            # Добавляем информацию об изменениях названий к результату (для обработки в воркере)
+            result_promos = []
 
             if new_promos:
                 logger.info(f"🎉 ParserService: Найдено {len(new_promos)} НОВЫХ промоакций для ссылки {link_id}")
@@ -428,19 +451,35 @@ class ParserService:
                 else:
                     logger.info(f"✅ Все {saved_count} промоакций успешно сохранены")
 
-                return new_promos[:saved_count]
+                result_promos = new_promos[:saved_count]
             else:
                 logger.info(f"ℹ️ ParserService: Все промоакции уже были в базе данных (нет новых)")
                 self.stats['successful_checks'] += 1
-                return []
+            
+            # Если были изменения названий - добавляем их как специальные элементы
+            if title_changes:
+                logger.info(f"📝 Обнаружено {len(title_changes)} изменений названий для Weex rewards!")
+                for change in title_changes:
+                    # Добавляем маркер что это изменение названия
+                    change['_is_title_change'] = True
+                    result_promos.append(change)
+            
+            return result_promos
 
         except Exception as e:
             self.stats['failed_checks'] += 1
             logger.error(f"❌ ParserService: Критическая ошибка при проверке ссылки {link_id}: {e}", exc_info=True)
             return []
     
-    def _filter_new_promotions(self, link_id: int, promotions: List[Dict]) -> List[Dict]:
-        """Фильтрует только новые промоакции и удаляет устаревшие"""
+    def _filter_new_promotions(self, link_id: int, promotions: List[Dict], link_url: str = None) -> tuple:
+        """
+        Фильтрует только новые промоакции и удаляет устаревшие.
+        
+        Returns:
+            tuple: (new_promos: List[Dict], title_changes: List[Dict])
+                - new_promos: список новых промоакций
+                - title_changes: список изменений названий (для Weex rewards)
+        """
         try:
             logger.debug(f"🔍 Начало фильтрации промоакций для ссылки {link_id}")
 
@@ -454,6 +493,9 @@ class ParserService:
                 'fallback_rejected': 0,
                 'outdated_removed': 0
             }
+            
+            # Список изменений названий (для Weex rewards)
+            title_changes = []
 
             with get_db_session() as db:
                 # Получаем ID существующих промоакций для этой ссылки
@@ -531,8 +573,10 @@ class ParserService:
 
                     # ГЛОБАЛЬНА ПЕРЕВІРКА: чи існує promo_id в БД (незалежно від api_link_id)
                     if promo_id in all_existing_promo_ids:
-                        # Оновлюємо дані існуючої промоакції
-                        self._update_existing_promo(db, promo_id, promo)
+                        # Оновлюємо дані існуючої промоакції та перевіряємо зміну назви
+                        title_change = self._update_existing_promo(db, promo_id, promo, link_url)
+                        if title_change:
+                            title_changes.append(title_change)
                         
                         # Визначаємо тип існування
                         if promo_id in existing_promo_ids_for_link:
@@ -559,15 +603,22 @@ class ParserService:
                     logger.info(f"   Fallback отклонено (нет данных): {stats['fallback_rejected']}")
                 if stats['outdated_removed'] > 0:
                     logger.info(f"   🗑️ Устаревших удалено: {stats['outdated_removed']}")
+                if title_changes:
+                    logger.info(f"   📝 Изменений названий: {len(title_changes)}")
 
-                return new_promos
+                return new_promos, title_changes
 
         except Exception as e:
             logger.error(f"❌ Ошибка фильтрации промоакций: {e}", exc_info=True)
-            return []  # В случае ошибки возвращаем пустой список
+            return [], []  # В случае ошибки возвращаем пустые списки
     
-    def _update_existing_promo(self, db, promo_id: str, promo: Dict):
-        """Обновляет данные существующей промоакции (participants_count, conditions, reward_type, max_reward и т.д.)"""
+    def _update_existing_promo(self, db, promo_id: str, promo: Dict, link_url: str = None) -> Optional[Dict]:
+        """
+        Обновляет данные существующей промоакции (participants_count, conditions, reward_type, max_reward и т.д.)
+        
+        Returns:
+            Dict с информацией об изменении названия (если было) или None
+        """
         try:
             logger.debug(f"📝 _update_existing_promo вызван для {promo.get('title')} (ID: {promo_id})")
             
@@ -581,13 +632,38 @@ class ParserService:
             start_time = promo.get('start_time')
             end_time = promo.get('end_time')
             total_prize_pool = promo.get('total_prize_pool')
+            new_title = promo.get('title')
             
             # Получаем существующую запись
             existing = db.query(PromoHistory).filter(PromoHistory.promo_id == promo_id).first()
             if not existing:
-                return
+                return None
             
             updated = False
+            title_change_info = None
+            
+            # ОТСЛЕЖИВАНИЕ ИЗМЕНЕНИЯ НАЗВАНИЯ (только для Weex rewards)
+            if link_url and 'weex.com/rewards' in link_url.lower() and new_title:
+                old_title = existing.title
+                if old_title and new_title != old_title:
+                    logger.info(f"📝 Обнаружено изменение названия для {promo_id}:")
+                    logger.info(f"   Старое: {old_title}")
+                    logger.info(f"   Новое: {new_title}")
+                    
+                    # Сохраняем предыдущее название
+                    existing.previous_title = old_title
+                    existing.title = new_title
+                    existing.last_updated = datetime.utcnow()
+                    updated = True
+                    
+                    # Формируем информацию для уведомления
+                    title_change_info = {
+                        'promo_id': promo_id,
+                        'old_title': old_title,
+                        'new_title': new_title,
+                        'link': existing.link or promo.get('link', ''),
+                        'exchange': existing.exchange or 'weex',
+                    }
             
             # ВСЕГДА обновляем participants_count (это динамическое значение)
             if participants_count:
@@ -764,9 +840,13 @@ class ParserService:
                             ParticipantsTrackerService.record_participants(exchange, promo_id, p_count, title)
                     except Exception as e:
                         logger.warning(f"⚠️ Ошибка записи участников: {e}")
+            
+            # Возвращаем информацию об изменении названия (если было)
+            return title_change_info
                 
         except Exception as e:
             logger.error(f"❌ Ошибка обновления промоакции {promo_id}: {e}")
+            return None
 
     def _enrich_promos_with_prices(self, promotions: List[Dict], exchange: str = None) -> List[Dict]:
         """
@@ -1600,11 +1680,13 @@ def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = N
                     if api_link:
                         lock_type = stability_tracker.determine_lock_type(staking_type)
 
-                        # Для Flexible устанавливаем pending и stable_since
+                        # НОВАЯ ЛОГИКА: Все НОВЫЕ монеты (включая Flexible) уведомляются сразу!
+                        # Стабилизация применяется только для ИЗМЕНЕНИЙ APR существующих монет
                         if lock_type == 'Flexible':
-                            is_pending = True
-                            stable_since = datetime.utcnow()
-                            logger.info(f"⏳ Новый Flexible стейкинг, начинаем отслеживание стабильности: {exchange} {staking.get('coin')}")
+                            # Новый Flexible стейкинг - уведомляем СРАЗУ (первое появление монеты)
+                            is_pending = False  # НЕ ждём стабилизации для новых монет
+                            stable_since = datetime.utcnow()  # Начинаем отсчёт для будущих изменений APR
+                            logger.info(f"📣 Новый Flexible стейкинг (первое появление), уведомление сразу: {exchange} {staking.get('coin')}")
                         # Для Fixed и Combined уведомляем сразу
                         elif lock_type in ['Fixed', 'Combined']:
                             is_pending = False
@@ -1690,8 +1772,9 @@ def check_and_save_new_stakings(stakings: List[Dict[str, Any]], link_id: int = N
                         # Fixed/Combined: уведомляем если прошел фильтр
                         should_add = passes_filter
                     elif lock_type == 'Flexible':
-                        # Flexible: уведомляем если готов И прошел фильтр
-                        should_add = should_notify_now and passes_filter
+                        # НОВАЯ ЛОГИКА: Новые Flexible монеты уведомляются СРАЗУ (как Fixed)
+                        # Стабилизация только для изменений APR существующих монет
+                        should_add = passes_filter  # Уведомляем сразу при первом появлении
                     else:
                         # Unknown и другие: уведомляем как Fixed (если прошел фильтр)
                         should_add = passes_filter

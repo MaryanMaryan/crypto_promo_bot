@@ -105,7 +105,7 @@ EXECUTOR_MAX_WORKERS = int(os.getenv('EXECUTOR_MAX_WORKERS', '10'))  # Пото�
 # =============================================================================
 # BROWSER POOL CONFIGURATION (пул переиспользуемых браузеров)
 # =============================================================================
-BROWSER_POOL_SIZE = int(os.getenv('BROWSER_POOL_SIZE', '3'))  # Количество браузеров в пуле
+BROWSER_POOL_SIZE = int(os.getenv('BROWSER_POOL_SIZE', '2'))  # Количество браузеров в пуле (2 для 2GB RAM)
 BROWSER_MAX_AGE_SECONDS = int(os.getenv('BROWSER_MAX_AGE_SECONDS', '1800'))  # Пересоздавать через 30 мин
 BROWSER_MAX_REQUESTS = int(os.getenv('BROWSER_MAX_REQUESTS', '50'))  # Пересоздавать после 50 запросов
 BROWSER_HEALTH_CHECK_INTERVAL = int(os.getenv('BROWSER_HEALTH_CHECK_INTERVAL', '60'))  # Проверка каждые 60 сек
@@ -130,9 +130,9 @@ CACHE_STAKINGS_TTL = float(os.getenv('CACHE_STAKINGS_TTL', '60.0'))  # TTL дл�
 # PARALLEL PARSING CONFIGURATION (параллельный парсинг)
 # =============================================================================
 PARALLEL_PARSING_ENABLED = os.getenv('PARALLEL_PARSING_ENABLED', 'true').lower() == 'true'
-PARALLEL_PARSING_WORKERS = int(os.getenv('PARALLEL_PARSING_WORKERS', '5'))  # Кол-во воркеров
+PARALLEL_PARSING_WORKERS = int(os.getenv('PARALLEL_PARSING_WORKERS', '3'))  # Кол-во воркеров (3 для 2GB RAM)
 PARALLEL_PARSING_QUEUE_SIZE = int(os.getenv('PARALLEL_PARSING_QUEUE_SIZE', '100'))  # Размер очереди
-PARALLEL_PARSING_TASK_TIMEOUT = int(os.getenv('PARALLEL_PARSING_TASK_TIMEOUT', '120'))  # Таймаут задачи (сек)
+PARALLEL_PARSING_TASK_TIMEOUT = int(os.getenv('PARALLEL_PARSING_TASK_TIMEOUT', '180'))  # Таймаут задачи (180сек для слабых серверов)
 PARALLEL_PARSING_MAX_RETRIES = int(os.getenv('PARALLEL_PARSING_MAX_RETRIES', '3'))  # Макс. повторов
 
 # =============================================================================
@@ -140,7 +140,7 @@ PARALLEL_PARSING_MAX_RETRIES = int(os.getenv('PARALLEL_PARSING_MAX_RETRIES', '3'
 # =============================================================================
 CIRCUIT_BREAKER_ENABLED = os.getenv('CIRCUIT_BREAKER_ENABLED', 'true').lower() == 'true'
 CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv('CIRCUIT_BREAKER_FAILURE_THRESHOLD', '3'))  # Неудач для блокировки
-CIRCUIT_BREAKER_RECOVERY_TIMEOUT = int(os.getenv('CIRCUIT_BREAKER_RECOVERY_TIMEOUT', '300'))  # 5 минут блокировки
+CIRCUIT_BREAKER_RECOVERY_TIMEOUT = int(os.getenv('CIRCUIT_BREAKER_RECOVERY_TIMEOUT', '180'))  # 3 минуты блокировки (быстрее восстановление)
 CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS = int(os.getenv('CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS', '1'))  # Пробных запросов
 CIRCUIT_BREAKER_SUCCESS_THRESHOLD = int(os.getenv('CIRCUIT_BREAKER_SUCCESS_THRESHOLD', '2'))  # Успехов для разблокировки
 
