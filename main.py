@@ -7,13 +7,14 @@ from bot.telegram_account_handlers import router as telegram_account_router
 from bot.exchange_credentials_handlers import router as exchange_credentials_router
 from data.database import init_database, get_db_session, ApiLink
 from data.models import StakingHistory, PromoHistory
+from utils.launchpool_filter import filter_launchpool_projects, get_link_launchpool_filters
 from services.stability_tracker_service import StabilityTrackerService
 from bot.parser_service import ParserService
 from bot.notification_service import NotificationService
 from bot.bot_manager import bot_manager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import signal
 import sys
@@ -214,6 +215,11 @@ class CryptoPromoBot:
             category = result.get('category', 'promo')
             items = result.get('items', [])
             
+            # Дополнительная фильтрация маркеров _no_new (на всякий случай)
+            items = [item for item in items if not item.get('_no_new')]
+            if not items:
+                return
+            
             if category == 'staking':
                 # Отправляем уведомления о стейкингах
                 for staking in items:
@@ -254,27 +260,56 @@ class CryptoPromoBot:
                     if not item.get('changed'):
                         continue
                     
-                    message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
-                    message += f"📝 Ссылка: {task.link_name}\n"
-                    message += f"🔍 Стратегия: {item.get('strategy')}\n"
-                    message += f"💬 {item.get('message')}\n\n"
-                    
-                    if item.get('announcement_links'):
-                        announcement_links = item.get('announcement_links')
-                        message += f"🎯 <b>Найдено анонсов: {len(announcement_links)}</b>\n\n"
-                        for i, ann in enumerate(announcement_links[:5], 1):
-                            title = ann.get('title', 'Без названия')
-                            url = ann.get('url', '')
-                            message += f"{i}. <a href=\"{url}\">{title}</a>\n"
-                    
-                    message += f"\n🔗 <a href=\"{item.get('url')}\">Открыть страницу</a>"
-                    
-                    await self.send_to_all_recipients(message)
+                    # Если есть new_promos - используем красивое форматирование
+                    new_promos = item.get('new_promos', [])
+                    if new_promos:
+                        logger.info(f"📦 Announcement с special_parser: отправка {len(new_promos)} промоакций через красивое форматирование")
+                        await self.send_notifications_to_all(new_promos)
+                    else:
+                        # Стандартный формат для обычных анонсов (без special_parser)
+                        message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
+                        message += f"📝 Ссылка: {task.link_name}\n"
+                        message += f"🔍 Стратегия: {item.get('strategy')}\n"
+                        message += f"💬 {item.get('message')}\n\n"
+                        
+                        if item.get('announcement_links'):
+                            announcement_links = item.get('announcement_links')
+                            message += f"🎯 <b>Найдено анонсов: {len(announcement_links)}</b>\n\n"
+                            for i, ann in enumerate(announcement_links[:5], 1):
+                                title = ann.get('title', 'Без названия')
+                                url = ann.get('url', '')
+                                message += f"{i}. <a href=\"{url}\">{title}</a>\n"
+                        
+                        message += f"\n🔗 <a href=\"{item.get('url')}\">Открыть страницу</a>"
+                        
+                        await self.send_to_all_recipients(message)
             
             else:
                 # Обычные промоакции
                 if items:
-                    await self.send_notifications_to_all(items)
+                    # Разделяем обычные промоакции и изменения названий
+                    regular_promos = []
+                    title_changes = []
+                    
+                    for item in items:
+                        if item.get('_is_title_change'):
+                            title_changes.append(item)
+                        else:
+                            regular_promos.append(item)
+                    
+                    # Отправляем уведомления об обычных промоакциях
+                    if regular_promos:
+                        await self.send_notifications_to_all(regular_promos)
+                    
+                    # Отправляем уведомления об изменениях названий (Weex rewards)
+                    if title_changes:
+                        logger.info(f"📝 Отправка {len(title_changes)} уведомлений об изменениях названий")
+                        for change in title_changes:
+                            for chat_id in self.notification_recipients:
+                                try:
+                                    await self.notification_service.send_title_change_notification(chat_id, change)
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Не удалось отправить уведомление об изменении названия в чат {chat_id}: {e}")
                     
         except Exception as e:
             logger.error(f"❌ Ошибка обработки результата парсинга: {e}", exc_info=True)
@@ -450,7 +485,9 @@ class CryptoPromoBot:
                     min_apr
                 )
 
-                new_count = len(new_stakings) if new_stakings else 0
+                # Фильтруем маркеры _no_new - они не являются реальными стейкингами
+                new_stakings = [s for s in (new_stakings or []) if not s.get('_no_new')]
+                new_count = len(new_stakings)
                 if new_count > 0:
                     logger.info(f"🎉 Найдено {new_count} новых стейкингов")
                     
@@ -499,48 +536,144 @@ class CryptoPromoBot:
                 if result and result.get('changed'):
                     logger.info(f"🎉 Обнаружены изменения в анонсах!")
                     
-                    message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
-                    message += f"📝 Ссылка: {link_data['name']}\n"
-                    message += f"🔍 Стратегия: {result.get('strategy')}\n"
-                    message += f"💬 {result.get('message')}\n\n"
-                    
-                    if result.get('announcement_links'):
-                        announcement_links = result.get('announcement_links')
-                        message += f"🎯 <b>Найдено анонсов: {len(announcement_links)}</b>\n\n"
-                        for i, ann in enumerate(announcement_links[:5], 1):
-                            title = ann.get('title', 'Без названия')
-                            url = ann.get('url', '')
-                            message += f"{i}. <a href=\"{url}\">{title}</a>\n"
-                    
-                    message += f"\n🔗 <a href=\"{result.get('url')}\">Открыть страницу</a>"
-                    await self.send_to_all_recipients(message)
-                    total_new_promos += 1
+                    # Если есть new_promos - используем красивое форматирование
+                    new_promos = result.get('new_promos', [])
+                    if new_promos:
+                        logger.info(f"📦 Announcement с special_parser: отправка {len(new_promos)} промоакций через красивое форматирование")
+                        await self.send_notifications_to_all(new_promos)
+                        total_new_promos += len(new_promos)
+                    else:
+                        # Стандартный формат для обычных анонсов
+                        message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
+                        message += f"📝 Ссылка: {link_data['name']}\n"
+                        message += f"🔍 Стратегия: {result.get('strategy')}\n"
+                        message += f"💬 {result.get('message')}\n\n"
+                        
+                        if result.get('announcement_links'):
+                            announcement_links = result.get('announcement_links')
+                            message += f"🎯 <b>Найдено анонсов: {len(announcement_links)}</b>\n\n"
+                            for i, ann in enumerate(announcement_links[:5], 1):
+                                title = ann.get('title', 'Без названия')
+                                url = ann.get('url', '')
+                                message += f"{i}. <a href=\"{url}\">{title}</a>\n"
+                        
+                        message += f"\n🔗 <a href=\"{result.get('url')}\">Открыть страницу</a>"
+                        await self.send_to_all_recipients(message)
+                        total_new_promos += 1
 
             else:
-                # BINGX/BITGET LAUNCHPOOL: требуют асинхронной проверки
+                # LAUNCHPOOL ПАРСЕРЫ: требуют асинхронной проверки с фильтрацией
                 special_parser = link_data.get('special_parser')
-                if special_parser in ['bingx_launchpool', 'bitget_launchpool']:
+                LAUNCHPOOL_PARSERS = ['bingx_launchpool', 'bitget_launchpool', 'bybit_launchpool', 
+                                       'gate_launchpool', 'mexc_launchpool', 'bitget_poolx']
+                
+                if special_parser in LAUNCHPOOL_PARSERS:
                     logger.info(f"🌊 Проверка {special_parser}: {link_data['name']}")
                     
                     try:
+                        # Динамический импорт парсера
+                        parser = None
+                        display_name = special_parser.replace('_', ' ').title()
+                        
                         if special_parser == 'bingx_launchpool':
                             from parsers.bingx_launchpool_parser import BingxLaunchpoolParser
                             parser = BingxLaunchpoolParser()
-                        else:
+                            display_name = "BingX Launchpool"
+                        elif special_parser == 'bitget_launchpool':
                             from parsers.bitget_launchpool_parser import BitgetLaunchpoolParser
                             parser = BitgetLaunchpoolParser()
+                            display_name = "Bitget Launchpool"
+                        elif special_parser == 'bybit_launchpool':
+                            from parsers.bybit_launchpool_parser import BybitLaunchpoolParser
+                            parser = BybitLaunchpoolParser()
+                            display_name = "Bybit Launchpool"
+                        elif special_parser == 'gate_launchpool':
+                            from parsers.gate_launchpool_parser import GateLaunchpoolParser
+                            parser = GateLaunchpoolParser()
+                            display_name = "Gate.io Launchpool"
+                        elif special_parser == 'mexc_launchpool':
+                            from parsers.mexc_launchpool_parser import MexcLaunchpoolParser
+                            parser = MexcLaunchpoolParser()
+                            display_name = "MEXC Launchpool"
+                        elif special_parser == 'bitget_poolx':
+                            from parsers.bitget_poolx_parser import BitgetPoolxParser
+                            parser = BitgetPoolxParser()
+                            display_name = "Bitget PoolX"
+                        
+                        if not parser:
+                            logger.warning(f"⚠️ Неизвестный launchpool парсер: {special_parser}")
+                            continue
                         
                         # Получаем проекты асинхронно
                         projects = await parser.get_projects_async()
                         active_upcoming = [p for p in projects if p.status in ['active', 'upcoming']]
                         
-                        # TODO: Здесь можно добавить проверку на новые проекты
-                        # и отправку уведомлений через notification_service
+                        # Получаем фильтры из настроек ссылки
+                        with get_db_session() as db:
+                            link = db.query(ApiLink).filter(ApiLink.id == link_data['id']).first()
+                            if link:
+                                filters = get_link_launchpool_filters(link)
+                            else:
+                                filters = {}
                         
-                        if active_upcoming:
-                            logger.info(f"✅ {link_data['name']}: {len(active_upcoming)} активных/предстоящих проектов")
+                        # Применяем фильтры
+                        filtered_projects = filter_launchpool_projects(
+                            active_upcoming,
+                            min_pool_usd=filters.get('min_pool_usd', 0),
+                            min_apr=filters.get('min_apr', 0),
+                            stake_coins_filter=filters.get('stake_coins_filter', []),
+                            min_user_limit_usd=filters.get('min_user_limit_usd', 0)
+                        )
+                        
+                        # Проверяем на новые проекты (сравниваем с историей)
+                        new_projects = []
+                        for project in filtered_projects:
+                            promo_id = f"{special_parser}_{project.token_symbol}"
+                            with get_db_session() as db:
+                                existing = db.query(PromoHistory).filter(
+                                    PromoHistory.promo_id == promo_id
+                                ).first()
+                                if not existing:
+                                    new_projects.append(project)
+                                    # Сохраняем в историю
+                                    history = PromoHistory(
+                                        api_link_id=link_data['id'],
+                                        promo_id=promo_id,
+                                        exchange=display_name,
+                                        title=f"{project.token_symbol} - {project.token_name}",
+                                        status=project.status,
+                                        promo_type='launchpool'
+                                    )
+                                    db.add(history)
+                                    db.commit()
+                        
+                        # Отправляем уведомления о новых проектах
+                        if new_projects:
+                            logger.info(f"🎉 {display_name}: {len(new_projects)} НОВЫХ проектов!")
+                            for project in new_projects:
+                                message = f"🌊 <b>НОВЫЙ {display_name.upper()}</b>\n\n"
+                                message += f"🪙 <b>{project.token_symbol}</b> - {project.token_name}\n"
+                                message += f"📊 Статус: {project.get_status_text()}\n"
+                                if project.pools:
+                                    max_apr = max([p.apr for p in project.pools if p.apr > 0], default=0)
+                                    if max_apr > 0:
+                                        message += f"📈 Макс. APR: {max_apr:.0f}%\n"
+                                    stake_coins = set(p.stake_coin for p in project.pools if p.stake_coin)
+                                    if stake_coins:
+                                        message += f"💰 Стейк монеты: {', '.join(stake_coins)}\n"
+                                
+                                for chat_id in self.notification_recipients:
+                                    try:
+                                        await self.bot.send_message(chat_id, message, parse_mode='HTML')
+                                    except Exception as e:
+                                        logger.warning(f"⚠️ Не удалось отправить в {chat_id}: {e}")
+                            
+                            total_new_promos += len(new_projects)
+                        
+                        if filtered_projects:
+                            logger.info(f"✅ {link_data['name']}: {len(filtered_projects)} проектов (после фильтрации)")
                         else:
-                            logger.info(f"✅ {link_data['name']}: нет активных проектов")
+                            logger.info(f"✅ {link_data['name']}: нет проектов по фильтрам")
                             
                     except Exception as e:
                         logger.error(f"❌ Ошибка {special_parser}: {e}")
@@ -721,7 +854,8 @@ class CryptoPromoBot:
                     'before': 'ERROR',
                     'after': 'ERROR',
                     'new': '-',
-                    'status': "❌ Ошибка"
+                    'status': "❌ Ошибка",
+                    'result_type': 'error'
                 })
         
         # Выводим статистику
@@ -766,23 +900,40 @@ class CryptoPromoBot:
                     )
 
                     new_count = len(new_stakings) if new_stakings else 0
-                    status = "💰 Новые стейкинги!" if new_count > 0 else "✅ Без изменений"
+                    
+                    # Получаем метаданные о парсинге
+                    total_parsed = 0
+                    is_no_new = False
+                    if new_stakings:
+                        total_parsed = new_stakings[0].get('_total_parsed', new_count)
+                        is_no_new = new_stakings[0].get('_no_new', False)
+                        if is_no_new:
+                            new_count = 0  # Это маркер, не реальные данные
+                    
+                    # Определяем статус с учётом парсинга
+                    if total_parsed > 0:
+                        status = "💰 Новые стейкинги!" if new_count > 0 else f"✅ Спарсено {total_parsed}"
+                    else:
+                        status = "⚠️ 0 результатов"
                     
                     check_results.append({
                         'name': link_data['name'],
                         'before': '-',
-                        'after': '-',
+                        'after': total_parsed,
                         'new': new_count,
                         'status': status
                     })
 
-                    if new_stakings:
-                        if new_stakings[0].get('_is_okx_group'):
-                            pools = new_stakings[0].get('_group_pools', new_stakings)
+                    if new_stakings and not is_no_new:
+                        # Фильтруем маркеры _no_new - они не являются реальными стейкингами
+                        real_stakings = [s for s in new_stakings if not s.get('_no_new')]
+                        
+                        if real_stakings and real_stakings[0].get('_is_okx_group'):
+                            pools = real_stakings[0].get('_group_pools', real_stakings)
                             message = self.notification_service.format_okx_project(pools, page_url=link_data.get('page_url'))
                             await self.bot.send_message(chat_id, message, parse_mode='HTML')
                         else:
-                            for staking in new_stakings:
+                            for staking in real_stakings:
                                 message = self.notification_service.format_new_staking(staking, page_url=link_data.get('page_url'))
                                 await self.bot.send_message(chat_id, message, parse_mode='HTML')
                                 
@@ -872,7 +1023,8 @@ class CryptoPromoBot:
                     'before': 'ERROR',
                     'after': 'ERROR',
                     'new': '-',
-                    'status': f"❌ {str(e)[:20]}..."
+                    'status': f"❌ {str(e)[:20]}...",
+                    'result_type': 'error'
                 })
                 logger.error(f"❌ Ошибка проверки {link_data['name']}: {e}", exc_info=True)
 
@@ -900,8 +1052,19 @@ class CryptoPromoBot:
 
         # ИТОГОВАЯ СТАТИСТИКА
         elapsed_time = time.time() - start_time
-        success_count = len([r for r in check_results if r['before'] != 'ERROR'])
-        error_count = len([r for r in check_results if r['before'] == 'ERROR'])
+        
+        # Подсчёт статусов по явному полю result_type
+        success_count = 0
+        error_count = 0
+        error_names = []
+        
+        for r in check_results:
+            result_type = r.get('result_type', 'success')
+            if result_type == 'error' or r['before'] == 'ERROR':
+                error_count += 1
+                error_names.append(r['name'])
+            else:
+                success_count += 1
 
         logger.info(f"📊 Всего промоакций в базе: {total_promos_in_db}")
         logger.info(f"🆕 Добавлено новых: {total_new_promos}")
@@ -909,13 +1072,25 @@ class CryptoPromoBot:
         logger.info("")
 
         # Сообщение пользователю
-        message = (
-            f"✅ Проверка завершена\n"
-            f"📊 Всего бирж: {len(check_results)} | Успешно: {success_count} | Ошибок: {error_count}\n"
-            f"🆕 Новых промоакций: {total_new_promos}\n"
-            f"💾 База данных: {total_promos_in_db} промоакций\n\n"
-            f"⏱️ Затрачено: {elapsed_time:.1f} сек"
-        )
+        if error_count > 0:
+            message = (
+                f"⚠️ Проверка завершена\n"
+                f"📊 Всего: {len(check_results)} | ✅ {success_count} | ❌ {error_count}\n"
+                f"🆕 Новых промоакций: {total_new_promos}\n"
+                f"💾 База данных: {total_promos_in_db} промоакций\n\n"
+                f"⏱️ Затрачено: {elapsed_time:.1f} сек\n\n"
+                f"❌ Ошибки: {', '.join(error_names[:5])}"
+            )
+            if len(error_names) > 5:
+                message += "..."
+        else:
+            message = (
+                f"✅ Проверка завершена\n"
+                f"📊 Всего: {len(check_results)} | ✅ {success_count}\n"
+                f"🆕 Новых промоакций: {total_new_promos}\n"
+                f"💾 База данных: {total_promos_in_db} промоакций\n\n"
+                f"⏱️ Затрачено: {elapsed_time:.1f} сек"
+            )
 
         await self.bot.send_message(chat_id, message)
         logger.info("=" * 64)
@@ -955,20 +1130,46 @@ class CryptoPromoBot:
             category = link_data.get('category', 'launches')
             special_parser = link_data.get('special_parser')
             
-            # BINGX/BITGET LAUNCHPOOL: требуют асинхронной проверки
-            if special_parser in ['bingx_launchpool', 'bitget_launchpool']:
+            # LAUNCHPOOL ПАРСЕРЫ: требуют асинхронной проверки с фильтрацией
+            LAUNCHPOOL_PARSERS = ['bingx_launchpool', 'bitget_launchpool', 'bybit_launchpool', 
+                                   'gate_launchpool', 'mexc_launchpool', 'bitget_poolx']
+            
+            if special_parser in LAUNCHPOOL_PARSERS:
                 logger.info(f"🌊 Принудительная проверка {special_parser}: {link_data['name']}")
                 
                 try:
-                    # Используем асинхронный парсер напрямую
+                    # Динамический импорт парсера
+                    parser = None
+                    display_name = special_parser.replace('_', ' ').title()
+                    
                     if special_parser == 'bingx_launchpool':
                         from parsers.bingx_launchpool_parser import BingxLaunchpoolParser
                         parser = BingxLaunchpoolParser()
                         display_name = "BingX Launchpool"
-                    else:
+                    elif special_parser == 'bitget_launchpool':
                         from parsers.bitget_launchpool_parser import BitgetLaunchpoolParser
                         parser = BitgetLaunchpoolParser()
                         display_name = "Bitget Launchpool"
+                    elif special_parser == 'bybit_launchpool':
+                        from parsers.bybit_launchpool_parser import BybitLaunchpoolParser
+                        parser = BybitLaunchpoolParser()
+                        display_name = "Bybit Launchpool"
+                    elif special_parser == 'gate_launchpool':
+                        from parsers.gate_launchpool_parser import GateLaunchpoolParser
+                        parser = GateLaunchpoolParser()
+                        display_name = "Gate.io Launchpool"
+                    elif special_parser == 'mexc_launchpool':
+                        from parsers.mexc_launchpool_parser import MexcLaunchpoolParser
+                        parser = MexcLaunchpoolParser()
+                        display_name = "MEXC Launchpool"
+                    elif special_parser == 'bitget_poolx':
+                        from parsers.bitget_poolx_parser import BitgetPoolxParser
+                        parser = BitgetPoolxParser()
+                        display_name = "Bitget PoolX"
+                    
+                    if not parser:
+                        await self.bot.send_message(chat_id, f"⚠️ Неизвестный launchpool парсер: {special_parser}")
+                        return
                     
                     # Получаем проекты асинхронно
                     projects = await parser.get_projects_async()
@@ -977,25 +1178,63 @@ class CryptoPromoBot:
                         # Фильтруем только active и upcoming
                         active_upcoming = [p for p in projects if p.status in ['active', 'upcoming']]
                         
-                        if active_upcoming:
+                        # Получаем фильтры из настроек ссылки
+                        with get_db_session() as db:
+                            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+                            if link:
+                                filters = get_link_launchpool_filters(link)
+                            else:
+                                filters = {}
+                        
+                        # Применяем фильтры
+                        filtered_projects = filter_launchpool_projects(
+                            active_upcoming,
+                            min_pool_usd=filters.get('min_pool_usd', 0),
+                            min_apr=filters.get('min_apr', 0),
+                            stake_coins_filter=filters.get('stake_coins_filter', []),
+                            min_user_limit_usd=filters.get('min_user_limit_usd', 0)
+                        )
+                        
+                        # Формируем информацию о фильтрах
+                        filter_info = ""
+                        if any([filters.get('min_pool_usd', 0) > 0, filters.get('min_apr', 0) > 0, 
+                                filters.get('stake_coins_filter'), filters.get('min_user_limit_usd', 0) > 0]):
+                            filter_info = "\n🔍 <b>Активные фильтры:</b>\n"
+                            if filters.get('min_pool_usd', 0) > 0:
+                                filter_info += f"   • Мин. пул: ${filters['min_pool_usd']:,.0f}\n"
+                            if filters.get('min_apr', 0) > 0:
+                                filter_info += f"   • Мин. APR: {filters['min_apr']:.0f}%\n"
+                            if filters.get('stake_coins_filter'):
+                                filter_info += f"   • Монеты: {', '.join(filters['stake_coins_filter'])}\n"
+                            if filters.get('min_user_limit_usd', 0) > 0:
+                                filter_info += f"   • Мин. лимит: ${filters['min_user_limit_usd']:,.0f}\n"
+                            filter_info += f"\n📊 Всего: {len(active_upcoming)} → После фильтров: {len(filtered_projects)}\n"
+                        
+                        if filtered_projects:
                             message = f"🌊 <b>{display_name.upper()}</b>\n\n"
-                            message += f"✅ Найдено проектов: {len(active_upcoming)}\n\n"
+                            message += f"✅ Найдено проектов: {len(filtered_projects)}\n"
+                            message += filter_info
+                            message += "\n"
                             
-                            for p in active_upcoming:
+                            for p in filtered_projects:
                                 status_emoji = p.get_status_emoji()
                                 message += f"{status_emoji} <b>{p.token_symbol}</b> - {p.token_name}\n"
                                 message += f"   📊 Статус: {p.get_status_text()}\n"
                                 if p.pools:
-                                    max_apr = max([pool.apr for pool in p.pools], default=0)
-                                    message += f"   📈 Макс. APR: {max_apr:.0f}%\n"
+                                    max_apr = max([pool.apr for pool in p.pools if pool.apr > 0], default=0)
+                                    if max_apr > 0:
+                                        message += f"   📈 Макс. APR: {max_apr:.0f}%\n"
+                                    stake_coins = set(pool.stake_coin for pool in p.pools if pool.stake_coin)
+                                    if stake_coins:
+                                        message += f"   💰 Стейк: {', '.join(stake_coins)}\n"
                                 message += "\n"
                             
                             await self.bot.send_message(chat_id, message, parse_mode='HTML')
                         else:
-                            await self.bot.send_message(
-                                chat_id, 
-                                f"ℹ️ В {display_name} нет активных или предстоящих проектов"
-                            )
+                            msg = f"ℹ️ В {display_name} нет проектов по вашим фильтрам"
+                            if filter_info:
+                                msg += f"\n{filter_info}"
+                            await self.bot.send_message(chat_id, msg, parse_mode='HTML')
                     else:
                         await self.bot.send_message(
                             chat_id, 
@@ -1078,6 +1317,9 @@ class CryptoPromoBot:
                     min_apr
                 )
 
+                # Фильтруем маркеры _no_new - они не являются реальными стейкингами
+                new_stakings = [s for s in (new_stakings or []) if not s.get('_no_new')]
+                
                 # Отправляем уведомления о стейкингах
                 if new_stakings:
                     for staking in new_stakings:
@@ -1123,46 +1365,54 @@ class CryptoPromoBot:
 
                 # Отправляем уведомление если были изменения
                 if result and result.get('changed'):
-                    message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
-                    message += f"📝 Ссылка: {link_data['name']}\n"
-                    message += f"🔍 Стратегия: {result.get('strategy')}\n"
-                    message += f"💬 {result.get('message')}\n\n"
-                    if result.get('matched_content'):
-                        message += f"📄 Найдено:\n{result.get('matched_content')[:500]}\n\n"
-                    
-                    # Добавляем найденные ссылки на конкретные анонсы
-                    if result.get('announcement_links'):
-                        announcement_links = result.get('announcement_links')
-                        message += f"🎯 <b>Найдено анонсов: {len(announcement_links)}</b>\n\n"
-                        for i, ann in enumerate(announcement_links[:5], 1):  # Показываем топ-5
-                            title = ann.get('title', 'Без названия')
-                            url = ann.get('url', '')
-                            description = ann.get('description', '')
-                            keywords = ', '.join(ann.get('matched_keywords', []))
-                            
-                            message += f"{i}. <a href=\"{url}\">{title}</a>\n"
-                            if description:
-                                desc_short = description[:150] + '...' if len(description) > 150 else description
-                                message += f"   📝 {desc_short}\n"
-                            if keywords:
-                                message += f"   🔑 {keywords}\n"
-                            message += "\n"
+                    # Если есть new_promos - используем красивое форматирование
+                    new_promos = result.get('new_promos', [])
+                    if new_promos:
+                        logger.info(f"📦 Announcement с special_parser: отправка {len(new_promos)} промоакций через красивое форматирование")
+                        await self.send_notifications_to_all(new_promos)
+                        await self.bot.send_message(chat_id, f"✅ Найдено {len(new_promos)} новых промоакций в ссылке '{link_data['name']}'")
                     else:
-                        message += "⚠️ <i>Конкретные ссылки на анонсы не извлечены</i>\n"
+                        # Стандартный формат для обычных анонсов
+                        message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
+                        message += f"📝 Ссылка: {link_data['name']}\n"
+                        message += f"🔍 Стратегия: {result.get('strategy')}\n"
+                        message += f"💬 {result.get('message')}\n\n"
+                        if result.get('matched_content'):
+                            message += f"📄 Найдено:\n{result.get('matched_content')[:500]}\n\n"
                         
-                        if result.get('debug_info'):
-                            debug = result['debug_info']
-                            message += f"<i>📊 Всего ссылок: {debug.get('total_links_on_page', 0)}</i>\n"
-                            message += f"<i>🌐 Браузерный парсинг: {'✅' if debug.get('browser_parsing_enabled') else '❌ ВЫКЛЮЧЕН'}</i>\n"
-                            if not debug.get('browser_parsing_enabled'):
-                                message += "<b>💡 Включите браузерный парсинг</b>\n"
+                        # Добавляем найденные ссылки на конкретные анонсы
+                        if result.get('announcement_links'):
+                            announcement_links = result.get('announcement_links')
+                            message += f"🎯 <b>Найдено анонсов: {len(announcement_links)}</b>\n\n"
+                            for i, ann in enumerate(announcement_links[:5], 1):  # Показываем топ-5
+                                title = ann.get('title', 'Без названия')
+                                url = ann.get('url', '')
+                                description = ann.get('description', '')
+                                keywords = ', '.join(ann.get('matched_keywords', []))
+                                
+                                message += f"{i}. <a href=\"{url}\">{title}</a>\n"
+                                if description:
+                                    desc_short = description[:150] + '...' if len(description) > 150 else description
+                                    message += f"   📝 {desc_short}\n"
+                                if keywords:
+                                    message += f"   🔑 {keywords}\n"
+                                message += "\n"
+                        else:
+                            message += "⚠️ <i>Конкретные ссылки на анонсы не извлечены</i>\n"
+                            
+                            if result.get('debug_info'):
+                                debug = result['debug_info']
+                                message += f"<i>📊 Всего ссылок: {debug.get('total_links_on_page', 0)}</i>\n"
+                                message += f"<i>🌐 Браузерный парсинг: {'✅' if debug.get('browser_parsing_enabled') else '❌ ВЫКЛЮЧЕН'}</i>\n"
+                                if not debug.get('browser_parsing_enabled'):
+                                    message += "<b>💡 Включите браузерный парсинг</b>\n"
+                            
+                            message += "<i>Откройте страницу ниже для просмотра</i>\n\n"
                         
-                        message += "<i>Откройте страницу ниже для просмотра</i>\n\n"
-                    
-                    message += f"🔗 <a href=\"{result.get('url')}\">Открыть страницу со всеми анонсами</a>"
+                        message += f"🔗 <a href=\"{result.get('url')}\">Открыть страницу со всеми анонсами</a>"
 
-                    await self.bot.send_message(chat_id, message, parse_mode='HTML')
-                    await self.bot.send_message(chat_id, f"✅ Найдены изменения в ссылке '{link_data['name']}'")
+                        await self.bot.send_message(chat_id, message, parse_mode='HTML')
+                        await self.bot.send_message(chat_id, f"✅ Найдены изменения в ссылке '{link_data['name']}'")
                 else:
                     await self.bot.send_message(chat_id, f"ℹ️ В ссылке '{link_data['name']}' изменений не найдено")
 
