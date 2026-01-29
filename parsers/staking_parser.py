@@ -491,6 +491,13 @@ class StakingParser:
                         
                         max_capacity = raw_max_share / decimals_divisor
                         current_deposit = raw_deposit / decimals_divisor
+                        
+                        # МОНИТОРИНГ: Предупреждаем если пул выглядит подозрительно большим
+                        # Нормальные пулы: до ~10M токенов для USDT, до ~100M для других
+                        if coin_name in ['USDT', 'USDC'] and max_capacity > 10_000_000:
+                            logger.warning(f"⚠️ Bybit {coin_name}: подозрительно большой пул {max_capacity:,.0f} (raw: {raw_max_share:,.0f}, divisor: {decimals_divisor})")
+                        elif max_capacity > 1_000_000_000:  # Больше 1B токенов - явно ошибка
+                            logger.warning(f"⚠️ Bybit {coin_name}: ОЧЕНЬ большой пул {max_capacity:,.0f} - возможно неверный divisor (raw: {raw_max_share:,.0f})")
 
                         # Процент заполнения
                         fill_percentage = None
