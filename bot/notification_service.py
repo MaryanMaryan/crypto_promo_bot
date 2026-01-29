@@ -1786,7 +1786,129 @@ class NotificationService:
                             message += f"{prefix} ${amount} → <b>+${earnings:.2f}</b> за {term_days} дн.\n"
 
                 # ═══════════════════════════════════════════════════════════
-                # ОБЫЧНЫЙ ПРОДУКТ (MEXC, Bybit, KuCoin и др.)
+                # BYBIT EARN (специальный формат с прогресс-баром)
+                # ═══════════════════════════════════════════════════════════
+                elif 'bybit' in exchange_name.lower() or staking.get('exchange', '').lower() == 'bybit':
+                    # Формат периода
+                    if term_days == 0:
+                        term_text = "Flexible"
+                    elif term_days == 1:
+                        term_text = "1 день"
+                    elif term_days < 5:
+                        term_text = f"{term_days} дня"
+                    else:
+                        term_text = f"{term_days} дней"
+
+                    # ЗАГОЛОВОК: 💰 USDT | 600.0% APR | 1 день
+                    message += f"💰 <b>{coin}</b> | {apr:.1f}% APR | {term_text}\n"
+
+                    # СТАТУС
+                    status = staking.get('status')
+                    if status:
+                        if status.lower() in ['active', 'ongoing']:
+                            status_emoji = "✅"
+                        elif status.lower() in ['sold out', 'soldout']:
+                            status_emoji = "🔴"
+                        else:
+                            status_emoji = "⚪"
+                        message += f"📈 <b>Статус:</b> {status_emoji} {self.escape_html(status)}\n"
+
+                    # КАТЕГОРИЯ (VIP, New User, CIS и т.д.)
+                    category = staking.get('category')
+                    regional_tag = staking.get('regional_tag')
+                    is_vip = staking.get('is_vip', False)
+                    is_new_user = staking.get('is_new_user', False)
+                    
+                    if is_vip:
+                        message += f"🏷 <b>Категория:</b> 👑 VIP\n"
+                    elif is_new_user or category == 'New User':
+                        message += f"🏷 <b>Категория:</b> 🎁 Новые пользователи\n"
+                    elif regional_tag == 'CIS' or category == 'CIS':
+                        message += f"🏷 <b>Категория:</b> 🌍 CIS\n"
+                    elif category:
+                        message += f"🏷 <b>Категория:</b> {self.escape_html(category)}\n"
+
+                    # ПРОГРЕСС-БАР заполненности
+                    max_capacity = staking.get('max_capacity')
+                    current_deposit = staking.get('current_deposit')
+                    fill_percentage = staking.get('fill_percentage')
+                    
+                    # Тип (Fixed/Flexible)
+                    is_flexible = term_days == 0
+                    type_label = "FLEXIBLE" if is_flexible else f"FIXED {term_days}d"
+                    
+                    message += f"\n📊 <b>{type_label}:</b>\n"
+                    
+                    if max_capacity and max_capacity > 0 and fill_percentage is not None:
+                        # Рисуем прогресс-бар
+                        bar_length = 20
+                        filled = int((fill_percentage / 100) * bar_length)
+                        empty = bar_length - filled
+                        progress_bar = "▓" * filled + "░" * empty
+                        
+                        message += f"   <code>┌{'─' * (bar_length + 4)}┐</code>\n"
+                        message += f"   <code>│{progress_bar}│</code> {fill_percentage:.2f}%\n"
+                        message += f"   <code>└{'─' * (bar_length + 4)}┘</code>\n"
+                        
+                        # Хелпер для компактного формата
+                        def format_bybit_compact(num):
+                            if num >= 1_000_000:
+                                return f"{num / 1_000_000:.2f}M"
+                            elif num >= 1000:
+                                return f"{num / 1000:.1f}K"
+                            else:
+                                return f"{num:.0f}"
+                        
+                        # Показываем заполненность в токенах
+                        current_fmt = format_bybit_compact(current_deposit) if current_deposit else "0"
+                        max_fmt = format_bybit_compact(max_capacity)
+                        message += f"   📥 {current_fmt} / {max_fmt} {coin}\n"
+                        
+                        # Доступно в USD
+                        available = max_capacity - (current_deposit or 0)
+                        if token_price and token_price > 0 and available > 0:
+                            available_usd = available * token_price
+                            message += f"   🟢 <b>Свободно:</b> ${available_usd:,.0f}\n"
+                        elif available <= 0:
+                            message += f"   🔴 <b>Пул заполнен!</b>\n"
+                    
+                    # ПОТЕНЦИАЛЬНЫЙ ДОХОД
+                    def calc_bybit_earnings(amount_usd: float, apr_pct: float, days: int) -> float:
+                        if days == 0:
+                            return amount_usd * (apr_pct / 100) / 365
+                        else:
+                            return amount_usd * (apr_pct / 100) * (days / 365)
+                    
+                    message += f"\n💰 <b>Потенциальный доход:</b>\n"
+                    amounts = [100, 500, 1000]
+                    for i, amount in enumerate(amounts):
+                        earnings = calc_bybit_earnings(amount, apr, term_days if term_days > 0 else 1)
+                        prefix = "├─" if i < len(amounts) - 1 else "└─"
+                        if term_days == 0:
+                            message += f"   {prefix} ${amount} → <b>+${earnings:.2f}</b>/день\n"
+                        else:
+                            message += f"   {prefix} ${amount} → <b>+${earnings:.2f}</b>\n"
+                    
+                    # ПЕРИОД
+                    start_time = staking.get('start_time')
+                    end_time = staking.get('end_time')
+                    
+                    if start_time or end_time:
+                        # Упрощённый формат периода
+                        start_short = start_time.split(' ')[0] if start_time else "?"
+                        end_short = end_time.split(' ')[0] if end_time else "?"
+                        message += f"\n⏰ {start_short} → {end_short}"
+                        if term_days and term_days > 0:
+                            if term_days == 1:
+                                message += f" (1 день)"
+                            elif term_days < 5:
+                                message += f" ({term_days} дня)"
+                            else:
+                                message += f" ({term_days} дней)"
+                        message += "\n"
+
+                # ═══════════════════════════════════════════════════════════
+                # ОБЫЧНЫЙ ПРОДУКТ (MEXC, KuCoin и др.)
                 # ═══════════════════════════════════════════════════════════
                 else:
                     # ЗАГОЛОВОК: Монета | APR | Срок

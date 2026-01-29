@@ -469,8 +469,26 @@ class StakingParser:
                         status = status_map.get(display_status, "Unknown")
 
                         # Заполненность
-                        max_capacity = float(product.get('product_max_share', 0))
-                        current_deposit = float(product.get('total_deposit_share', 0))
+                        # Bybit API возвращает значения в минимальных единицах (разные decimals для разных токенов)
+                        raw_max_share = float(product.get('product_max_share', 0))
+                        raw_deposit = float(product.get('total_deposit_share', 0))
+                        
+                        # Определяем decimals на основе типа токена
+                        # USDT/USDC: 3 decimals (внутренняя система Bybit)
+                        # Другие токены: эвристика по масштабу числа
+                        if coin_name in ['USDT', 'USDC']:
+                            decimals_divisor = 1000  # 10^3
+                        elif raw_max_share > 10**14:  # Очень большие числа - вероятно 8 decimals
+                            decimals_divisor = 10**8
+                        elif raw_max_share > 10**11:  # Большие числа - вероятно 6 decimals  
+                            decimals_divisor = 10**6
+                        elif raw_max_share > 10**9:  # Средние числа - 3 decimals
+                            decimals_divisor = 1000
+                        else:
+                            decimals_divisor = 1  # Маленькие числа - без деления
+                        
+                        max_capacity = raw_max_share / decimals_divisor
+                        current_deposit = raw_deposit / decimals_divisor
 
                         # Процент заполнения
                         fill_percentage = None
