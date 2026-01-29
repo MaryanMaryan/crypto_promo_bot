@@ -4,10 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/crypto_promo_bot
-Environment="PATH=/home/ubuntu/crypto_promo_bot/venv/bin"
-ExecStart=/home/ubuntu/crypto_promo_bot/venv/bin/python main.py
+User=root
+WorkingDirectory=/opt/crypto_promo_bot
+Environment=PATH=/opt/crypto_promo_bot/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/crypto_promo_bot/venv/bin/python main.py
 
 # Автоматический перезапуск при сбоях
 Restart=always
@@ -17,9 +17,6 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=crypto_promo_bot
-
-# Безопасность
-NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target

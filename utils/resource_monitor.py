@@ -158,6 +158,10 @@ class ResourceMonitor:
         self._last_alert_time: Optional[float] = None
         self._alert_cooldown = 300  # Минимум 5 минут между алертами
         
+        # Счётчик подряд идущих критических состояний (для фильтрации кратковременных пиков)
+        self._consecutive_critical = 0
+        self._critical_threshold = 2  # Отправлять уведомление только после 2+ подряд критических замеров
+        
         # Кэш процесса
         self._process: Optional[Any] = None
         
@@ -240,8 +244,12 @@ class ResourceMonitor:
             snapshot.ram_available_mb = mem.available / (1024 * 1024)
             snapshot.ram_percent = mem.percent
             
-            # CPU
-            snapshot.cpu_percent = psutil.cpu_percent(interval=0.1)
+            # CPU с усреднением (3 замера по 0.5 сек = 1.5 сек)
+            # Это избегает ложных алертов на кратковременные пики при браузерном парсинге
+            cpu_samples = []
+            for _ in range(3):
+                cpu_samples.append(psutil.cpu_percent(interval=0.5))
+            snapshot.cpu_percent = sum(cpu_samples) / len(cpu_samples)
             snapshot.cpu_count = psutil.cpu_count()
             
             # Процесс
@@ -307,19 +315,35 @@ class ResourceMonitor:
         is_critical = snapshot.ram_level == ResourceLevel.CRITICAL or snapshot.cpu_level == ResourceLevel.CRITICAL
         is_warning = snapshot.ram_level == ResourceLevel.WARNING or snapshot.cpu_level == ResourceLevel.WARNING
         
+        # Отслеживаем подряд идущие критические состояния
+        if is_critical:
+            self._consecutive_critical += 1
+        else:
+            self._consecutive_critical = 0  # Сброс при нормальном состоянии
+        
         if is_critical:
             self._critical_count += 1
-            self._last_alert_time = now
             
-            logger.warning(
-                f"🔴 CRITICAL: RAM {snapshot.ram_percent:.1f}%, CPU {snapshot.cpu_percent:.1f}%"
-            )
-            
-            if self.on_critical:
-                try:
-                    await self.on_critical(snapshot)
-                except Exception as e:
-                    logger.error(f"❌ Ошибка в on_critical callback: {e}")
+            # Отправляем уведомление только если критическое состояние держится 2+ замеров подряд
+            # Это фильтрует кратковременные пики CPU при браузерном парсинге
+            if self._consecutive_critical >= self._critical_threshold:
+                self._last_alert_time = now
+                
+                logger.warning(
+                    f"🔴 CRITICAL (持続): RAM {snapshot.ram_percent:.1f}%, CPU {snapshot.cpu_percent:.1f}% "
+                    f"(подряд: {self._consecutive_critical})"
+                )
+                
+                if self.on_critical:
+                    try:
+                        await self.on_critical(snapshot)
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка в on_critical callback: {e}")
+            else:
+                # Кратковременный пик - только логируем без уведомления
+                logger.info(
+                    f"📊 Пик ресурсов (кратковременный): RAM {snapshot.ram_percent:.1f}%, CPU {snapshot.cpu_percent:.1f}%"
+                )
         
         elif is_warning:
             self._warning_count += 1

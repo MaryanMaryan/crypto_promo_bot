@@ -36,4 +36,9 @@ try:
 except ImportError:
     pass
 
-__all__ = ['BaseParser', 'UniversalParser', 'UniversalFallbackParser', 'WeexParser', 'BrowserParser', 'AsyncBrowserParser', 'BitgetPoolxParser', 'BitgetCandybombParser']
+try:
+    from .weex_welcome_parser import WeexWelcomeParser
+except ImportError:
+    pass
+
+__all__ = ['BaseParser', 'UniversalParser', 'UniversalFallbackParser', 'WeexParser', 'WeexWelcomeParser', 'BrowserParser', 'AsyncBrowserParser', 'BitgetPoolxParser', 'BitgetCandybombParser']

@@ -25,6 +25,7 @@ from parsers.launchpool_base import (
     LaunchpoolPool
 )
 from utils.browser_pool import get_browser_pool
+from utils.price_fetcher import PriceFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class PhemexCandydropParser(LaunchpoolBaseParser):
         super().__init__()
         self.url = url
         self._pool = get_browser_pool()
+        self.price_fetcher = PriceFetcher()
     
     def fetch_data(self) -> Optional[Dict[str, Any]]:
         """
@@ -279,6 +281,17 @@ class PhemexCandydropParser(LaunchpoolBaseParser):
             # Участники
             participants = project_data.get('participants', 0)
             
+            # Получаем цену токена
+            token_price_usd = None
+            try:
+                token_price_usd = self.price_fetcher.get_token_price(name)
+                if token_price_usd:
+                    self.logger.info(f"💰 Цена {name}: ${token_price_usd}")
+                else:
+                    self.logger.debug(f"⚠️ Цена для {name} не найдена")
+            except Exception as e:
+                self.logger.debug(f"⚠️ Не удалось получить цену для {name}: {e}")
+            
             # Ссылка на проект
             project_url = f"{self.BASE_URL}#{activity_id}"
             
@@ -302,7 +315,8 @@ class PhemexCandydropParser(LaunchpoolBaseParser):
                 pools=[pool],
                 project_url=project_url,
                 total_participants=participants,
-                description=description
+                description=description,
+                token_price_usd=token_price_usd
             )
             
             return project
@@ -312,6 +326,64 @@ class PhemexCandydropParser(LaunchpoolBaseParser):
             import traceback
             self.logger.debug(traceback.format_exc())
             return None
+
+    def format_project(self, project: LaunchpoolProject) -> str:
+        """
+        Унифицированное форматирование для Phemex Candydrop
+        Стиль: 🟣 PHEMEX | 🍬 CANDYDROP | 🆕 NEW
+        """
+        def fmt_number(n):
+            """Форматирует число с разделителями"""
+            try:
+                return '{:,.0f}'.format(float(str(n)))
+            except:
+                return str(n)
+        
+        lines = []
+        
+        # Унифицированный заголовок
+        lines.append(f"🟣 PHEMEX | 🍬 CANDYDROP | 🆕 NEW")
+        lines.append("")
+        
+        # Название токена
+        if project.token_name and project.token_name != project.token_symbol:
+            lines.append(f"📛 Название: {project.token_symbol} ({project.token_name})")
+        else:
+            lines.append(f"📛 Название: {project.token_symbol}")
+        
+        # Статус
+        lines.append(f"📊 Статус: {project.get_status_emoji()} {project.get_status_text()}")
+        
+        # Пул наград с USD эквивалентом
+        if project.total_pool_tokens > 0:
+            pool_str = f"💰 Пул наград: {fmt_number(project.total_pool_tokens)} {project.token_symbol}"
+            if project.token_price_usd and project.token_price_usd > 0:
+                total_usd = project.total_pool_tokens * project.token_price_usd
+                pool_str += f" (~${fmt_number(total_usd)})"
+            lines.append(pool_str)
+        
+        # Участники (если есть)
+        if project.total_participants > 0:
+            lines.append(f"👥 Участников: {fmt_number(project.total_participants)}")
+        
+        # Осталось времени
+        if project.status == 'active' and project.end_time:
+            lines.append(f"⏰ Осталось: {project.time_remaining_str}")
+        
+        # Период
+        if project.start_time and project.end_time:
+            start_str = project.start_time.strftime('%d.%m.%Y %H:%M')
+            end_str = project.end_time.strftime('%d.%m.%Y %H:%M')
+            lines.append("")
+            lines.append(f"📅 {start_str} — {end_str} UTC")
+        
+        # Ссылка (короткий формат)
+        if project.project_url:
+            short_url = project.project_url.replace('https://', '').replace('http://', '')
+            lines.append("")
+            lines.append(f"🔗 {short_url}")
+        
+        return "\n".join(lines)
 
     def _format_promo_text(self, project: LaunchpoolProject) -> str:
         """

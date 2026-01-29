@@ -19,17 +19,17 @@ DIVIDER = "━" * 31
 
 EXCHANGE_ICONS = {
     'mexc': '🔵',
-    'gate': '⚪',
-    'gate.io': '⚪',
+    'gate': '⚪️',
+    'gate.io': '⚪️',
     'bybit': '🟡',
     'binance': '🟢',
-    'okx': '🟠',
-    'bitget': '🔴',
+    'okx': '⚫️',
+    'bitget': '🟠',
     'weex': '🟣',
+    'phemex': '🟣',
     'kucoin': '🟤',
     'htx': '🔷',
-    'bingx': '🔶',
-    'phemex': '🟪',
+    'bingx': '🔵',
 }
 
 CATEGORY_ICONS = {
@@ -38,14 +38,15 @@ CATEGORY_ICONS = {
     'drops': '🎁',
     'airdrop': '🪂',
     'candybomb': '🍬',
-    'staking': '💎',
+    'candydrop': '🍬',
     'candy': '🍬',
-    'boost': '📈',
+    'staking': '💎',
+    'boost': '🚀',
     'rewards': '🎁',
     'telegram': '📢',
     'promo': '📌',
     'token_splash': '🎯',
-    'poolx': '💧',
+    'poolx': '🎱',
 }
 
 # Названия категорий для заголовков
@@ -55,8 +56,9 @@ CATEGORY_NAMES = {
     'drops': 'DROPS',
     'airdrop': 'AIRDROP',
     'candybomb': 'CANDY BOMB',
-    'staking': 'STAKING',
+    'candydrop': 'CANDYDROP',
     'candy': 'CANDY',
+    'staking': 'STAKING',
     'boost': 'BOOST',
     'rewards': 'REWARDS',
     'telegram': 'TELEGRAM',

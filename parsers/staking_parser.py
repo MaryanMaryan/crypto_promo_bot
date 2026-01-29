@@ -11,6 +11,7 @@ from datetime import datetime
 from utils.price_fetcher import get_price_fetcher
 from utils.exchange_auth_manager import get_exchange_auth_manager
 from utils.bybit_coin_mapping import BYBIT_COIN_MAPPING
+from utils.proxy_manager import get_proxy_manager
 
 logger = logging.getLogger(__name__)
 
@@ -109,16 +110,8 @@ class StakingParser:
                 return self._parse_kucoin(data)
 
             elif 'okx' in self.exchange_name:
-                # OKX использует обычный GET
-                headers = {
-                    'accept': 'application/json',
-                    'x-locale': 'en_US',
-                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-                response = requests.get(self.api_url, headers=headers, timeout=30)
-                response.raise_for_status()
-                data = response.json()
-                return self._parse_okx(data)
+                # OKX использует обычный GET с fallback на прокси (гео-блокировка)
+                return self._parse_okx_with_proxy_fallback()
 
             elif 'gate' in self.exchange_name:
                 # Gate.io использует обычный GET с пагинацией
@@ -594,6 +587,87 @@ class StakingParser:
 
         logger.info(f"✅ Bybit: обработано {total_products} продуктов")
         return stakings
+
+    def _parse_okx_with_proxy_fallback(self) -> List[Dict[str, Any]]:
+        """
+        Парсинг OKX Flash Earn с fallback на прокси при гео-блокировке.
+        
+        Порядок:
+        1. Пробуем без прокси
+        2. Если 0 результатов → пробуем с активными прокси
+        """
+        headers = {
+            'accept': 'application/json',
+            'x-locale': 'ru_RU',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'referer': 'https://www.okx.com/ru/earn/flash-earn'
+        }
+        
+        # Попытка 1: Без прокси
+        try:
+            logger.info("📡 OKX: пробуем без прокси...")
+            response = requests.get(self.api_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            ongoing = data.get('data', {}).get('ongoingProjects', [])
+            if ongoing:
+                logger.info(f"✅ OKX: получено {len(ongoing)} проектов без прокси")
+                return self._parse_okx(data)
+            else:
+                logger.warning("⚠️ OKX: 0 проектов без прокси (возможно гео-блокировка), пробуем прокси...")
+        except Exception as e:
+            logger.warning(f"⚠️ OKX: ошибка без прокси: {e}, пробуем прокси...")
+        
+        # Попытка 2: С прокси
+        try:
+            proxy_manager = get_proxy_manager()
+            proxies_list = proxy_manager.get_all_proxies(active_only=True)
+            
+            if not proxies_list:
+                logger.warning("⚠️ OKX: нет активных прокси для fallback")
+                return []
+            
+            logger.info(f"📡 OKX: пробуем {len(proxies_list)} прокси...")
+            
+            for proxy in proxies_list:
+                try:
+                    proxy_url = f"{proxy.protocol}://{proxy.address}"
+                    proxy_dict = {
+                        "http": proxy_url,
+                        "https": proxy_url
+                    }
+                    
+                    logger.info(f"📡 OKX: пробуем прокси {proxy.address}...")
+                    response = requests.get(
+                        self.api_url, 
+                        headers=headers, 
+                        proxies=proxy_dict,
+                        timeout=30
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    ongoing = data.get('data', {}).get('ongoingProjects', [])
+                    if ongoing:
+                        logger.info(f"✅ OKX: получено {len(ongoing)} проектов через прокси {proxy.address}")
+                        # Обновляем статистику успешного прокси
+                        proxy_manager.update_proxy_stats(proxy.id, success=True)
+                        return self._parse_okx(data)
+                    else:
+                        logger.warning(f"⚠️ OKX: 0 проектов через прокси {proxy.address}")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ OKX: ошибка с прокси {proxy.address}: {str(e)[:50]}")
+                    proxy_manager.update_proxy_stats(proxy.id, success=False)
+                    continue
+            
+            logger.error("❌ OKX: все прокси не дали результатов")
+            return []
+            
+        except Exception as e:
+            logger.error(f"❌ OKX: критическая ошибка при использовании прокси: {e}")
+            return []
 
     def _parse_okx(self, data: dict) -> List[Dict[str, Any]]:
         """

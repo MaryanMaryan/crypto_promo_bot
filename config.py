@@ -100,14 +100,14 @@ LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))  # Хранить 5 �
 # =============================================================================
 # EXECUTOR CONFIGURATION (для параллельного парсинга)
 # =============================================================================
-EXECUTOR_MAX_WORKERS = int(os.getenv('EXECUTOR_MAX_WORKERS', '10'))  # Потоков для парсинга
+EXECUTOR_MAX_WORKERS = int(os.getenv('EXECUTOR_MAX_WORKERS', '12'))  # Потоков для парсинга (12 для 4GB RAM)
 
 # =============================================================================
 # BROWSER POOL CONFIGURATION (пул переиспользуемых браузеров)
 # =============================================================================
-BROWSER_POOL_SIZE = int(os.getenv('BROWSER_POOL_SIZE', '2'))  # Количество браузеров в пуле (2 для 2GB RAM)
-BROWSER_MAX_AGE_SECONDS = int(os.getenv('BROWSER_MAX_AGE_SECONDS', '1800'))  # Пересоздавать через 30 мин
-BROWSER_MAX_REQUESTS = int(os.getenv('BROWSER_MAX_REQUESTS', '50'))  # Пересоздавать после 50 запросов
+BROWSER_POOL_SIZE = int(os.getenv('BROWSER_POOL_SIZE', '2'))  # Количество браузеров в пуле (2 оптимально для 4GB + Playwright)
+BROWSER_MAX_AGE_SECONDS = int(os.getenv('BROWSER_MAX_AGE_SECONDS', '1200'))  # Пересоздавать через 20 мин
+BROWSER_MAX_REQUESTS = int(os.getenv('BROWSER_MAX_REQUESTS', '75'))  # Пересоздавать после 75 запросов
 BROWSER_HEALTH_CHECK_INTERVAL = int(os.getenv('BROWSER_HEALTH_CHECK_INTERVAL', '60'))  # Проверка каждые 60 сек
 BROWSER_POOL_ENABLED = os.getenv('BROWSER_POOL_ENABLED', 'true').lower() == 'true'  # Использовать пул
 
@@ -130,18 +130,32 @@ CACHE_STAKINGS_TTL = float(os.getenv('CACHE_STAKINGS_TTL', '60.0'))  # TTL дл�
 # PARALLEL PARSING CONFIGURATION (параллельный парсинг)
 # =============================================================================
 PARALLEL_PARSING_ENABLED = os.getenv('PARALLEL_PARSING_ENABLED', 'true').lower() == 'true'
-PARALLEL_PARSING_WORKERS = int(os.getenv('PARALLEL_PARSING_WORKERS', '3'))  # Кол-во воркеров (3 для 2GB RAM)
-PARALLEL_PARSING_QUEUE_SIZE = int(os.getenv('PARALLEL_PARSING_QUEUE_SIZE', '100'))  # Размер очереди
-PARALLEL_PARSING_TASK_TIMEOUT = int(os.getenv('PARALLEL_PARSING_TASK_TIMEOUT', '180'))  # Таймаут задачи (180сек для слабых серверов)
+PARALLEL_PARSING_WORKERS = int(os.getenv('PARALLEL_PARSING_WORKERS', '2'))  # Кол-во воркеров (2 оптимально для 4GB RAM + Playwright)
+PARALLEL_PARSING_QUEUE_SIZE = int(os.getenv('PARALLEL_PARSING_QUEUE_SIZE', '150'))  # Размер очереди
+PARALLEL_PARSING_TASK_TIMEOUT = int(os.getenv('PARALLEL_PARSING_TASK_TIMEOUT', '120'))  # Таймаут задачи (120сек для NVMe SSD)
 PARALLEL_PARSING_MAX_RETRIES = int(os.getenv('PARALLEL_PARSING_MAX_RETRIES', '3'))  # Макс. повторов
+
+# Таймауты для тяжёлых парсеров (Bitget требует браузер + медленный API)
+# Формат: exchange_name -> timeout в секундах
+PARSER_TIMEOUT_OVERRIDES = {
+    'bitget': 180,   # Bitget медленный из-за Cloudflare
+    'gate': 150,     # Gate тоже иногда медленный
+    'weex': 150,     # WEEX через браузер
+}
+# Также можно задать по категории
+PARSER_TIMEOUT_BY_CATEGORY = {
+    'candybomb': 180,   # CandyBomb требует много API запросов
+    'launchpad': 150,   # Launchpad страницы тяжёлые
+    'launchpool': 180,  # Launchpool тоже тяжёлые (Bitget и др.)
+}
 
 # =============================================================================
 # CIRCUIT BREAKER CONFIGURATION (защита от недоступных бирж)
 # =============================================================================
 CIRCUIT_BREAKER_ENABLED = os.getenv('CIRCUIT_BREAKER_ENABLED', 'true').lower() == 'true'
 CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv('CIRCUIT_BREAKER_FAILURE_THRESHOLD', '3'))  # Неудач для блокировки
-CIRCUIT_BREAKER_RECOVERY_TIMEOUT = int(os.getenv('CIRCUIT_BREAKER_RECOVERY_TIMEOUT', '180'))  # 3 минуты блокировки (быстрее восстановление)
-CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS = int(os.getenv('CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS', '1'))  # Пробных запросов
+CIRCUIT_BREAKER_RECOVERY_TIMEOUT = int(os.getenv('CIRCUIT_BREAKER_RECOVERY_TIMEOUT', '120'))  # 2 минуты блокировки (быстрее на мощном сервере)
+CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS = int(os.getenv('CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS', '2'))  # Пробных запросов
 CIRCUIT_BREAKER_SUCCESS_THRESHOLD = int(os.getenv('CIRCUIT_BREAKER_SUCCESS_THRESHOLD', '2'))  # Успехов для разблокировки
 
 # =============================================================================
@@ -149,8 +163,8 @@ CIRCUIT_BREAKER_SUCCESS_THRESHOLD = int(os.getenv('CIRCUIT_BREAKER_SUCCESS_THRES
 # =============================================================================
 RESOURCE_MONITOR_ENABLED = os.getenv('RESOURCE_MONITOR_ENABLED', 'true').lower() == 'true'
 RESOURCE_MONITOR_INTERVAL = int(os.getenv('RESOURCE_MONITOR_INTERVAL', '300'))  # Проверка каждые 5 мин
-RESOURCE_RAM_WARNING_PERCENT = float(os.getenv('RESOURCE_RAM_WARNING_PERCENT', '70.0'))  # Предупреждение RAM
-RESOURCE_RAM_CRITICAL_PERCENT = float(os.getenv('RESOURCE_RAM_CRITICAL_PERCENT', '85.0'))  # Критический RAM
+RESOURCE_RAM_WARNING_PERCENT = float(os.getenv('RESOURCE_RAM_WARNING_PERCENT', '75.0'))  # Предупреждение RAM (75% от 4GB = 3GB)
+RESOURCE_RAM_CRITICAL_PERCENT = float(os.getenv('RESOURCE_RAM_CRITICAL_PERCENT', '90.0'))  # Критический RAM (90% от 4GB = 3.6GB)
 RESOURCE_CPU_WARNING_PERCENT = float(os.getenv('RESOURCE_CPU_WARNING_PERCENT', '70.0'))  # Предупреждение CPU
 RESOURCE_CPU_CRITICAL_PERCENT = float(os.getenv('RESOURCE_CPU_CRITICAL_PERCENT', '90.0'))  # Критический CPU
 

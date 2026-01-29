@@ -181,7 +181,7 @@ class CryptoPromoBot:
         """
         for chat_id in self.notification_recipients:
             try:
-                await self.bot.send_message(chat_id, message, parse_mode=parse_mode)
+                await self.bot.send_message(chat_id, message, parse_mode=parse_mode, disable_web_page_preview=True)
             except Exception as e:
                 logger.warning(f"⚠️ Не удалось отправить сообщение в чат {chat_id}: {e}")
 
@@ -538,10 +538,21 @@ class CryptoPromoBot:
                     
                     # Если есть new_promos - используем красивое форматирование
                     new_promos = result.get('new_promos', [])
+                    strategy = result.get('strategy', '')
+                    
                     if new_promos:
                         logger.info(f"📦 Announcement с special_parser: отправка {len(new_promos)} промоакций через красивое форматирование")
                         await self.send_notifications_to_all(new_promos)
                         total_new_promos += len(new_promos)
+                    elif strategy.startswith('weex_useragent:'):
+                        # Для weex_useragent - сообщение уже красиво отформатировано
+                        message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
+                        message += f"📝 Ссылка: {link_data['name']}\n"
+                        message += f"🔍 Стратегия: {strategy}\n"
+                        message += f"💬 {result.get('message')}\n\n"
+                        message += f"🔗 <a href=\"{result.get('url')}\">Открыть страницу</a>"
+                        await self.send_to_all_recipients(message)
+                        total_new_promos += 1
                     else:
                         # Стандартный формат для обычных анонсов
                         message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
@@ -562,12 +573,79 @@ class CryptoPromoBot:
                         total_new_promos += 1
 
             else:
-                # LAUNCHPOOL ПАРСЕРЫ: требуют асинхронной проверки с фильтрацией
+                # WEEX WELCOME BONUS ПАРСЕР
                 special_parser = link_data.get('special_parser')
-                LAUNCHPOOL_PARSERS = ['bingx_launchpool', 'bitget_launchpool', 'bybit_launchpool', 
-                                       'gate_launchpool', 'mexc_launchpool', 'bitget_poolx']
                 
-                if special_parser in LAUNCHPOOL_PARSERS:
+                if special_parser == 'weex_welcome':
+                    logger.info(f"🎁 Проверка WEEX Welcome Bonus: {link_data['name']}")
+                    
+                    try:
+                        from parsers.weex_welcome_parser import WeexWelcomeParser
+                        
+                        parser = WeexWelcomeParser()
+                        
+                        # Получаем текущие награды
+                        loop = asyncio.get_event_loop()
+                        new_rewards = await loop.run_in_executor(
+                            get_executor(),
+                            parser.get_promotions
+                        )
+                        
+                        if not new_rewards:
+                            logger.warning(f"⚠️ Не удалось получить награды WEEX Welcome")
+                            continue
+                        
+                        # Получаем старый snapshot из БД
+                        with get_db_session() as db:
+                            link = db.query(ApiLink).filter(ApiLink.id == link_data['id']).first()
+                            old_snapshot = link.announcement_last_snapshot if link else None
+                        
+                        old_rewards = parser.deserialize_from_snapshot(old_snapshot) if old_snapshot else []
+                        
+                        if not old_rewards:
+                            # Первый запуск - отправляем snapshot
+                            logger.info(f"📸 Первый запуск - сохраняем snapshot ({len(new_rewards)} наград)")
+                            
+                            message = parser.format_snapshot_message(new_rewards)
+                            await self.send_to_all_recipients(message)
+                            
+                            # Сохраняем snapshot
+                            new_snapshot = parser.serialize_for_snapshot(new_rewards)
+                            with get_db_session() as db:
+                                db_link = db.query(ApiLink).filter(ApiLink.id == link_data['id']).first()
+                                if db_link:
+                                    db_link.announcement_last_snapshot = new_snapshot
+                                    db.commit()
+                            
+                            total_new_promos += 1
+                        else:
+                            # Сравниваем с предыдущим состоянием
+                            changes = parser.compare_states(old_rewards, new_rewards)
+                            
+                            if changes['has_changes']:
+                                logger.info(f"🎉 Обнаружены изменения в WEEX Welcome: {changes['summary']}")
+                                
+                                message = parser.format_changes_message(changes)
+                                await self.send_to_all_recipients(message)
+                                
+                                # Обновляем snapshot
+                                new_snapshot = parser.serialize_for_snapshot(new_rewards)
+                                with get_db_session() as db:
+                                    db_link = db.query(ApiLink).filter(ApiLink.id == link_data['id']).first()
+                                    if db_link:
+                                        db_link.announcement_last_snapshot = new_snapshot
+                                        db.commit()
+                                
+                                total_new_promos += 1
+                            else:
+                                logger.info(f"✅ WEEX Welcome: без изменений")
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка weex_welcome: {e}", exc_info=True)
+                
+                # LAUNCHPOOL ПАРСЕРЫ: требуют асинхронной проверки с фильтрацией
+                elif special_parser in ['bingx_launchpool', 'bitget_launchpool', 'bybit_launchpool', 
+                                       'gate_launchpool', 'mexc_launchpool', 'bitget_poolx']:
                     logger.info(f"🌊 Проверка {special_parser}: {link_data['name']}")
                     
                     try:
@@ -1351,7 +1429,87 @@ class CryptoPromoBot:
                     await self.bot.send_message(chat_id, f"ℹ️ В ссылке '{link_data['name']}' новых стейкингов не найдено")
 
             elif category == 'announcement':
-                # АНОНСЫ: используем check_announcement_link()
+                # WEEX WELCOME BONUS ПАРСЕР
+                if special_parser == 'weex_welcome':
+                    logger.info(f"🎁 Принудительная проверка WEEX Welcome Bonus: {link_data['name']}")
+                    
+                    try:
+                        from parsers.weex_welcome_parser import WeexWelcomeParser
+                        
+                        parser = WeexWelcomeParser()
+                        
+                        # Получаем текущие награды
+                        loop = asyncio.get_event_loop()
+                        new_rewards = await loop.run_in_executor(
+                            get_executor(),
+                            parser.get_promotions
+                        )
+                        
+                        if not new_rewards:
+                            await self.bot.send_message(chat_id, f"⚠️ Не удалось получить награды WEEX Welcome")
+                            return
+                        
+                        # Получаем старый snapshot из БД
+                        with get_db_session() as db:
+                            link = db.query(ApiLink).filter(ApiLink.id == link_data['id']).first()
+                            old_snapshot = link.announcement_last_snapshot if link else None
+                        
+                        old_rewards = parser.deserialize_from_snapshot(old_snapshot) if old_snapshot else []
+                        
+                        if not old_rewards:
+                            # Первый запуск - отправляем snapshot
+                            logger.info(f"📸 Первый запуск - сохраняем snapshot ({len(new_rewards)} наград)")
+                            
+                            message = parser.format_snapshot_message(new_rewards)
+                            await self.bot.send_message(chat_id, message, parse_mode='HTML', disable_web_page_preview=True)
+                            
+                            # Сохраняем snapshot
+                            new_snapshot = parser.serialize_for_snapshot(new_rewards)
+                            with get_db_session() as db:
+                                db_link = db.query(ApiLink).filter(ApiLink.id == link_data['id']).first()
+                                if db_link:
+                                    db_link.announcement_last_snapshot = new_snapshot
+                                    db.commit()
+                            
+                            await self.bot.send_message(chat_id, f"✅ Обнаружено {len(new_rewards)} наград в WEEX Welcome (первый запуск)")
+                        else:
+                            # Сравниваем с предыдущим состоянием
+                            changes = parser.compare_states(old_rewards, new_rewards)
+                            
+                            if changes['has_changes']:
+                                logger.info(f"🎉 Обнаружены изменения в WEEX Welcome: {changes['summary']}")
+                                
+                                message = parser.format_changes_message(changes)
+                                await self.bot.send_message(chat_id, message, parse_mode='HTML', disable_web_page_preview=True)
+                                
+                                # Обновляем snapshot
+                                new_snapshot = parser.serialize_for_snapshot(new_rewards)
+                                with get_db_session() as db:
+                                    db_link = db.query(ApiLink).filter(ApiLink.id == link_data['id']).first()
+                                    if db_link:
+                                        db_link.announcement_last_snapshot = new_snapshot
+                                        db.commit()
+                                
+                                await self.bot.send_message(chat_id, f"✅ Найдены изменения в WEEX Welcome: {changes['summary']}")
+                            else:
+                                logger.info(f"✅ WEEX Welcome: без изменений")
+                                await self.bot.send_message(chat_id, f"ℹ️ В ссылке '{link_data['name']}' изменений не найдено")
+                        
+                        # Обновляем время проверки
+                        with get_db_session() as db:
+                            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+                            if link:
+                                link.last_checked = datetime.utcnow()
+                                db.commit()
+                        
+                        return  # Выход из функции после обработки
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка принудительной проверки weex_welcome: {e}", exc_info=True)
+                        await self.bot.send_message(chat_id, f"❌ Ошибка при проверке WEEX Welcome: {str(e)}")
+                        return
+                
+                # ОБЫЧНЫЕ АНОНСЫ: используем check_announcement_link()
                 logger.info(f"📢 Принудительная проверка анонсов: {link_data['name']}")
 
                 # Синхронный вызов в отдельном потоке (используем глобальный executor)
@@ -1367,15 +1525,26 @@ class CryptoPromoBot:
                 if result and result.get('changed'):
                     # Если есть new_promos - используем красивое форматирование
                     new_promos = result.get('new_promos', [])
+                    strategy = result.get('strategy', '')
+                    
                     if new_promos:
                         logger.info(f"📦 Announcement с special_parser: отправка {len(new_promos)} промоакций через красивое форматирование")
                         await self.send_notifications_to_all(new_promos)
                         await self.bot.send_message(chat_id, f"✅ Найдено {len(new_promos)} новых промоакций в ссылке '{link_data['name']}'")
+                    elif strategy.startswith('weex_useragent:'):
+                        # Для weex_useragent - сообщение уже красиво отформатировано
+                        message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
+                        message += f"📝 Ссылка: {link_data['name']}\n"
+                        message += f"🔍 Стратегия: {strategy}\n"
+                        message += f"💬 {result.get('message')}\n\n"
+                        message += f"🔗 <a href=\"{result.get('url')}\">Открыть страницу</a>"
+                        await self.bot.send_message(chat_id, message, parse_mode='HTML')
+                        await self.bot.send_message(chat_id, f"✅ Найдены изменения в ссылке '{link_data['name']}'")
                     else:
                         # Стандартный формат для обычных анонсов
                         message = f"📢 <b>Обнаружены изменения в анонсах</b>\n\n"
                         message += f"📝 Ссылка: {link_data['name']}\n"
-                        message += f"🔍 Стратегия: {result.get('strategy')}\n"
+                        message += f"🔍 Стратегия: {strategy}\n"
                         message += f"💬 {result.get('message')}\n\n"
                         if result.get('matched_content'):
                             message += f"📄 Найдено:\n{result.get('matched_content')[:500]}\n\n"

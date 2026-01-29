@@ -49,6 +49,7 @@ class LaunchpoolProject:
     token_symbol: str  # SKR, ELSA, etc.
     token_name: str  # Полное название
     token_icon: str = ""
+    token_price_usd: Optional[float] = None  # Цена токена в USD
     
     # Статус
     status: str = "unknown"  # active, upcoming, ended

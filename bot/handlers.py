@@ -49,6 +49,8 @@ user_selections = {}
 current_stakings_state = {}
 # Глобальный словарь для хранения состояния просмотра промоакций
 current_promos_state = {}
+# Глобальный словарь для хранения контекста навигации (favorites/category)
+user_nav_context = {}
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -81,6 +83,99 @@ def push_navigation(user_id: int, context, data=None):
     if user_id not in navigation_stack:
         navigation_stack[user_id] = []
     navigation_stack[user_id].append({"context": context, "data": data or {}})
+
+
+def format_weex_referral_snapshot(referral_data: dict, last_checked=None) -> str:
+    """Форматирует snapshot реферальной программы WEEX для отображения в текущих промоакциях"""
+    from datetime import timedelta
+    
+    def format_number(num) -> str:
+        """Форматирует число с разделителями"""
+        if num is None:
+            return "N/A"
+        try:
+            return f"{int(num):,}".replace(",", " ")
+        except:
+            return str(num)
+    
+    def timestamp_to_date(ts) -> str:
+        """Конвертирует timestamp в читаемую дату"""
+        if not ts:
+            return "N/A"
+        try:
+            dt = datetime.fromtimestamp(ts / 1000)
+            months_ru = {
+                1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+                5: "мая", 6: "июня", 7: "июля", 8: "августа",
+                9: "сентября", 10: "октября", 11: "ноября", 12: "декабря"
+            }
+            return f"{dt.day} {months_ru[dt.month]} {dt.year}"
+        except:
+            return "N/A"
+    
+    # Данные могут быть вложены в referral_data
+    actual_data = referral_data.get('referral_data', referral_data)
+    
+    lines = [
+        "🔵 <b>WEEX</b> | 👥 <b>REFERRAL PROGRAM</b> | 📋 <b>SNAPSHOT</b>",
+        "",
+    ]
+    
+    # Время обновления
+    if last_checked:
+        try:
+            if isinstance(last_checked, datetime):
+                local_time = last_checked + timedelta(hours=2)
+                lines.append(f"⏱️ <b>Обновлено:</b> {local_time.strftime('%d.%m.%Y %H:%M')}")
+                lines.append("")
+        except:
+            pass
+    
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📊 <b>УРОВНИ НАГРАД</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    
+    levels = actual_data.get('levels', [])
+    
+    for i, level in enumerate(levels):
+        reward = level.get('reward_amount', 0)
+        deposit = level.get('min_deposit')
+        trading = level.get('min_trading')
+        invites = level.get('required_invites')
+        task_type = level.get('task_type')
+        
+        # Заголовок уровня
+        if task_type == 'NONE':
+            lines.append(f"🎁 <b>Уровень {i+1}</b> — За каждого друга:")
+            lines.append(f"   💰 <b>{reward} USDT</b> (макс 100 друзей)")
+        elif invites:
+            lines.append(f"🎁 <b>Уровень {i+1}</b> — Бонус ({invites} друзей):")
+            lines.append(f"   💰 <b>{reward} USDT</b>")
+        else:
+            lines.append(f"🎁 <b>Уровень {i+1}</b>:")
+            lines.append(f"   💰 <b>{reward} USDT</b>")
+        
+        # Условия
+        if deposit:
+            lines.append(f"   📋 Депозит: ≥{format_number(deposit)} USDT")
+        if trading:
+            lines.append(f"   📈 Торговля: ≥{format_number(trading)} USDT")
+        
+        lines.append("")
+    
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    
+    # Дата окончания
+    end_time = actual_data.get('end_time')
+    if end_time:
+        lines.append(f"📅 <b>Акция до:</b> {timestamp_to_date(end_time)}")
+    
+    lines.append("💸 <b>Комиссия с торговли друзей:</b> 40%")
+    lines.append("")
+    lines.append(f"🔗 <a href=\"https://www.weex.com/useragent\">Открыть страницу</a>")
+    
+    return "\n".join(lines)
 
 def pop_navigation(user_id: int):
     """Удалить последний контекст из стека"""
@@ -397,7 +492,7 @@ def get_category_management_menu():
     builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="category_launches"))
     builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="category_announcement"))
     builder.add(InlineKeyboardButton(text="❌ Назад", callback_data="back_to_main_menu"))
-    builder.adjust(1, 2, 2, 1)
+    builder.adjust(1)
     return builder.as_markup()
 
 def get_staking_management_keyboard(link=None):
@@ -414,75 +509,86 @@ def get_staking_management_keyboard(link=None):
     builder.adjust(1)
     return builder.as_markup()
 
-def get_current_stakings_keyboard(current_page: int, total_pages: int, last_updated: str = None) -> InlineKeyboardMarkup:
-    """Клавиатура навигации для текущих стейкингов
+def get_current_stakings_keyboard(current_page: int, total_pages: int, last_updated: str = None, category: str = None) -> InlineKeyboardMarkup:
+    """Клавиатура навигации для текущих стейкингов/лаунчпулов
     
     Args:
         current_page: Текущая страница
         total_pages: Всего страниц
         last_updated: Время последнего обновления (для отображения)
+        category: Категория ссылки ('staking', 'launchpool')
     """
     builder = InlineKeyboardBuilder()
 
-    # Кнопки навигации
+    # Строка 1: Навигация
     nav_buttons = []
     if current_page > 1:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data="stakings_page_prev"))
+        nav_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data="stakings_page_prev"))
+    nav_buttons.append(InlineKeyboardButton(text=f"📄 {current_page}/{total_pages}", callback_data="stakings_page_info"))
     if current_page < total_pages:
-        nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data="stakings_page_next"))
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data="stakings_page_next"))
+    builder.row(*nav_buttons)
 
-    if nav_buttons:
-        builder.row(*nav_buttons)
-
-    # Принудительная проверка (запуск парсера)
+    # Строка 2: Принудительная проверка + Настройки уведомлений
+    notif_callback = "lp_settings_show" if category == 'launchpool' else "notification_settings_show"
     builder.row(
-        InlineKeyboardButton(text="🔍 Принудительная проверка", callback_data="stakings_force_parse")
-    )
-    builder.row(
-        InlineKeyboardButton(text="⚙️ Настройки APR", callback_data="stakings_configure_apr")
+        InlineKeyboardButton(text="🔍 Принудитель...", callback_data="stakings_force_parse"),
+        InlineKeyboardButton(text="🔔 Настройки у...", callback_data=notif_callback)
     )
 
-    # Настройки уведомлений (НОВАЯ КНОПКА)
+    # Строка 3: Настройки ссылки + К ссылкам
     builder.row(
-        InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="notification_settings_show")
+        InlineKeyboardButton(text="⚙️ Настройки ссылки", callback_data="link_settings_menu"),
+        InlineKeyboardButton(text="⬅️ К ссылкам", callback_data="back_to_link_list")
     )
-
-    # Закрыть
-    builder.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="manage_cancel"))
 
     return builder.as_markup()
 
-def get_notification_settings_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура настроек умных уведомлений"""
+def get_notification_settings_keyboard(category: str = None) -> InlineKeyboardMarkup:
+    """Клавиатура настроек умных уведомлений
+    
+    Args:
+        category: Категория ссылки ('staking', 'launchpool', 'drops', etc.)
+                  Определяет callback для кнопки "Назад"
+    
+    Работающие настройки:
+    - notify_min_apr_change: Минимальный порог изменения APR
+    - flexible_stability_hours: Время стабилизации для Flexible
+    - fixed_notify_immediately: Уведомлять сразу о Fixed
+    - notify_combined_as_fixed: Обрабатывать Combined как Fixed
+    """
     builder = InlineKeyboardBuilder()
 
-    # Новые кнопки для launchpool уведомлений
+    # Настройка минимального APR (фильтр) - только для staking
+    if category == 'staking':
+        builder.add(InlineKeyboardButton(
+            text="⚙️ Минимальный APR (фильтр)",
+            callback_data="stakings_configure_apr"
+        ))
+
+    # Остальные настройки
     builder.add(InlineKeyboardButton(
-        text="📊 Изменить порог изменения APR",
+        text="📊 Порог изменения APR",
         callback_data="notification_settings_change_apr_threshold"
     ))
     builder.add(InlineKeyboardButton(
-        text="📅 Изменения периода (вкл/выкл)",
-        callback_data="notification_toggle_period_changes"
+        text="⏱️ Время стабилизации Flexible",
+        callback_data="notification_settings_change_stability"
     ))
     builder.add(InlineKeyboardButton(
-        text="🎁 Изменения общего пула наград (вкл/выкл)",
-        callback_data="notification_toggle_reward_pool_changes"
+        text="⚡ Fixed/Combined настройки",
+        callback_data="notification_fixed_settings"
     ))
-    # Внутри обработчика callback 'notification_other_settings' будут показаны остальные настройки:
-    # - Изменения APR (вкл/выкл)
-    # - Изменения статуса пула (вкл/выкл)
-    # - Изменения расчетной доходности (вкл/выкл)
-    # - Только выбранные токены (вкл/выкл)
-    # - Только новые пулы (вкл/выкл)
-    # - и другие специфические опции
-    builder.add(InlineKeyboardButton(
-        text="⚙️ Другие настройки",
-        callback_data="notification_other_settings"
-    ))
+    
+    # Определяем callback для кнопки "Назад" в зависимости от категории
+    if category in ('staking', 'launchpool'):
+        back_callback = "manage_view_current_stakings"
+    else:
+        back_callback = "manage_view_current_promos"
+    
     builder.add(InlineKeyboardButton(
         text="❌ Назад",
-        callback_data="manage_view_current_promos"
+        callback_data=back_callback
     ))
 
     builder.adjust(1)
@@ -519,46 +625,233 @@ def get_apr_threshold_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(4)  # По 4 кнопки в ряд
     return builder.as_markup()
 
-def get_other_notification_settings_keyboard(link) -> InlineKeyboardMarkup:
-    """Клавиатура других настроек уведомлений"""
+def get_fixed_settings_keyboard(link) -> InlineKeyboardMarkup:
+    """Клавиатура настроек Fixed/Combined стейкингов
+    
+    Эти настройки РАБОТАЮТ и используются в stability_tracker_service.py
+    """
     builder = InlineKeyboardBuilder()
     
-    notify_apr = getattr(link, 'notify_apr_changes', True)
-    notify_fill = getattr(link, 'notify_fill_changes', False)
-    notify_new = getattr(link, 'notify_new_stakings', True)
-    notify_stable = getattr(link, 'notify_only_stable_flexible', True)
+    notify_fixed_immediately = getattr(link, 'fixed_notify_immediately', True)
     notify_combined = getattr(link, 'notify_combined_as_fixed', True)
     
     builder.add(InlineKeyboardButton(
-        text=f"{'✅' if notify_apr else '❌'} Изменения APR",
-        callback_data="notification_toggle_apr_changes"
-    ))
-    builder.add(InlineKeyboardButton(
-        text=f"{'✅' if notify_fill else '❌'} Заполненность пулов",
-        callback_data="notification_toggle_fill_changes"
-    ))
-    builder.add(InlineKeyboardButton(
-        text=f"{'✅' if notify_new else '❌'} Новые пулы",
-        callback_data="notification_toggle_new_stakings"
-    ))
-    builder.add(InlineKeyboardButton(
-        text=f"{'✅' if notify_stable else '❌'} Только стабильные",
-        callback_data="notification_toggle_only_stable"
+        text=f"{'✅' if notify_fixed_immediately else '❌'} Fixed: уведомлять сразу",
+        callback_data="notification_toggle_fixed_immediately"
     ))
     builder.add(InlineKeyboardButton(
         text=f"{'✅' if notify_combined else '❌'} Combined как Fixed",
         callback_data="notification_toggle_combined_as_fixed"
     ))
     builder.add(InlineKeyboardButton(
-        text="⏱️ Время стабилизации",
-        callback_data="notification_settings_change_stability"
-    ))
-    builder.add(InlineKeyboardButton(
-        text="⬅️ Назад",
+        text="⬅️ Назад к настройкам",
         callback_data="notification_settings_show"
     ))
     builder.adjust(1)
     return builder.as_markup()
+
+
+# ============== НАСТРОЙКИ LAUNCHPOOL ==============
+
+def get_launchpool_settings_keyboard(link=None) -> InlineKeyboardMarkup:
+    """Клавиатура настроек Launchpool
+    
+    5 настроек фильтрации:
+    1. Мин. размер пула (USD)
+    2. Мин. APR (%)
+    3. Напоминание до окончания (часы)
+    4. Фильтр по монете стейка
+    5. Мин. лимит юзера (USD)
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Получаем текущие значения
+    min_pool = getattr(link, 'lp_min_pool_usd', 0) or 0
+    min_apr = getattr(link, 'lp_min_apr', 0) or 0
+    hours_before = getattr(link, 'lp_notify_hours_before_end', 0) or 0
+    min_user_limit = getattr(link, 'lp_min_user_limit_usd', 0) or 0
+    
+    # Фильтр монет
+    stake_coins = []
+    if link and hasattr(link, 'get_lp_stake_coins_filter'):
+        stake_coins = link.get_lp_stake_coins_filter()
+    coins_text = ', '.join(stake_coins[:3]) if stake_coins else 'все'
+    if len(stake_coins) > 3:
+        coins_text += f'... (+{len(stake_coins)-3})'
+    
+    # Кнопки настроек
+    builder.add(InlineKeyboardButton(
+        text=f"💰 Мин. пул: ${min_pool:,.0f}" if min_pool > 0 else "💰 Мин. пул: без фильтра",
+        callback_data="lp_settings_min_pool"
+    ))
+    builder.add(InlineKeyboardButton(
+        text=f"📊 Мин. APR: {min_apr:.0f}%" if min_apr > 0 else "📊 Мин. APR: без фильтра",
+        callback_data="lp_settings_min_apr"
+    ))
+    builder.add(InlineKeyboardButton(
+        text=f"⏰ Напоминание: за {hours_before}ч" if hours_before > 0 else "⏰ Напоминание: выкл",
+        callback_data="lp_settings_hours_before"
+    ))
+    builder.add(InlineKeyboardButton(
+        text=f"🪙 Монеты: {coins_text}",
+        callback_data="lp_settings_stake_coins"
+    ))
+    builder.add(InlineKeyboardButton(
+        text=f"👤 Мин. лимит юзера: ${min_user_limit:,.0f}" if min_user_limit > 0 else "👤 Мин. лимит юзера: без фильтра",
+        callback_data="lp_settings_min_user_limit"
+    ))
+    
+    # Назад
+    builder.add(InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data="manage_view_current_stakings"
+    ))
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_lp_min_pool_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора минимального размера пула"""
+    builder = InlineKeyboardBuilder()
+    
+    values = [0, 1000, 5000, 10000, 50000, 100000, 500000]
+    for val in values:
+        if val == 0:
+            text = "🚫 Без фильтра"
+        else:
+            text = f"${val:,}"
+        builder.add(InlineKeyboardButton(
+            text=text,
+            callback_data=f"lp_set_min_pool_{val}"
+        ))
+    
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="lp_settings_show"))
+    builder.adjust(3)
+    return builder.as_markup()
+
+
+def get_lp_min_apr_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора минимального APR"""
+    builder = InlineKeyboardBuilder()
+    
+    values = [0, 10, 25, 50, 100, 200, 500]
+    for val in values:
+        if val == 0:
+            text = "🚫 Без фильтра"
+        else:
+            text = f"{val}%"
+        builder.add(InlineKeyboardButton(
+            text=text,
+            callback_data=f"lp_set_min_apr_{val}"
+        ))
+    
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="lp_settings_show"))
+    builder.adjust(4)
+    return builder.as_markup()
+
+
+def get_lp_hours_before_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора напоминания до окончания"""
+    builder = InlineKeyboardBuilder()
+    
+    values = [0, 6, 12, 24, 48, 72]
+    for val in values:
+        if val == 0:
+            text = "🚫 Выключено"
+        elif val == 1:
+            text = "1 час"
+        elif val < 5:
+            text = f"{val} часа"
+        else:
+            text = f"{val} часов"
+        builder.add(InlineKeyboardButton(
+            text=text,
+            callback_data=f"lp_set_hours_before_{val}"
+        ))
+    
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="lp_settings_show"))
+    builder.adjust(3)
+    return builder.as_markup()
+
+
+def get_lp_stake_coins_keyboard(link=None) -> InlineKeyboardMarkup:
+    """Клавиатура управления фильтром монет"""
+    builder = InlineKeyboardBuilder()
+    
+    # Популярные монеты для стейка
+    popular_coins = ['BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'SOL']
+    
+    # Текущие выбранные монеты
+    current_coins = []
+    if link and hasattr(link, 'get_lp_stake_coins_filter'):
+        current_coins = link.get_lp_stake_coins_filter()
+    
+    for coin in popular_coins:
+        is_selected = coin in current_coins
+        icon = "✅" if is_selected else "➕"
+        builder.add(InlineKeyboardButton(
+            text=f"{icon} {coin}",
+            callback_data=f"lp_toggle_coin_{coin}"
+        ))
+    
+    # Кнопка очистки всех
+    if current_coins:
+        builder.add(InlineKeyboardButton(
+            text="🗑️ Очистить все",
+            callback_data="lp_clear_coins"
+        ))
+    
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="lp_settings_show"))
+    builder.adjust(3)
+    return builder.as_markup()
+
+
+def get_lp_min_user_limit_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора минимального лимита юзера"""
+    builder = InlineKeyboardBuilder()
+    
+    values = [0, 100, 500, 1000, 5000, 10000]
+    for val in values:
+        if val == 0:
+            text = "🚫 Без фильтра"
+        else:
+            text = f"${val:,}"
+        builder.add(InlineKeyboardButton(
+            text=text,
+            callback_data=f"lp_set_min_user_limit_{val}"
+        ))
+    
+    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="lp_settings_show"))
+    builder.adjust(3)
+    return builder.as_markup()
+
+
+def format_launchpool_settings_message(link) -> str:
+    """Форматирует сообщение с настройками Launchpool"""
+    min_pool = getattr(link, 'lp_min_pool_usd', 0) or 0
+    min_apr = getattr(link, 'lp_min_apr', 0) or 0
+    hours_before = getattr(link, 'lp_notify_hours_before_end', 0) or 0
+    min_user_limit = getattr(link, 'lp_min_user_limit_usd', 0) or 0
+    
+    stake_coins = []
+    if link and hasattr(link, 'get_lp_stake_coins_filter'):
+        stake_coins = link.get_lp_stake_coins_filter()
+    
+    msg = "🌊 <b>Настройки Launchpool</b>\n\n"
+    msg += f"📝 Ссылка: <b>{link.name}</b>\n\n"
+    
+    msg += "<b>Текущие фильтры:</b>\n"
+    msg += f"💰 Мин. размер пула: {f'${min_pool:,.0f}' if min_pool > 0 else 'без фильтра'}\n"
+    msg += f"📊 Мин. APR: {f'{min_apr:.0f}%' if min_apr > 0 else 'без фильтра'}\n"
+    msg += f"⏰ Напоминание до окончания: {f'за {hours_before}ч' if hours_before > 0 else 'выключено'}\n"
+    msg += f"🪙 Монеты для стейка: {', '.join(stake_coins) if stake_coins else 'все'}\n"
+    msg += f"👤 Мин. лимит юзера: {f'${min_user_limit:,.0f}' if min_user_limit > 0 else 'без фильтра'}\n"
+    
+    msg += "\n<i>Уведомления будут отправляться только для Launchpool-проектов, соответствующих этим фильтрам.</i>"
+    
+    return msg
+
 
 def get_links_keyboard(links, action_type="delete"):
     builder = InlineKeyboardBuilder()
@@ -707,6 +1000,18 @@ SPECIAL_PARSERS_CONFIG = {
         'domains': ['weex.com'],
         'emoji': '🔧'
     },
+    'weex_useragent': {
+        'name': 'WEEX Referral Monitor',
+        'description': 'Отслеживание реферальной программы WEEX (useragent)',
+        'domains': ['weex.com/useragent'],
+        'emoji': '🎁'
+    },
+    'weex_welcome': {
+        'name': 'WEEX Welcome Bonus',
+        'description': 'Отслеживание наград Welcome Bonus (welcome-event)',
+        'domains': ['weex.com/events/welcome-event', 'weex.com/events/welcome'],
+        'emoji': '🎁'
+    },
     'okx_boost': {
         'name': 'OKX Boost Parser',
         'description': 'Парсер для OKX X-Launch/Boost (web3.okx.com)',
@@ -749,6 +1054,20 @@ PARSERS_CONFIG = {
         'emoji': '🔧',
         'categories': ['airdrop', 'launchpool', 'launches'],
         'domains': ['weex.com'],
+        'priority': 3
+    },
+    'weex_useragent': {
+        'name': 'WEEX Referral Monitor',
+        'emoji': '🎁',
+        'categories': ['announcement'],
+        'domains': ['weex.com/useragent'],
+        'priority': 3
+    },
+    'weex_welcome': {
+        'name': 'WEEX Welcome Bonus',
+        'emoji': '🎁',
+        'categories': ['announcement', 'airdrop', 'drops'],
+        'domains': ['weex.com/events/welcome-event', 'weex.com/events/welcome'],
         'priority': 3
     },
     'okx_boost': {
@@ -1001,6 +1320,10 @@ def auto_detect_parser_for_launches(url: str, category: str) -> tuple:
     if detected_exchange == 'phemex' and ('candy-drop' in url_lower or 'candydrop' in url_lower or '/events/candy' in url_lower):
         return ('phemex_candydrop', 'Phemex Candy Drop', '🍬')
     
+    # Для WEEX Welcome Bonus - проверяем по URL
+    if detected_exchange == 'weex' and ('welcome-event' in url_lower or '/events/welcome' in url_lower):
+        return ('weex_welcome', 'WEEX Welcome Bonus', '🎁')
+    
     # Для launchpool - ищем специализированный парсер
     if category == 'launchpool':
         if detected_exchange in launchpool_parsers:
@@ -1223,7 +1546,7 @@ async def show_favorites_page(callback: CallbackQuery, page: int = 0):
         
         if not links:
             builder = InlineKeyboardBuilder()
-            builder.add(InlineKeyboardButton(text="➕ Добавить в избранное", callback_data="main_add_link"))
+            builder.add(InlineKeyboardButton(text="➕ Добавить в избранное", callback_data="add_to_favorites_list"))
             builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
             builder.adjust(1)
             
@@ -1291,7 +1614,7 @@ async def show_favorites_page(callback: CallbackQuery, page: int = 0):
             builder.row(*nav_buttons)
         
         builder.row(
-            InlineKeyboardButton(text="➕ Добавить", callback_data="main_add_link"),
+            InlineKeyboardButton(text="➕ Добавить", callback_data="add_to_favorites_list"),
             InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu")
         )
         
@@ -1316,20 +1639,48 @@ async def show_favorites_page(callback: CallbackQuery, page: int = 0):
 
 @router.callback_query(F.data.startswith("favorite_manage_"))
 async def favorite_manage_handler(callback: CallbackQuery):
-    """Управление избранной ссылкой - показывает такое же меню как в Управлении ссылками"""
+    """Управление избранной ссылкой - сразу показывает промоакции/стейкинги как в обычных категориях"""
     try:
         link_id = int(callback.data.replace("favorite_manage_", ""))
+        user_id = callback.from_user.id
         
+        # Сохраняем link_id для использования в других обработчиках
+        user_selections[user_id] = link_id
+        # Сохраняем контекст что пришли из избранных
+        user_nav_context[user_id] = 'favorites'
+        
+        # Получаем информацию о ссылке для определения категории
         link = await get_link_by_id_async(link_id)
+        
         if not link:
             await callback.answer("❌ Ссылка не найдена", show_alert=True)
             return
         
-        # Сохраняем выбор пользователя для последующих действий
-        user_id = callback.from_user.id
-        user_selections[user_id] = link_id
+        category = link.category or 'launches'
         
-        # Показываем инфо о ссылке с кнопками управления
+        # В зависимости от категории - сразу показываем нужный контент (как в обычных категориях)
+        if category == 'staking':
+            # Для стейкинга - показываем текущие стейкинги
+            await _show_current_stakings_direct(callback, link_id)
+        elif category in ['airdrop', 'candybomb', 'drops', 'launches', 'launchpool', 'launchpad']:
+            # Для промоакций - сразу показываем текущие промоакции
+            await _show_current_promos_direct(callback, link_id)
+        elif category == 'announcement' and link.special_parser:
+            # Announcement со special_parser - показываем промоакции
+            await _show_current_promos_direct(callback, link_id)
+        else:
+            # Для остальных категорий (announcement без special_parser, telegram и т.д.) 
+            # показываем меню управления
+            await _show_favorite_link_management(callback, link_id, link)
+        
+    except Exception as e:
+        logger.error(f"Ошибка в favorite_manage_handler: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
+
+
+async def _show_favorite_link_management(callback: CallbackQuery, link_id: int, link):
+    """Показать меню управления для избранной ссылки (настройки)"""
+    try:
         category_icons = {
             'launches': '🚀', 'launchpad': '🚀', 'launchpool': '🌊',
             'drops': '🎁', 'airdrop': '🪂', 'candybomb': '🍬',
@@ -1340,15 +1691,23 @@ async def favorite_manage_handler(callback: CallbackQuery):
         status = "✅ Активна" if link.is_active else "❌ Остановлена"
         
         # Используем унифицированную клавиатуру для всех категорий
-        # Это включает кнопку Trading промо для BybitTS
         keyboard = get_unified_link_management_keyboard(link)
         
-        # Добавляем кнопку "Убрать из избранного"
+        # Создаём новую клавиатуру с нужными кнопками
         builder = InlineKeyboardBuilder()
-        # Копируем кнопки из keyboard
+        
+        # Добавляем кнопку "Текущие промоакции" первой для возврата к просмотру
+        if category in ['airdrop', 'candybomb', 'drops', 'launches', 'launchpool', 'launchpad'] or \
+           (category == 'announcement' and link.special_parser):
+            builder.add(InlineKeyboardButton(text="🎁 Текущие промоакции", callback_data="manage_view_current_promos"))
+        elif category == 'staking':
+            builder.add(InlineKeyboardButton(text="💰 Текущие стейкинги", callback_data="manage_view_current_stakings"))
+        
+        # Копируем остальные кнопки из keyboard (кроме некоторых)
+        skip_callbacks = {"back_to_link_list", "manage_view_current_promos", "manage_view_current_stakings"}
         for row in keyboard.inline_keyboard:
             for btn in row:
-                if btn.callback_data != "back_to_link_list":  # Заменим эту кнопку
+                if btn.callback_data not in skip_callbacks:
                     builder.add(btn)
         
         # Добавляем специальные кнопки для избранного
@@ -1369,7 +1728,7 @@ async def favorite_manage_handler(callback: CallbackQuery):
         await callback.answer()
         
     except Exception as e:
-        logger.error(f"Ошибка в favorite_manage_handler: {e}")
+        logger.error(f"Ошибка в _show_favorite_link_management: {e}")
         await callback.answer("Произошла ошибка", show_alert=True)
 
 @router.callback_query(F.data.startswith("remove_favorite_"))
@@ -1399,6 +1758,144 @@ async def remove_favorite_handler(callback: CallbackQuery):
         
     except Exception as e:
         logger.error(f"Ошибка удаления из избранного: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "add_to_favorites_list")
+async def add_to_favorites_list_handler(callback: CallbackQuery):
+    """Показать список ссылок для добавления в избранное"""
+    await show_add_to_favorites_page(callback, page=0)
+
+@router.callback_query(F.data.startswith("add_fav_page_"))
+async def add_to_favorites_page_handler(callback: CallbackQuery):
+    """Обработчик пагинации списка ссылок для добавления в избранное"""
+    page = int(callback.data.split("_")[-1])
+    await show_add_to_favorites_page(callback, page=page)
+
+async def show_add_to_favorites_page(callback: CallbackQuery, page: int = 0):
+    """Показать страницу со списком ссылок, которые можно добавить в избранное"""
+    try:
+        # Получаем все ссылки
+        all_links = await get_links_async()
+        
+        # Фильтруем - только те, что НЕ в избранном
+        links = [link for link in all_links if not link.is_favorite]
+        
+        category_icons = {
+            'launches': '🚀', 'launchpad': '🚀', 'launchpool': '🌊',
+            'drops': '🎁', 'airdrop': '🪂', 'candybomb': '🍬',
+            'staking': '💰', 'announcement': '📢'
+        }
+        
+        if not links:
+            builder = InlineKeyboardBuilder()
+            builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="main_favorites"))
+            builder.adjust(1)
+            
+            await callback.message.edit_text(
+                "⭐ <b>ДОБАВИТЬ В ИЗБРАННОЕ</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "✅ <i>Все ссылки уже в избранном!</i>",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+        
+        # Пагинация
+        per_page = 10
+        total_pages = max(1, (len(links) + per_page - 1) // per_page)
+        page = max(0, min(page, total_pages - 1))
+        start_idx = page * per_page
+        end_idx = start_idx + per_page
+        page_links = links[start_idx:end_idx]
+        
+        # Формируем сообщение
+        response = "⭐ <b>ДОБАВИТЬ В ИЗБРАННОЕ</b>\n"
+        response += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        response += f"📊 Доступно для добавления: {len(links)} ссылок\n\n"
+        response += "<i>Выберите ссылку для добавления:</i>\n\n"
+        
+        for link in page_links:
+            status = "✅" if link.is_active else "❌"
+            category = link.category or 'launches'
+            cat_icon = category_icons.get(category, '📁')
+            response += f"{cat_icon} <b>{link.name}</b> {status}\n"
+        
+        # Клавиатура
+        builder = InlineKeyboardBuilder()
+        
+        # Кнопки для каждой ссылки
+        for link in page_links:
+            category = link.category or 'launches'
+            cat_icon = category_icons.get(category, '📁')
+            builder.add(InlineKeyboardButton(
+                text=f"{cat_icon} {link.name}",
+                callback_data=f"add_favorite_{link.id}"
+            ))
+        
+        # Пагинация
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"add_fav_page_{page-1}"))
+        if total_pages > 1:
+            nav_buttons.append(InlineKeyboardButton(text=f"📄 {page+1}/{total_pages}", callback_data="add_fav_info"))
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"add_fav_page_{page+1}"))
+        
+        if nav_buttons:
+            builder.row(*nav_buttons)
+        
+        builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="main_favorites"))
+        
+        # Adjust
+        adjust_pattern = [2] * ((len(page_links) + 1) // 2)
+        if nav_buttons:
+            adjust_pattern.append(len(nav_buttons))
+        adjust_pattern.append(1)
+        builder.adjust(*adjust_pattern)
+        
+        await callback.message.edit_text(
+            response,
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в show_add_to_favorites_page: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("add_favorite_"))
+async def add_favorite_handler(callback: CallbackQuery):
+    """Добавить ссылку в избранное"""
+    try:
+        link_id = int(callback.data.replace("add_favorite_", ""))
+        
+        def add_to_favorites(session):
+            link = session.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                raise ValueError("Ссылка не найдена")
+            link.is_favorite = True
+            return link.name
+        
+        link_name = atomic_operation(add_to_favorites)
+        
+        # Инвалидируем кэш
+        from utils.cache import get_cache_manager
+        cache = get_cache_manager()
+        cache.invalidate("links:favorites")
+        cache.invalidate("links:all")
+        
+        await callback.answer(f"⭐ {link_name} добавлена в избранное!")
+        
+        # Возвращаемся к списку избранных
+        await show_favorites_page(callback, page=0)
+        
+    except Exception as e:
+        logger.error(f"Ошибка добавления в избранное: {e}")
         await callback.answer("Произошла ошибка", show_alert=True)
 
 
@@ -1538,18 +2035,16 @@ async def show_links_page(callback: CallbackQuery, page: int = 0):
 async def main_add_link_handler(callback: CallbackQuery, state: FSMContext):
     """Inline: Добавить ссылку - переход к выбору категории"""
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="⭐ Избранные", callback_data="add_category_favorite"))
     builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="add_category_launches"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
     builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
     builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
-    builder.adjust(1, 2, 2, 1)
+    builder.adjust(2, 2, 1)
 
     await callback.message.edit_text(
         "➕ <b>Добавление ссылки</b>\n\n"
-        "Выберите категорию для новой ссылки:\n\n"
-        "⭐ <b>Избранные</b> - важные ссылки для быстрого доступа",
+        "Выберите категорию для новой ссылки:",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -1815,18 +2310,16 @@ async def menu_list_links(message: Message):
 async def menu_add_link(message: Message, state: FSMContext):
     """Начало процесса добавления ссылки - выбор категории"""
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="⭐ Избранные", callback_data="add_category_favorite"))
     builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="add_category_launches"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
     builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
-    builder.adjust(1, 2, 2, 1)
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+    builder.adjust(2, 2, 1)
 
     await message.answer(
-        "🔗 <b>Добавление новой ссылки</b>\n\n"
-        "🗂️ <b>Шаг 1:</b> Выберите категорию ссылки:\n\n"
-        "⭐ <b>Избранные</b> - важные ссылки для быстрого доступа",
+        "➕ <b>Добавление ссылки</b>\n\n"
+        "Выберите категорию для новой ссылки:",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -2669,6 +3162,9 @@ def auto_detect_parser_for_airdrop(url: str) -> tuple:
     
     # Специальные парсеры для airdrop
     if 'weex.com' in url_lower:
+        # WEEX Welcome Bonus - специальный парсер
+        if 'welcome-event' in url_lower or '/events/welcome' in url_lower:
+            return ('weex_welcome', 'WEEX Welcome Bonus', '🎁')
         return ('weex', 'WEEX Parser', '🔧')
     elif 'okx.com' in url_lower:
         return ('okx_boost', 'OKX Boost', '🚀')
@@ -3173,17 +3669,11 @@ async def process_announcement_page_type(callback: CallbackQuery, state: FSMCont
     
     data = await state.get_data()
     custom_name = data.get('custom_name', '')
+    html_url = data.get('html_url', '')
     
-    # Показываем выбор стратегии
-    builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="🔍 Любые изменения", callback_data="announcement_strategy_any_change"))
-    builder.add(InlineKeyboardButton(text="🎯 Изменения в элементе", callback_data="announcement_strategy_element_change"))
-    builder.add(InlineKeyboardButton(text="📝 Любое ключевое слово", callback_data="announcement_strategy_any_keyword"))
-    builder.add(InlineKeyboardButton(text="📚 Все ключевые слова", callback_data="announcement_strategy_all_keywords"))
-    builder.add(InlineKeyboardButton(text="⚡ Regex паттерн", callback_data="announcement_strategy_regex"))
-    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_page_type_announcement"))
-    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
-    builder.adjust(1, 1, 1, 1, 1, 2)
+    # Проверяем наличие специального парсера для URL
+    special_parsers = detect_special_parser_for_url(html_url)
+    announcement_special_parsers = [p for p in special_parsers if p in PARSERS_CONFIG and 'announcement' in PARSERS_CONFIG[p].get('categories', [])]
     
     page_type_display = {
         'html': '📄 Статическая',
@@ -3191,17 +3681,59 @@ async def process_announcement_page_type(callback: CallbackQuery, state: FSMCont
         'auto': '❓ Автоопределение'
     }.get(page_type, 'Неизвестно')
     
-    await callback.message.edit_text(
-        f"✅ Тип страницы: <b>{page_type_display}</b>\n\n"
-        f"🎯 <b>Шаг 5/6:</b> Выберите стратегию отслеживания\n\n"
-        f"<b>🔍 Любые изменения</b> - уведомления о любых изменениях\n"
-        f"<b>🎯 Изменения в элементе</b> - отслеживание конкретного элемента\n"
-        f"<b>📝 Любое ключевое слово</b> - поиск любого из заданных слов\n"
-        f"<b>📚 Все ключевые слова</b> - все слова должны присутствовать\n"
-        f"<b>⚡ Regex</b> - поиск по регулярному выражению",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
+    # Если есть специальный парсер для announcement категории - предлагаем его
+    if announcement_special_parsers:
+        builder = InlineKeyboardBuilder()
+        
+        # Добавляем специальные парсеры
+        for parser_id in announcement_special_parsers:
+            config = SPECIAL_PARSERS_CONFIG.get(parser_id, {})
+            parser_name = config.get('name', parser_id)
+            parser_emoji = config.get('emoji', '🔧')
+            builder.add(InlineKeyboardButton(
+                text=f"{parser_emoji} {parser_name} (рекомендуется)",
+                callback_data=f"announcement_special_parser_{parser_id}"
+            ))
+        
+        # Также добавляем стандартные стратегии
+        builder.add(InlineKeyboardButton(text="🔍 Любые изменения (стандарт)", callback_data="announcement_strategy_any_change"))
+        builder.add(InlineKeyboardButton(text="🎯 Изменения в элементе", callback_data="announcement_strategy_element_change"))
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_page_type_announcement"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(1, 1, 1, 2)
+        
+        await callback.message.edit_text(
+            f"✅ Тип страницы: <b>{page_type_display}</b>\n\n"
+            f"🎯 <b>Шаг 5/6:</b> Обнаружен специальный парсер!\n\n"
+            f"Для этого URL доступен специализированный парсер, который лучше понимает структуру страницы.\n\n"
+            f"<b>Рекомендуется</b> использовать специальный парсер для точного отслеживания изменений.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+    else:
+        # Показываем стандартные стратегии
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🔍 Любые изменения", callback_data="announcement_strategy_any_change"))
+        builder.add(InlineKeyboardButton(text="🎯 Изменения в элементе", callback_data="announcement_strategy_element_change"))
+        builder.add(InlineKeyboardButton(text="📝 Любое ключевое слово", callback_data="announcement_strategy_any_keyword"))
+        builder.add(InlineKeyboardButton(text="📚 Все ключевые слова", callback_data="announcement_strategy_all_keywords"))
+        builder.add(InlineKeyboardButton(text="⚡ Regex паттерн", callback_data="announcement_strategy_regex"))
+        builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_page_type_announcement"))
+        builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+        builder.adjust(1, 1, 1, 1, 1, 2)
+        
+        await callback.message.edit_text(
+            f"✅ Тип страницы: <b>{page_type_display}</b>\n\n"
+            f"🎯 <b>Шаг 5/6:</b> Выберите стратегию отслеживания\n\n"
+            f"<b>🔍 Любые изменения</b> - уведомления о любых изменениях\n"
+            f"<b>🎯 Изменения в элементе</b> - отслеживание конкретного элемента\n"
+            f"<b>📝 Любое ключевое слово</b> - поиск любого из заданных слов\n"
+            f"<b>📚 Все ключевые слова</b> - все слова должны присутствовать\n"
+            f"<b>⚡ Regex</b> - поиск по регулярному выражению",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
+        )
+    
     await state.set_state(AddLinkStates.waiting_for_announcement_strategy)
     await callback.answer()
 
@@ -3300,6 +3832,56 @@ async def process_announcement_strategy_new(callback: CallbackQuery, state: FSMC
         )
         await state.set_state(AddLinkStates.waiting_for_announcement_regex)
     
+    await callback.answer()
+
+
+# Обработчик выбора специального парсера для анонсов
+@router.callback_query(AddLinkStates.waiting_for_announcement_strategy, F.data.startswith("announcement_special_parser_"))
+async def process_announcement_special_parser(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора специального парсера для анонсов"""
+    parser_id = callback.data.replace("announcement_special_parser_", "")
+    
+    # Получаем информацию о парсере
+    config = SPECIAL_PARSERS_CONFIG.get(parser_id, {})
+    parser_name = config.get('name', parser_id)
+    parser_emoji = config.get('emoji', '🔧')
+    
+    # Сохраняем выбор специального парсера
+    await state.update_data(
+        selected_parser=parser_id,
+        announcement_strategy='special_parser',
+        special_parser_id=parser_id
+    )
+    
+    data = await state.get_data()
+    custom_name = data.get('custom_name', '')
+    
+    # Переходим к выбору интервала
+    builder = InlineKeyboardBuilder()
+    
+    presets = [
+        ("1 минута", 60), ("5 минут", 300), ("10 минут", 600),
+        ("30 минут", 1800), ("1 час", 3600), ("2 часа", 7200),
+        ("6 часов", 21600), ("12 часов", 43200), ("24 часа", 86400)
+    ]
+    
+    for text, seconds in presets:
+        builder.add(InlineKeyboardButton(text=text, callback_data=f"add_interval_{seconds}"))
+    builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_strategy_announcement"))
+    builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add_link"))
+    builder.adjust(3, 3, 3, 2)
+    
+    await callback.message.edit_text(
+        f"✅ Парсер: <b>{parser_emoji} {parser_name}</b>\n\n"
+        f"⏰ <b>Последний шаг:</b> Выберите интервал проверки\n\n"
+        f"<b>Имя:</b> {custom_name}\n"
+        f"<b>Категория:</b> Анонсы\n"
+        f"<b>Парсер:</b> {parser_name}\n\n"
+        f"Как часто проверять страницу?",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AddLinkStates.waiting_for_interval)
     await callback.answer()
 
 
@@ -3960,18 +4542,16 @@ async def back_to_telegram_channel(callback: CallbackQuery, state: FSMContext):
 async def back_to_category(callback: CallbackQuery, state: FSMContext):
     """Возврат к выбору категории"""
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="⭐ Избранные", callback_data="add_category_favorite"))
     builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="add_category_launches"))
     builder.add(InlineKeyboardButton(text="🪂 Аирдроп", callback_data="add_category_airdrop"))
     builder.add(InlineKeyboardButton(text="💰 Стейкинг", callback_data="add_category_staking"))
     builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="add_category_announcement"))
-    builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add_link"))
-    builder.adjust(1, 2, 2, 1)
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
+    builder.adjust(2, 2, 1)
 
     await callback.message.edit_text(
-        "🔗 <b>Добавление новой ссылки</b>\n\n"
-        "🗂️ <b>Шаг 1:</b> Выберите категорию ссылки:\n\n"
-        "⭐ <b>Избранные</b> - важные ссылки для быстрого доступа",
+        "➕ <b>Добавление ссылки</b>\n\n"
+        "Выберите категорию для новой ссылки:",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -4040,7 +4620,6 @@ async def _show_interval_selection_msg(message: Message, state: FSMContext, cust
         parse_mode="HTML"
     )
     await state.set_state(AddLinkStates.waiting_for_interval)
-    await callback.answer()
 
 
 async def _show_parser_selection(callback: CallbackQuery, state: FSMContext):
@@ -4371,16 +4950,19 @@ async def back_to_html_url(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(AddLinkStates.waiting_for_html_url)
     await callback.answer()
-    await state.set_state(AddLinkStates.waiting_for_example_url)
-    await callback.answer()
 
 @router.callback_query(F.data == "cancel_add_link")
 async def cancel_add_link(callback: CallbackQuery, state: FSMContext):
-    """Отмена добавления ссылки"""
+    """Отмена добавления ссылки - возврат в главное меню"""
     await state.clear()
+    clear_navigation(callback.from_user.id)
     await callback.message.edit_text(
-        "❌ Добавление ссылки отменено\n\nЧто вы хотите сделать?",
-        reply_markup=get_cancel_keyboard_with_navigation()
+        "🤖 <b>Добро пожаловать в Heisenberg pars!</b>\n\n"
+        "Я помогу отслеживать промоакции криптобирж, "
+        "отслеживать страницы анонсов, парсить телеграм каналы и чаты.\n\n"
+        "Prod. @Heisenbergabuz",
+        reply_markup=get_main_menu_inline(),
+        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -4821,7 +5403,7 @@ async def handle_category_selection(callback: CallbackQuery):
             builder.add(InlineKeyboardButton(text="🚀 Лаунчпады", callback_data="category_launchpad"))
             builder.add(InlineKeyboardButton(text="🌊 Лаунчпулы", callback_data="category_launchpool"))
             builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_categories"))
-            builder.adjust(2, 1)
+            builder.adjust(1)
             
             await callback.message.edit_text(
                 "🚀 <b>Лаучи</b>\n\n"
@@ -4838,7 +5420,7 @@ async def handle_category_selection(callback: CallbackQuery):
             builder.add(InlineKeyboardButton(text="🪂 Аирдропы", callback_data="category_airdrop"))
             builder.add(InlineKeyboardButton(text="🍬 CandyBomb", callback_data="category_candybomb"))
             builder.add(InlineKeyboardButton(text="← Назад", callback_data="back_to_categories"))
-            builder.adjust(2, 1)
+            builder.adjust(1)
             
             await callback.message.edit_text(
                 "🎁 <b>Дропы</b>\n\n"
@@ -5070,15 +5652,57 @@ async def _show_link_management_by_id(callback: CallbackQuery, link_id: int):
 
 @router.callback_query(F.data.startswith("manage_link_"))
 async def show_link_management(callback: CallbackQuery):
-    """Показать меню управления выбранной ссылкой (с учетом категории)"""
+    """Сразу показать промоакции/стейкинги при выборе ссылки (рефакторинг UX)"""
     try:
         link_id = int(callback.data.split("_")[2])
-        await _show_link_management_by_id(callback, link_id)
+        user_id = callback.from_user.id
+        
+        # Сохраняем link_id для использования в других обработчиках
+        user_selections[user_id] = link_id
+        # Сбрасываем контекст - это переход из обычных категорий, не избранных
+        user_nav_context[user_id] = 'category'
+        
+        # Получаем информацию о ссылке для определения категории
+        link = await get_link_by_id_async(link_id)
+        
+        if not link:
+            await callback.message.edit_text("❌ Ссылка не найдена")
+            await callback.answer()
+            return
+        
+        category = link.category or 'launches'
+        
+        # В зависимости от категории - сразу показываем нужный контент
+        if category == 'staking':
+            # Для стейкинга - показываем текущие стейкинги
+            await _show_current_stakings_direct(callback, link_id)
+        elif category in ['airdrop', 'candybomb', 'drops', 'launches', 'launchpool', 'launchpad']:
+            # Для промоакций - сразу показываем текущие промоакции
+            await _show_current_promos_direct(callback, link_id)
+        elif category == 'announcement' and link.special_parser:
+            # Announcement со special_parser - показываем промоакции
+            await _show_current_promos_direct(callback, link_id)
+        else:
+            # Для остальных категорий (announcement без special_parser, telegram и т.д.) 
+            # показываем меню управления как раньше
+            await _show_link_management_by_id(callback, link_id)
 
     except Exception as e:
         logger.error(f"❌ Ошибка при показе меню управления ссылкой: {e}", exc_info=True)
         await callback.message.edit_text("❌ Ошибка при загрузке меню")
         await callback.answer()
+
+
+async def _show_current_promos_direct(callback: CallbackQuery, link_id: int):
+    """Прямой показ промоакций без изменения callback.data"""
+    # Просто вызываем view_current_promos - user_selections уже установлен
+    await view_current_promos(callback)
+
+
+async def _show_current_stakings_direct(callback: CallbackQuery, link_id: int):
+    """Прямой показ стейкингов без изменения callback.data"""
+    # Просто вызываем view_current_stakings - user_selections уже установлен
+    await view_current_stakings(callback)
 
 @router.callback_query(F.data == "manage_change_tg_account")
 async def manage_change_tg_account(callback: CallbackQuery):
@@ -5461,7 +6085,8 @@ async def view_current_stakings(callback: CallbackQuery):
                 'min_apr': min_apr,
                 'page_url': page_url,
                 'is_okx_flash': True,
-                'last_checked': last_checked  # Время последней проверки
+                'last_checked': last_checked,  # Время последней проверки
+                'category': link.category  # Категория для настроек
             }
         else:
             # Стандартная пагинация по стейкингам
@@ -5482,11 +6107,11 @@ async def view_current_stakings(callback: CallbackQuery):
                 'min_apr': min_apr,
                 'page_url': page_url,
                 'is_okx_flash': False,
-                'last_checked': last_checked  # Время последней проверки
+                'last_checked': last_checked,  # Время последней проверки
+                'category': link.category  # Категория для настроек
             }
 
-        logger.info(f"   💾 Состояние сохранено: page={page}, link_id={link_id}, total_pages={total_pages}")
-        logger.info(f"   🔑 Текущее состояние в памяти: {current_stakings_state}")
+        logger.info(f"   💾 Состояние сохранено: page={page}, link_id={link_id}, total_pages={total_pages}, category={link.category}")
         logger.info(f"   📱 Всего стейкингов: {len(stakings_with_deltas)}, на странице: {len(page_stakings)}")
 
         # Форматировать сообщение (skip_price_fetch=True - данные уже в БД, не нужны внешние запросы)
@@ -5516,7 +6141,8 @@ async def view_current_stakings(callback: CallbackQuery):
             )
 
         # Отправить с кнопками
-        keyboard = get_current_stakings_keyboard(page, total_pages)
+        category = link.category
+        keyboard = get_current_stakings_keyboard(page, total_pages, category=category)
 
         await callback.message.edit_text(
             message_text,
@@ -5615,7 +6241,8 @@ async def navigate_stakings_page(callback: CallbackQuery):
             )
 
         # Отправить с обновленными кнопками
-        keyboard = get_current_stakings_keyboard(new_page, total_pages)
+        category = state.get('category')
+        keyboard = get_current_stakings_keyboard(new_page, total_pages, category=category)
 
         await callback.message.edit_text(
             message_text,
@@ -5860,7 +6487,8 @@ async def force_parse_stakings(callback: CallbackQuery):
         message_text += f"\n\n⏱ <i>Обновлено: {last_updated_str}</i>"
 
         # Отправляем НОВОЕ сообщение с обновленными данными
-        keyboard = get_current_stakings_keyboard(current_page, total_pages)
+        category = state.get('category')
+        keyboard = get_current_stakings_keyboard(current_page, total_pages, category=category)
 
         await callback.message.answer(
             message_text,
@@ -5986,7 +6614,9 @@ async def view_current_promos(callback: CallbackQuery):
     try:
         user_id = callback.from_user.id
         link_id = user_selections.get(user_id)
-        logger.info(f"   User ID: {user_id}, Link ID: {link_id}")
+        # Проверяем контекст навигации - пришли из избранных или из категорий
+        from_favorites = user_nav_context.get(user_id) == 'favorites'
+        logger.info(f"   User ID: {user_id}, Link ID: {link_id}, from_favorites: {from_favorites}")
 
         if not link_id:
             await callback.answer("❌ Ошибка: ссылка не выбрана", show_alert=True)
@@ -6011,6 +6641,125 @@ async def view_current_promos(callback: CallbackQuery):
 
         # Закрываем callback сразу для отзывчивости UI
         await callback.answer()
+
+        # WEEX WELCOME BONUS - специальная обработка (данные в announcement_last_snapshot)
+        if link.special_parser == 'weex_welcome':
+            try:
+                from parsers.weex_welcome_parser import WeexWelcomeParser
+                import json
+                
+                snapshot = link.announcement_last_snapshot
+                if snapshot:
+                    parser = WeexWelcomeParser()
+                    rewards = parser.deserialize_from_snapshot(snapshot)
+                    
+                    if rewards:
+                        # Форматируем snapshot message
+                        message = parser.format_snapshot_message(rewards)
+                        
+                        # Добавляем время обновления
+                        if last_checked:
+                            try:
+                                from datetime import timedelta
+                                if isinstance(last_checked, datetime):
+                                    local_time = last_checked + timedelta(hours=2)
+                                    last_updated_str = local_time.strftime("%d.%m.%Y %H:%M")
+                                    # Вставляем время после заголовка
+                                    message = message.replace(
+                                        "📋 <b>SNAPSHOT</b>",
+                                        f"📋 <b>SNAPSHOT</b>\n\n⏱️ <b>Обновлено:</b> {last_updated_str}"
+                                    )
+                            except:
+                                pass
+                        
+                        await callback.message.edit_text(
+                            message,
+                            parse_mode="HTML",
+                            disable_web_page_preview=True,
+                            reply_markup=get_current_promos_keyboard(1, 1, category=link.category, from_favorites=from_favorites)
+                        )
+                        return
+                
+                # Если snapshot пустой
+                message_text = (
+                    f"🎁 <b>ТЕКУЩИЕ ПРОМОАКЦИИ</b>\n\n"
+                    f"<b>🏦 Биржа:</b> {exchange_name}\n"
+                )
+                if last_checked:
+                    try:
+                        from datetime import timedelta
+                        if isinstance(last_checked, datetime):
+                            local_time = last_checked + timedelta(hours=2)
+                            message_text += f"<b>⏱️ Обновлено:</b> {local_time.strftime('%d.%m.%Y %H:%M')}\n"
+                    except:
+                        pass
+                message_text += (
+                    f"\n📭 <i>Нет данных в базе.</i>\n"
+                    f"<i>Используйте \"🔍 Принудительная проверка\" для загрузки данных.</i>"
+                )
+                
+                await callback.message.edit_text(
+                    message_text,
+                    parse_mode="HTML",
+                    reply_markup=get_current_promos_keyboard(1, 1, category=link.category, from_favorites=from_favorites)
+                )
+                return
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка отображения weex_welcome: {e}")
+
+        # WEEX USERAGENT (Referral) - специальная обработка
+        if link.special_parser == 'weex_useragent':
+            try:
+                from parsers.weex_useragent_parser import WeexUseragentParser
+                import json
+                
+                snapshot = link.announcement_last_snapshot
+                if snapshot:
+                    try:
+                        referral_data = json.loads(snapshot)
+                        
+                        if referral_data:
+                            # Форматируем snapshot message с HTML
+                            message = format_weex_referral_snapshot(referral_data, last_checked)
+                            
+                            await callback.message.edit_text(
+                                message,
+                                parse_mode="HTML",
+                                disable_web_page_preview=True,
+                                reply_markup=get_current_promos_keyboard(1, 1, category=link.category, from_favorites=from_favorites)
+                            )
+                            return
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Если snapshot пустой
+                message_text = (
+                    f"🎁 <b>ТЕКУЩИЕ ПРОМОАКЦИИ</b>\n\n"
+                    f"<b>🏦 Биржа:</b> {exchange_name}\n"
+                )
+                if last_checked:
+                    try:
+                        from datetime import timedelta
+                        if isinstance(last_checked, datetime):
+                            local_time = last_checked + timedelta(hours=2)
+                            message_text += f"<b>⏱️ Обновлено:</b> {local_time.strftime('%d.%m.%Y %H:%M')}\n"
+                    except:
+                        pass
+                message_text += (
+                    f"\n📭 <i>Нет данных в базе.</i>\n"
+                    f"<i>Используйте \"🔍 Принудительная проверка\" для загрузки данных.</i>"
+                )
+                
+                await callback.message.edit_text(
+                    message_text,
+                    parse_mode="HTML",
+                    reply_markup=get_current_promos_keyboard(1, 1, category=link.category, from_favorites=from_favorites)
+                )
+                return
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка отображения weex_useragent: {e}")
 
         # Получаем данные из БД (без парсинга)
         promos_data = get_promos_from_db(link_id, exchange_name)
@@ -6042,7 +6791,7 @@ async def view_current_promos(callback: CallbackQuery):
             await callback.message.edit_text(
                 message_text,
                 parse_mode="HTML",
-                reply_markup=get_current_promos_keyboard(1, 1)
+                reply_markup=get_current_promos_keyboard(1, 1, category=link.category, from_favorites=from_favorites)
             )
             return
 
@@ -6108,6 +6857,7 @@ async def view_current_promos(callback: CallbackQuery):
             'promos': promos_data,
             'exchange_name': exchange_name,
             'page_url': page_url,
+            'category': link.category,  # Для настроек уведомлений launchpool
             'is_okx_boost': is_okx_boost,
             'is_gate_candy': is_gate_candy,
             'is_bitget_candy': is_bitget_candy,
@@ -6124,9 +6874,10 @@ async def view_current_promos(callback: CallbackQuery):
             'special_parser': link.special_parser,
             'last_checked': last_checked,
             'last_updated_str': last_updated_str,
-            'participants_snapshot': {}
+            'participants_snapshot': {},
+            'from_favorites': from_favorites  # Сохраняем контекст навигации
         }
-        logger.info(f"   💾 Состояние сохранено: page={page}, total_pages={total_pages}")
+        logger.info(f"   💾 Состояние сохранено: page={page}, total_pages={total_pages}, from_favorites={from_favorites}")
 
         # Форматировать сообщение (skip_price_fetch=True - данные уже в БД, не нужны внешние запросы)
         notif_service = NotificationService(bot=callback.bot, skip_price_fetch=True)
@@ -6214,7 +6965,7 @@ async def view_current_promos(callback: CallbackQuery):
                 message_text = '\n'.join(new_lines)
 
         # Отправить с кнопками
-        keyboard = get_current_promos_keyboard(page, total_pages)
+        keyboard = get_current_promos_keyboard(page, total_pages, category=link.category, from_favorites=from_favorites)
 
         await callback.message.edit_text(
             message_text,
@@ -6607,7 +7358,10 @@ async def force_parse_promos(callback: CallbackQuery):
                         # Добавляем информацию о том, что это результат долгой проверки
                         message_text = f"⏰ <i>Результат принудительной проверки (callback устарел):</i>\n\n" + message_text
                         
-                        keyboard = get_current_promos_keyboard(page, total_pages)
+                        # Получаем category и from_favorites из state
+                        state_category = state.get('category') if state else None
+                        state_from_favorites = state.get('from_favorites', False) if state else False
+                        keyboard = get_current_promos_keyboard(page, total_pages, category=state_category, from_favorites=state_from_favorites)
                         await callback.message.answer(message_text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
                         logger.info(f"✅ Результат отправлен в новом сообщении")
                     else:
@@ -6798,7 +7552,9 @@ async def navigate_promos_page(callback: CallbackQuery):
                 message_text = '\n'.join(new_lines)
 
         # Отправить с обновленными кнопками
-        keyboard = get_current_promos_keyboard(new_page, total_pages)
+        category = state.get('category')
+        from_favorites = state.get('from_favorites', False)
+        keyboard = get_current_promos_keyboard(new_page, total_pages, category=category, from_favorites=from_favorites)
 
         await callback.message.edit_text(
             message_text,
@@ -6830,6 +7586,33 @@ async def back_to_link_management(callback: CallbackQuery):
 
     except Exception as e:
         logger.error(f"❌ Ошибка возврата: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "link_settings_menu")
+async def link_settings_menu(callback: CallbackQuery):
+    """Переход в меню настроек ссылки (из промоакций/стейкингов)"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        from_favorites = user_nav_context.get(user_id) == 'favorites'
+
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+
+        # Если пришли из избранных - показываем специальное меню
+        if from_favorites:
+            link = await get_link_by_id_async(link_id)
+            if link:
+                await _show_favorite_link_management(callback, link_id, link)
+                return
+        
+        # Показываем обычное меню управления ссылкой
+        await _show_link_management_by_id(callback, link_id)
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка перехода в настройки: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
@@ -6907,9 +7690,14 @@ async def notification_settings_show(callback: CallbackQuery):
                 await callback.answer("❌ Ссылка не найдена", show_alert=True)
                 return
 
-            # Форматирование настроек
-            message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            # РЕДИРЕКТ: Если категория launchpool - показываем настройки Launchpool
+            if link.category == 'launchpool':
+                message = format_launchpool_settings_message(link)
+                keyboard = get_launchpool_settings_keyboard(link)
+            else:
+                # Форматирование настроек стейкинга
+                message = format_notification_settings_message(link)
+                keyboard = get_notification_settings_keyboard(link.category)
 
             await callback.message.edit_text(
                 message,
@@ -6986,7 +7774,7 @@ async def set_stability_hours(callback: CallbackQuery):
 
             # Показать обновленные настройки
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
 
             await callback.message.edit_text(
                 message,
@@ -7066,7 +7854,7 @@ async def set_apr_threshold(callback: CallbackQuery):
 
             # Показать обновленные настройки
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
 
             await callback.message.edit_text(
                 message,
@@ -7102,7 +7890,7 @@ async def toggle_new_stakings(callback: CallbackQuery):
 
             # Показать обновленные настройки
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
 
             await callback.message.edit_text(
                 message,
@@ -7138,7 +7926,7 @@ async def toggle_apr_changes(callback: CallbackQuery):
             db.commit()
 
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
 
             await callback.message.edit_text(
                 message,
@@ -7174,7 +7962,7 @@ async def toggle_fixed_immediately(callback: CallbackQuery):
             db.commit()
 
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
 
             await callback.message.edit_text(
                 message,
@@ -7210,7 +7998,7 @@ async def toggle_combined_as_fixed(callback: CallbackQuery):
             db.commit()
 
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
 
             await callback.message.edit_text(
                 message,
@@ -7246,7 +8034,7 @@ async def toggle_only_stable(callback: CallbackQuery):
             db.commit()
 
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
 
             await callback.message.edit_text(
                 message,
@@ -7316,7 +8104,7 @@ async def toggle_fill_changes(callback: CallbackQuery):
             db.commit()
 
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
 
             await callback.message.edit_text(
                 message,
@@ -7353,7 +8141,7 @@ async def toggle_period_changes(callback: CallbackQuery):
             link.notify_period_changes = not getattr(link, 'notify_period_changes', True)
             db.commit()
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
             await callback.message.edit_text(message, parse_mode="HTML", reply_markup=keyboard)
             status = "✅ Включены" if link.notify_period_changes else "❌ Выключены"
             await callback.answer(f"Уведомления об изменении периода: {status}")
@@ -7379,7 +8167,7 @@ async def toggle_reward_pool_changes(callback: CallbackQuery):
             link.notify_reward_pool_changes = not getattr(link, 'notify_reward_pool_changes', True)
             db.commit()
             message = format_notification_settings_message(link)
-            keyboard = get_notification_settings_keyboard()
+            keyboard = get_notification_settings_keyboard(link.category)
             await callback.message.edit_text(message, parse_mode="HTML", reply_markup=keyboard)
             status = "✅ Включены" if link.notify_reward_pool_changes else "❌ Выключены"
             await callback.answer(f"Уведомления об изменении пула наград: {status}")
@@ -7403,18 +8191,424 @@ async def show_other_settings(callback: CallbackQuery):
                 await callback.answer("❌ Ссылка не найдена", show_alert=True)
                 return
             
-            # Используем функцию для создания клавиатуры
-            keyboard = get_other_notification_settings_keyboard(link)
+            # Используем функцию для создания клавиатуры Fixed настроек
+            keyboard = get_fixed_settings_keyboard(link)
         
         await callback.message.edit_text(
-            "⚙️ <b>Другие настройки уведомлений</b>\n\n"
+            "⚡ <b>Настройки Fixed/Combined</b>\n\n"
             "Выберите опцию для переключения:",
             parse_mode="HTML",
             reply_markup=keyboard
         )
         await callback.answer()
     except Exception as e:
-        logger.error(f"❌ Ошибка показа других настроек: {e}", exc_info=True)
+        logger.error(f"❌ Ошибка показа настроек Fixed: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "notification_fixed_settings")
+async def show_fixed_settings(callback: CallbackQuery):
+    """Показать настройки Fixed/Combined стейкингов"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            keyboard = get_fixed_settings_keyboard(link)
+        
+        await callback.message.edit_text(
+            "⚡ <b>Настройки Fixed/Combined</b>\n\n"
+            "<b>Fixed</b> - стейкинги с фиксированным сроком\n"
+            "<b>Combined</b> - содержат и Fixed и Flexible опции\n\n"
+            "Выберите опцию:",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка показа Fixed настроек: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "notification_toggle_fixed_immediately")
+async def toggle_fixed_immediately(callback: CallbackQuery):
+    """Переключить уведомления о Fixed сразу"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            link.fixed_notify_immediately = not getattr(link, 'fixed_notify_immediately', True)
+            db.commit()
+            keyboard = get_fixed_settings_keyboard(link)
+            status = "✅ Включено" if link.fixed_notify_immediately else "❌ Выключено"
+        
+        await callback.message.edit_text(
+            "⚡ <b>Настройки Fixed/Combined</b>\n\n"
+            "<b>Fixed</b> - стейкинги с фиксированным сроком\n"
+            "<b>Combined</b> - содержат и Fixed и Flexible опции\n\n"
+            "Выберите опцию:",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        await callback.answer(f"Fixed сразу: {status}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка переключения Fixed immediately: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# =============================================================================
+# НАСТРОЙКИ LAUNCHPOOL (ФИЛЬТРЫ)
+# =============================================================================
+
+@router.callback_query(F.data == "lp_settings_show")
+async def show_launchpool_settings(callback: CallbackQuery):
+    """Показать настройки Launchpool"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            message = format_launchpool_settings_message(link)
+            keyboard = get_launchpool_settings_keyboard(link)
+        
+        await callback.message.edit_text(message, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка показа настроек Launchpool: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "lp_settings_min_pool")
+async def show_lp_min_pool_options(callback: CallbackQuery):
+    """Показать варианты мин. размера пула"""
+    try:
+        await callback.message.edit_text(
+            "💰 <b>Минимальный размер пула</b>\n\n"
+            "Уведомления будут приходить только для Launchpool с размером пула не менее указанного.\n\n"
+            "Выберите значение:",
+            parse_mode="HTML",
+            reply_markup=get_lp_min_pool_keyboard()
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("lp_set_min_pool_"))
+async def set_lp_min_pool(callback: CallbackQuery):
+    """Установить мин. размер пула"""
+    try:
+        value = int(callback.data.replace("lp_set_min_pool_", ""))
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            link.lp_min_pool_usd = value
+            db.commit()
+            
+            message = format_launchpool_settings_message(link)
+            keyboard = get_launchpool_settings_keyboard(link)
+        
+        await callback.message.edit_text(message, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer(f"✅ Установлено: ${value:,}" if value > 0 else "✅ Фильтр отключен")
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "lp_settings_min_apr")
+async def show_lp_min_apr_options(callback: CallbackQuery):
+    """Показать варианты мин. APR"""
+    try:
+        await callback.message.edit_text(
+            "📊 <b>Минимальный APR</b>\n\n"
+            "Уведомления будут приходить только для Launchpool с APR не менее указанного.\n\n"
+            "Выберите значение:",
+            parse_mode="HTML",
+            reply_markup=get_lp_min_apr_keyboard()
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("lp_set_min_apr_"))
+async def set_lp_min_apr(callback: CallbackQuery):
+    """Установить мин. APR"""
+    try:
+        value = int(callback.data.replace("lp_set_min_apr_", ""))
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            link.lp_min_apr = value
+            db.commit()
+            
+            message = format_launchpool_settings_message(link)
+            keyboard = get_launchpool_settings_keyboard(link)
+        
+        await callback.message.edit_text(message, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer(f"✅ Установлено: {value}%" if value > 0 else "✅ Фильтр отключен")
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "lp_settings_hours_before")
+async def show_lp_hours_before_options(callback: CallbackQuery):
+    """Показать варианты напоминания до окончания"""
+    try:
+        await callback.message.edit_text(
+            "⏰ <b>Напоминание до окончания</b>\n\n"
+            "Получите напоминание за указанное время до окончания Launchpool.\n\n"
+            "Выберите значение:",
+            parse_mode="HTML",
+            reply_markup=get_lp_hours_before_keyboard()
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("lp_set_hours_before_"))
+async def set_lp_hours_before(callback: CallbackQuery):
+    """Установить напоминание до окончания"""
+    try:
+        value = int(callback.data.replace("lp_set_hours_before_", ""))
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            link.lp_notify_hours_before_end = value
+            db.commit()
+            
+            message = format_launchpool_settings_message(link)
+            keyboard = get_launchpool_settings_keyboard(link)
+        
+        await callback.message.edit_text(message, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer(f"✅ Напоминание за {value}ч" if value > 0 else "✅ Напоминание выключено")
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "lp_settings_stake_coins")
+async def show_lp_stake_coins_options(callback: CallbackQuery):
+    """Показать варианты фильтра монет"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            current_coins = link.get_lp_stake_coins_filter()
+            coins_text = ', '.join(current_coins) if current_coins else 'не выбраны (показываются все)'
+            
+            await callback.message.edit_text(
+                f"🪙 <b>Фильтр по монете стейка</b>\n\n"
+                f"Текущий фильтр: <b>{coins_text}</b>\n\n"
+                "Выберите монеты, которыми вы готовы стейкать.\n"
+                "Уведомления будут приходить только для Launchpool с этими монетами.\n\n"
+                "Нажмите на монету для добавления/удаления:",
+                parse_mode="HTML",
+                reply_markup=get_lp_stake_coins_keyboard(link)
+            )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("lp_toggle_coin_"))
+async def toggle_lp_stake_coin(callback: CallbackQuery):
+    """Добавить/удалить монету из фильтра"""
+    try:
+        coin = callback.data.replace("lp_toggle_coin_", "").upper()
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            current_coins = link.get_lp_stake_coins_filter()
+            
+            if coin in current_coins:
+                link.remove_lp_stake_coin(coin)
+                action = f"❌ {coin} удален"
+            else:
+                link.add_lp_stake_coin(coin)
+                action = f"✅ {coin} добавлен"
+            
+            db.commit()
+            
+            # Обновляем сообщение
+            current_coins = link.get_lp_stake_coins_filter()
+            coins_text = ', '.join(current_coins) if current_coins else 'не выбраны (показываются все)'
+            
+            await callback.message.edit_text(
+                f"🪙 <b>Фильтр по монете стейка</b>\n\n"
+                f"Текущий фильтр: <b>{coins_text}</b>\n\n"
+                "Выберите монеты, которыми вы готовы стейкать.\n"
+                "Уведомления будут приходить только для Launchpool с этими монетами.\n\n"
+                "Нажмите на монету для добавления/удаления:",
+                parse_mode="HTML",
+                reply_markup=get_lp_stake_coins_keyboard(link)
+            )
+        await callback.answer(action)
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "lp_clear_coins")
+async def clear_lp_stake_coins(callback: CallbackQuery):
+    """Очистить все монеты из фильтра"""
+    try:
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            link.set_lp_stake_coins_filter([])
+            db.commit()
+            
+            await callback.message.edit_text(
+                f"🪙 <b>Фильтр по монете стейка</b>\n\n"
+                f"Текущий фильтр: <b>не выбраны (показываются все)</b>\n\n"
+                "Выберите монеты, которыми вы готовы стейкать.\n"
+                "Уведомления будут приходить только для Launchpool с этими монетами.\n\n"
+                "Нажмите на монету для добавления/удаления:",
+                parse_mode="HTML",
+                reply_markup=get_lp_stake_coins_keyboard(link)
+            )
+        await callback.answer("🗑️ Фильтр очищен")
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "lp_settings_min_user_limit")
+async def show_lp_min_user_limit_options(callback: CallbackQuery):
+    """Показать варианты мин. лимита юзера"""
+    try:
+        await callback.message.edit_text(
+            "👤 <b>Минимальный лимит юзера</b>\n\n"
+            "Уведомления будут приходить только для Launchpool, где максимальный стейк юзера не менее указанного.\n\n"
+            "Это полезно, если вы хотите стейкать крупные суммы.\n\n"
+            "Выберите значение:",
+            parse_mode="HTML",
+            reply_markup=get_lp_min_user_limit_keyboard()
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("lp_set_min_user_limit_"))
+async def set_lp_min_user_limit(callback: CallbackQuery):
+    """Установить мин. лимит юзера"""
+    try:
+        value = int(callback.data.replace("lp_set_min_user_limit_", ""))
+        user_id = callback.from_user.id
+        link_id = user_selections.get(user_id)
+        
+        if not link_id:
+            await callback.answer("❌ Ссылка не выбрана", show_alert=True)
+            return
+        
+        with get_db_session() as db:
+            link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+            if not link:
+                await callback.answer("❌ Ссылка не найдена", show_alert=True)
+                return
+            
+            link.lp_min_user_limit_usd = value
+            db.commit()
+            
+            message = format_launchpool_settings_message(link)
+            keyboard = get_launchpool_settings_keyboard(link)
+        
+        await callback.message.edit_text(message, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer(f"✅ Установлено: ${value:,}" if value > 0 else "✅ Фильтр отключен")
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
@@ -10739,11 +11933,18 @@ async def process_new_systems_cancel(callback: CallbackQuery, state: FSMContext)
 # =============================================================================
 
 def format_notification_settings_message(link) -> str:
-    """Форматирует сообщение с настройками умных уведомлений"""
+    """Форматирует сообщение с настройками умных уведомлений
+    
+    Показывает ТОЛЬКО работающие настройки:
+    - notify_min_apr_change: используется в stability_tracker_service.py
+    - flexible_stability_hours: используется в stability_tracker_service.py  
+    - fixed_notify_immediately: используется в stability_tracker_service.py
+    - notify_combined_as_fixed: используется в stability_tracker_service.py
+    """
 
     # Преобразование bool в эмодзи
     def bool_emoji(value):
-        return "✅ Включено" if value else "❌ Выключено"
+        return "✅" if value else "❌"
 
     # Определяем категорию для правильного отображения
     category = getattr(link, 'category', 'staking')
@@ -10757,35 +11958,23 @@ def format_notification_settings_message(link) -> str:
         'announcement': 'Анонсы'
     }
     category_display = category_names.get(category, category.title())
-    
-    # Получаем значения настроек launchpool
-    notify_period = getattr(link, 'notify_period_changes', True)
-    notify_reward_pool = getattr(link, 'notify_reward_pool_changes', True)
 
     message = (
-        f"⚙️ <b>НАСТРОЙКИ УМНЫХ УВЕДОМЛЕНИЙ</b>\n\n"
+        f"⚙️ <b>НАСТРОЙКИ УВЕДОМЛЕНИЙ</b>\n\n"
         f"🏦 <b>Биржа:</b> {link.name}\n"
         f"📌 <b>Категория:</b> {category_display}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 <b>ТЕКУЩИЕ НАСТРОЙКИ:</b>\n\n"
-        f"🔔 <b>Новые стейкинги:</b> {bool_emoji(link.notify_new_stakings)}\n"
-        f"📈 <b>Изменения APR:</b> {bool_emoji(link.notify_apr_changes)}\n"
-        f"📊 <b>Заполненность:</b> {bool_emoji(link.notify_fill_changes)}\n"
-        f"📅 <b>Изменения периода:</b> {bool_emoji(notify_period)}\n"
-        f"🎁 <b>Изменения пула наград:</b> {bool_emoji(notify_reward_pool)}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 <b>ПОРОГ ИЗМЕНЕНИЯ APR:</b>\n"
+        f"└─ Минимум <b>{link.notify_min_apr_change}%</b> для уведомления\n\n"
         f"⏱️ <b>FLEXIBLE СТЕЙКИНГИ:</b>\n"
-        f"├─ <b>Время стабилизации:</b> {link.flexible_stability_hours} часов\n"
-        f"└─ <b>Только стабильные:</b> {bool_emoji(link.notify_only_stable_flexible)}\n\n"
-        f"⚡ <b>FIXED СТЕЙКИНГИ:</b>\n"
-        f"├─ <b>Уведомлять сразу:</b> {bool_emoji(link.fixed_notify_immediately)}\n"
-        f"└─ <b>Combined как Fixed:</b> {bool_emoji(link.notify_combined_as_fixed)}\n\n"
-        f"📊 <b>ИЗМЕНЕНИЯ APR:</b>\n"
-        f"└─ <b>Минимальный порог:</b> {link.notify_min_apr_change}%\n\n"
+        f"└─ Ждать <b>{link.flexible_stability_hours}ч</b> стабильного APR\n\n"
+        f"⚡ <b>FIXED/COMBINED:</b>\n"
+        f"├─ Fixed сразу: {bool_emoji(link.fixed_notify_immediately)}\n"
+        f"└─ Combined=Fixed: {bool_emoji(link.notify_combined_as_fixed)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💡 <i>Combined стейкинги содержат Fixed И Flexible опции.\n"
-        f"При включенной настройке \"Combined как Fixed\" они уведомляют сразу.</i>\n\n"
-        f"Выберите действие:"
+        f"💡 <i>Fixed и Combined уведомляют сразу.\n"
+        f"Flexible ждёт стабилизации APR.</i>\n\n"
+        f"Выберите настройку:"
     )
 
     return message

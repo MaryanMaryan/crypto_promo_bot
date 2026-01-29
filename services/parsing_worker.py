@@ -69,7 +69,46 @@ class ParsingWorker:
         self._consecutive_errors = 0
         self._max_consecutive_errors = 5  # После 5 ошибок — пауза
         self._error_pause_seconds = 30  # Пауза после серии ошибок
-        self._task_timeout = 120  # Таймаут на выполнение одной задачи (секунд)
+        self._default_timeout = config.PARALLEL_PARSING_TASK_TIMEOUT  # Базовый таймаут
+    
+    def _get_task_timeout(self, task: ParsingTask) -> int:
+        """
+        Определяет таймаут для конкретной задачи.
+        Приоритет: exchange override > name-based exchange > category override > default
+        """
+        # Проверяем override по бирже
+        exchange = (task.exchange or self._extract_exchange(task.url) or '').lower()
+        
+        # Если exchange пустой, пробуем извлечь из имени ссылки
+        if not exchange and task.link_name:
+            exchange = self._extract_exchange_from_name(task.link_name)
+        
+        if exchange and hasattr(config, 'PARSER_TIMEOUT_OVERRIDES'):
+            exchange_timeout = config.PARSER_TIMEOUT_OVERRIDES.get(exchange)
+            if exchange_timeout:
+                return exchange_timeout
+        
+        # Проверяем override по категории
+        category = (task.category or '').lower()
+        if category and hasattr(config, 'PARSER_TIMEOUT_BY_CATEGORY'):
+            category_timeout = config.PARSER_TIMEOUT_BY_CATEGORY.get(category)
+            if category_timeout:
+                return category_timeout
+        
+        # Дефолтный таймаут
+        return self._default_timeout
+    
+    def _extract_exchange_from_name(self, name: str) -> Optional[str]:
+        """Извлекает название биржи из имени ссылки"""
+        if not name:
+            return None
+        name_lower = name.lower()
+        # Проверяем известные биржи
+        exchanges = ['bitget', 'bybit', 'mexc', 'gate', 'okx', 'binance', 'kucoin', 'weex', 'bingx', 'phemex']
+        for ex in exchanges:
+            if ex in name_lower:
+                return ex
+        return None
     
     async def start(self):
         """Запускает воркера"""
@@ -119,17 +158,20 @@ class ParsingWorker:
                     self._current_task = None
                     continue
                 
-                logger.info(f"👷 Воркер {self.worker_id}: начал {task.link_name} (категория: {task.category})")
+                # Определяем таймаут для этой задачи (до логирования!)
+                task_timeout = self._get_task_timeout(task)
+                
+                logger.info(f"👷 Воркер {self.worker_id}: начал {task.link_name} (категория: {task.category}, таймаут: {task_timeout}с)")
                 
                 try:
                     # Выполняем парсинг с таймаутом
                     try:
                         result = await asyncio.wait_for(
                             self._execute_task(task),
-                            timeout=self._task_timeout
+                            timeout=task_timeout
                         )
                     except asyncio.TimeoutError:
-                        raise TimeoutError(f"Таймаут {self._task_timeout}с для {task.link_name}")
+                        raise TimeoutError(f"Таймаут {task_timeout}с для {task.link_name}")
                     
                     # Отмечаем успех в Circuit Breaker
                     if exchange:
@@ -242,9 +284,12 @@ class ParsingWorker:
                 task.min_apr
             )
             
+            # Фильтруем маркеры _no_new - они не являются реальными стейкингами
+            real_stakings = [s for s in (new_stakings or []) if not s.get('_no_new')]
+            
             return {
-                'new_count': len(new_stakings) if new_stakings else 0,
-                'items': new_stakings or [],
+                'new_count': len(real_stakings),
+                'items': real_stakings,
                 'category': 'staking',
                 'exchange': exchange,
             }

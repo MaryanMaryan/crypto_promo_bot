@@ -54,6 +54,13 @@ class ApiLink(Base):
     # НАСТРОЙКИ УМНЫХ УВЕДОМЛЕНИЙ ДЛЯ LAUNCHPOOL (для category='launchpool'):
     notify_period_changes = Column(Boolean, default=True)  # Уведомлять об изменении периода лаунчпула
     notify_reward_pool_changes = Column(Boolean, default=True)  # Уведомлять об изменении общего пула наград
+    
+    # НОВЫЕ ФИЛЬТРЫ ДЛЯ LAUNCHPOOL:
+    lp_min_pool_usd = Column(Float, default=0)  # Мин. размер пула в USD (0 = без фильтра)
+    lp_min_apr = Column(Float, default=0)  # Мин. APR для уведомления (0 = без фильтра)
+    lp_notify_hours_before_end = Column(Integer, default=0)  # Напоминание за N часов до конца (0 = выкл)
+    lp_stake_coins_filter = Column(Text, nullable=True, default='[]')  # JSON список монет для стейка: ["BTC", "ETH", "USDT"]
+    lp_min_user_limit_usd = Column(Float, default=0)  # Мин. лимит юзера в USD (0 = без фильтра)
 
     # ПОЛЯ ДЛЯ УМНОГО ПАРСИНГА АНОНСОВ (для category='announcement'):
     announcement_strategy = Column(String, nullable=True)  # Стратегия парсинга: 'any_change', 'element_change', 'any_keyword', 'all_keywords', 'regex'
@@ -178,6 +185,35 @@ class ApiLink(Base):
         keywords = [k for k in keywords if k.lower() != keyword.lower()]
         self.set_announcement_keywords(keywords)
 
+    # Методы для работы с фильтром монет Launchpool
+    def get_lp_stake_coins_filter(self):
+        """Получить список монет для фильтра Launchpool"""
+        try:
+            coins = json.loads(self.lp_stake_coins_filter) if self.lp_stake_coins_filter else []
+            return coins if coins else []
+        except:
+            return []
+
+    def set_lp_stake_coins_filter(self, coins):
+        """Установить список монет для фильтра Launchpool"""
+        self.lp_stake_coins_filter = json.dumps(coins) if coins else '[]'
+
+    def add_lp_stake_coin(self, coin):
+        """Добавить монету в фильтр Launchpool"""
+        coins = self.get_lp_stake_coins_filter()
+        coin_upper = coin.upper().strip()
+        if coin_upper not in [c.upper() for c in coins]:
+            coins.append(coin_upper)
+            self.set_lp_stake_coins_filter(coins)
+            return True
+        return False
+
+    def remove_lp_stake_coin(self, coin):
+        """Удалить монету из фильтра Launchpool"""
+        coins = self.get_lp_stake_coins_filter()
+        coins = [c for c in coins if c.upper() != coin.upper()]
+        self.set_lp_stake_coins_filter(coins)
+
 class PromoHistory(Base):
     __tablename__ = 'promo_history'
     
@@ -216,6 +252,9 @@ class PromoHistory(Base):
     # ПОЛЯ ДЛЯ MEXC LAUNCHPAD (полные данные API)
     promo_type = Column(String, nullable=True)  # Тип промо: mexc_launchpad, mexc_airdrop, okx_boost и т.д.
     raw_data = Column(Text, nullable=True)  # JSON с полными данными из API
+    
+    # ПОЛЕ ДЛЯ ОТСЛЕЖИВАНИЯ ИЗМЕНЕНИЙ НАЗВАНИЯ (Weex rewards)
+    previous_title = Column(String, nullable=True)  # Предыдущее название для отслеживания изменений
     
     api_link = relationship("ApiLink", backref="promos")
     

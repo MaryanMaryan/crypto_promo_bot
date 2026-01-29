@@ -167,6 +167,97 @@ crypto_promo_bot/
 
 ---
 
+## 🖥️ Деплой на VPS сервер (Ubuntu)
+
+### Рекомендуемые требования
+- **RAM:** минимум 2GB, рекомендуется 4GB+
+- **CPU:** 2+ vCPU
+- **Диск:** 20GB+ SSD
+- **ОС:** Ubuntu 22.04/24.04 LTS
+
+### Рекомендуемые провайдеры
+- **Vultr High Frequency** - от $24/мес за 4GB RAM (рекомендуется)
+- **Hetzner** - от €9/мес за 8GB RAM (требует верификацию)
+- **DigitalOcean** - от $18/мес за 2GB RAM
+
+### Быстрая установка на сервере
+
+```bash
+# 1. Установка зависимостей
+apt update && apt install -y python3-pip python3-venv git
+
+# 2. Создание директории и загрузка проекта
+mkdir -p /opt/crypto_promo_bot
+cd /opt/crypto_promo_bot
+# (загрузить файлы через scp или git clone)
+
+# 3. Создание виртуального окружения
+python3 -m venv venv
+source venv/bin/activate
+
+# 4. Установка Python-зависимостей
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 5. Установка браузеров Playwright
+playwright install chromium
+playwright install-deps chromium
+
+# 6. Создание .env файла
+nano .env
+# Заполнить: BOT_TOKEN, ADMIN_CHAT_ID и др.
+
+# 7. Создание systemd сервиса
+cat > /etc/systemd/system/crypto_promo_bot.service << 'EOF'
+[Unit]
+Description=Crypto Promo Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/crypto_promo_bot
+Environment=PATH=/opt/crypto_promo_bot/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/crypto_promo_bot/venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 8. Запуск бота
+systemctl daemon-reload
+systemctl enable crypto_promo_bot
+systemctl start crypto_promo_bot
+
+# 9. Проверка статуса
+systemctl status crypto_promo_bot
+journalctl -u crypto_promo_bot -f
+```
+
+### Настройки .env для разных серверов
+
+**Для 2GB RAM:**
+```
+BROWSER_POOL_SIZE=2
+EXECUTOR_MAX_WORKERS=4
+```
+
+**Для 4GB RAM (рекомендуется):**
+```
+BROWSER_POOL_SIZE=4
+EXECUTOR_MAX_WORKERS=6
+```
+
+**Для 8GB+ RAM:**
+```
+BROWSER_POOL_SIZE=6
+EXECUTOR_MAX_WORKERS=8
+```
+
+---
+
 ## Поддержка
 
 Если у вас возникли проблемы:
@@ -186,3 +277,4 @@ crypto_promo_bot/
 pip install -r requirements.txt --upgrade
 playwright install chromium
 ```
+

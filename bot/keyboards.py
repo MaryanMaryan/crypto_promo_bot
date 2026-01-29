@@ -485,13 +485,15 @@ def get_airdrop_management_keyboard(link=None):
     builder.adjust(1)
     return builder.as_markup()
 
-def get_current_promos_keyboard(current_page: int, total_pages: int, last_updated: str = None) -> InlineKeyboardMarkup:
+def get_current_promos_keyboard(current_page: int, total_pages: int, last_updated: str = None, category: str = None, from_favorites: bool = False) -> InlineKeyboardMarkup:
     """Клавиатура пагинации для текущих промоакций
     
     Args:
         current_page: Текущая страница
         total_pages: Всего страниц
         last_updated: Время последнего обновления (для отображения)
+        category: Категория ссылки (для показа специальных настроек launchpool)
+        from_favorites: Флаг что перешли из раздела избранных
     """
     builder = InlineKeyboardBuilder()
     
@@ -505,12 +507,24 @@ def get_current_promos_keyboard(current_page: int, total_pages: int, last_update
         builder.add(InlineKeyboardButton(text="Вперед ▶️", callback_data="promos_page_next"))
     
     # Принудительная проверка (запуск парсера)
-    builder.add(InlineKeyboardButton(text="🔍 Принудительная проверка", callback_data="promos_force_parse"))
+    builder.add(InlineKeyboardButton(text="🔍 Принудитель...", callback_data="promos_force_parse"))
     
-    # Настройки уведомлений
-    builder.add(InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="notification_settings_show"))
+    # Настройки уведомлений - только для launchpool
+    if category == 'launchpool':
+        builder.add(InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="lp_settings_show"))
     
-    builder.add(InlineKeyboardButton(text="⬅️ К ссылке", callback_data="back_to_link_management"))
+    # Настройки ссылки (переход в меню управления)
+    builder.add(InlineKeyboardButton(text="⚙️ Настройки ссылки", callback_data="link_settings_menu"))
     
-    builder.adjust(3, 1, 1, 1)
+    # Назад к списку ссылок или к избранным
+    if from_favorites:
+        builder.add(InlineKeyboardButton(text="⬅️ К избранным", callback_data="main_favorites"))
+    else:
+        builder.add(InlineKeyboardButton(text="⬅️ К ссылкам", callback_data="back_to_link_list"))
+    
+    # Разная раскладка в зависимости от наличия кнопки уведомлений
+    if category == 'launchpool':
+        builder.adjust(3, 2, 1, 1)
+    else:
+        builder.adjust(3, 1, 1, 1)
     return builder.as_markup()

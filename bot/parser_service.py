@@ -9,6 +9,8 @@ from parsers.universal_fallback_parser import UniversalFallbackParser
 from parsers.staking_parser import StakingParser
 from parsers.announcement_parser import AnnouncementParser
 from parsers.weex_parser import WeexParser
+from parsers.weex_useragent_parser import WeexUseragentParser
+from parsers.weex_welcome_parser import WeexWelcomeParser
 from parsers.bybit_launchpool_parser import BybitLaunchpoolParser
 from parsers.mexc_launchpool_parser import MexcLaunchpoolParser
 from parsers.gate_launchpool_parser import GateLaunchpoolParser
@@ -29,6 +31,8 @@ class ParserService:
     # Биржи, требующие специальных парсеров
     SPECIAL_PARSERS = {
         'weex': WeexParser,
+        'weex_useragent': WeexUseragentParser,
+        'weex_welcome': WeexWelcomeParser,
         'bybit_launchpool': BybitLaunchpoolParser,
         'mexc_launchpool': MexcLaunchpoolParser,
         'gate_launchpool': GateLaunchpoolParser,
@@ -181,6 +185,14 @@ class ParserService:
                     target_url = html_url or url
                     logger.info(f"🔧 Автовыбор: парсер {parser_class.__name__} по URL (candybomb)")
                     return parser_class(target_url)
+            
+            elif 'useragent' in url_lower and exchange == 'weex':
+                # WEEX User Agent - реферальная программа
+                parser_class = self.SPECIAL_PARSERS.get('weex_useragent')
+                if parser_class:
+                    target_url = html_url or url
+                    logger.info(f"🔧 Автовыбор: парсер {parser_class.__name__} для WEEX User Agent")
+                    return parser_class(target_url)
         
         # По умолчанию используем UniversalFallbackParser
         logger.info(f"🌐 Автовыбор: UniversalFallbackParser")
@@ -292,6 +304,10 @@ class ParserService:
         try:
             logger.info(f"🔧 Использование специального парсера '{special_parser}' для announcement ссылки {link_id}")
             
+            # СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ WEEX USERAGENT
+            if special_parser == 'weex_useragent':
+                return self._check_weex_useragent(link_id, url, link)
+            
             # Получаем парсер
             html_url = link.get_primary_html_url()
             api_url = link.get_primary_api_url()
@@ -358,6 +374,105 @@ class ParserService:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка в _check_with_special_parser: {e}", exc_info=True)
+            return None
+    
+    def _check_weex_useragent(self, link_id: int, url: str, link) -> Optional[Dict]:
+        """
+        Специальная проверка для WEEX User Agent (реферальная программа).
+        Сравнивает текущие данные с сохранённым снимком.
+        """
+        import json
+        from parsers.weex_useragent_parser import WeexUseragentParser
+        
+        try:
+            logger.info(f"🎁 Проверка WEEX User Agent для ссылки {link_id}")
+            
+            # Создаём парсер и получаем данные
+            parser = WeexUseragentParser(url)
+            promotions = parser.get_promotions()
+            
+            if not promotions:
+                logger.warning(f"⚠️ WeexUseragentParser не вернул данных")
+                return None
+            
+            # Получаем данные реферальной программы
+            promo = promotions[0]
+            new_data = promo.get('referral_data', {})
+            new_hash = promo.get('data_hash', '')
+            
+            if not new_data:
+                logger.warning(f"⚠️ Нет referral_data в результате парсинга")
+                return None
+            
+            # Получаем сохранённый снимок
+            old_snapshot = link.announcement_last_snapshot
+            old_data = None
+            old_hash = None
+            
+            if old_snapshot:
+                try:
+                    snapshot_obj = json.loads(old_snapshot)
+                    old_data = snapshot_obj.get('referral_data')
+                    old_hash = snapshot_obj.get('data_hash')
+                except:
+                    logger.warning(f"⚠️ Не удалось распарсить старый снимок")
+            
+            # Сохраняем новый снимок
+            new_snapshot = json.dumps({
+                'referral_data': new_data,
+                'data_hash': new_hash,
+                'timestamp': datetime.utcnow().isoformat()
+            }, ensure_ascii=False)
+            
+            with get_db_session() as db:
+                db_link = db.query(ApiLink).filter(ApiLink.id == link_id).first()
+                if db_link:
+                    db_link.announcement_last_snapshot = new_snapshot
+                    db_link.announcement_last_check = datetime.utcnow()
+                    db.commit()
+            
+            # Первый запуск - нет старого снимка
+            if not old_data:
+                logger.info(f"📋 Первый запуск - отправляем текущее состояние")
+                message = WeexUseragentParser.format_snapshot_message(new_data)
+                return {
+                    'changed': True,
+                    'message': message,
+                    'matched_content': json.dumps(new_data, ensure_ascii=False),
+                    'strategy': 'weex_useragent:snapshot',
+                    'url': url,
+                    'is_first_run': True,
+                    'referral_data': new_data,
+                }
+            
+            # Сравниваем хеши
+            if old_hash == new_hash:
+                logger.info(f"ℹ️ Хеши совпадают - изменений нет")
+                return None
+            
+            # Хеши разные - есть изменения!
+            logger.info(f"🔔 Обнаружены изменения! Старый хеш: {old_hash[:16]}..., новый: {new_hash[:16]}...")
+            
+            # Пробуем сформировать детальное сообщение об изменениях
+            message = WeexUseragentParser.format_changes_message(old_data, new_data)
+            
+            if not message:
+                # Если не удалось - используем fallback
+                message = WeexUseragentParser.format_fallback_message(new_data)
+            
+            return {
+                'changed': True,
+                'message': message,
+                'matched_content': json.dumps(new_data, ensure_ascii=False),
+                'strategy': 'weex_useragent:changes',
+                'url': url,
+                'is_first_run': False,
+                'referral_data': new_data,
+                'old_data': old_data,
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в _check_weex_useragent: {e}", exc_info=True)
             return None
 
     def check_for_new_promos(self, link_id: int, url: str) -> List[Dict[str, Any]]:
@@ -1239,6 +1354,9 @@ class ParserService:
             # Проверяем на новые стейкинги (с фильтрацией по min_apr)
             logger.info(f"🔍 Проверка новых стейкингов...")
             new_stakings = check_and_save_new_stakings(stakings, link_id=link_id, min_apr=min_apr)
+            
+            # Добавляем метаданные о парсинге для статистики
+            total_parsed = len(stakings)
 
             if new_stakings:
                 logger.info(f"🎉 ParserService: Найдено {len(new_stakings)} НОВЫХ стейкингов для ссылки {link_id}")
@@ -1248,6 +1366,9 @@ class ParserService:
                     apr = staking.get('apr', 0)
                     staking_type = staking.get('type', 'N/A')
                     logger.info(f"   {i}. {coin} - {apr}% ({staking_type})")
+                
+                # Добавляем метаданные в первый элемент
+                new_stakings[0]['_total_parsed'] = total_parsed
 
                 # Для OKX группируем пулы по проектам
                 if 'okx' in exchange_name.lower():
@@ -1263,7 +1384,8 @@ class ParserService:
                 return new_stakings
             else:
                 logger.info(f"ℹ️ ParserService: Все стейкинги уже были в базе данных (нет новых)")
-                return []
+                # Возвращаем пустой список с метаданными для статистики
+                return [{'_total_parsed': total_parsed, '_no_new': True}] if total_parsed > 0 else []
 
         except Exception as e:
             logger.error(f"❌ ParserService: Критическая ошибка при парсинге стейкинг-ссылки {link_id}: {e}", exc_info=True)
