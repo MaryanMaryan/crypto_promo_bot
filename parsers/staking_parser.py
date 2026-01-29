@@ -369,53 +369,79 @@ class StakingParser:
 
         for coin_product in coin_products:
             try:
-                # ID монеты от Bybit
-                # ВАЖНО: В Bybit API поле 'coin' указывает на монету награды для продуктов с return_coin=0,
-                # а не на монету которая стейкается!
+                # ID монеты от Bybit (это может быть ID группы/награды, не стейкаемой монеты!)
                 api_coin_id = coin_product.get('coin')
+                
+                # coin_name из coin_product (может быть пустым в API)
+                api_coin_name = coin_product.get('coin_name', '').upper().strip()
 
                 # Продукты этой монеты
                 saving_products = coin_product.get('saving_products', [])
 
                 for product in saving_products:
                     try:
-                        # ОТЛАДКА: Проверяем ВСЕ продукты на проблемные символы
                         term = product.get('staking_term', '0')
 
-                        # Определяем ПРАВИЛЬНУЮ монету для стейкинга
-                        # В Bybit API поле 'coin' может указывать на монету награды, а не стейкинга!
-                        # ВАЖНО: Нужно анализировать тег и return_coin для определения правильной монеты
-
-                        return_coin = product.get('return_coin')
-                        product_coin_id = product.get('coin', api_coin_id)
-                        tag = product.get('product_tag_info', {}).get('display_tag_key', '')
-
-                        # Сначала получаем APY для дополнительных проверок
+                        # Получаем APY
                         apy_str = product.get('apy', '0%')
                         apy_float = float(apy_str.replace('%', '').strip())
+                        
+                        # Получаем тег - ОСНОВНОЙ источник для определения монеты!
+                        # Примеры тегов: 'CIS26Q1_USDT_For_USDT_Tag', 'IMU_RC_tag', 'ELSA_tag', '25Q2_555'
+                        tag = product.get('product_tag_info', {}).get('display_tag_key', '')
+                        product_coin_id = product.get('coin', api_coin_id)
+                        return_coin = product.get('return_coin')
 
-                        # Определяем монету по тегу (наиболее надёжный способ)
-                        if 'USDT' in tag or 'usdt' in tag:
-                            # Тег содержит USDT - это USDT стейкинг
-                            coin_id = 3  # USDT
-                        elif api_coin_id == 5 and apy_float >= 500:
-                            # ВАЖНО: BNB в API с очень высоким APR (≥500%) обычно означает USDT стейкинг
-                            # Bybit не предлагает такие высокие ставки для BNB стейкинга
-                            coin_id = 3  # USDT
-                        elif return_coin == 0:
-                            # Награда в других монетах, тега нет - определяем по api_coin_id
-                            if api_coin_id == 5:  # BNB в API обычно означает USDT стейкинг
-                                coin_id = 3  # USDT
-                            elif api_coin_id == 463:  # MNT
-                                coin_id = 463  # Стейкаем MNT
+                        # Определяем название монеты:
+                        # 1. СПЕЦИАЛЬНЫЙ СЛУЧАЙ: coin=5 с высоким APR (>=100%) = USDT стейкинг!
+                        #    В Bybit API продукты сгруппированы по награде (BNB = coin 5), 
+                        #    но стейкаем мы USDT с наградой в BNB/ELSA/других токенах
+                        # 2. Извлекаем из тега (для обычных случаев)
+                        # 3. Используем coin_name если есть
+                        # 4. Маппинг по return_coin (если != 0)
+                        # 5. Fallback: маппинг по coin_id
+                        
+                        coin_name = None
+                        reward_coin_name = None  # Монета награды (если отличается)
+                        
+                        # ПРИОРИТЕТ 1: coin=5 с высоким APR - это USDT стейкинги!
+                        if product_coin_id == 5 and apy_float >= 100:
+                            coin_name = 'USDT'
+                            # Извлекаем награду из тега если есть (ELSA_newuser_tag -> награда ELSA)
+                            if tag and '_' in tag:
+                                potential_reward = tag.split('_')[0].upper()
+                                if potential_reward not in ['CRAZY', 'NEW', 'VIP', 'CIS', 'NEWUSER', 'USDT', '25Q2']:
+                                    if len(potential_reward) >= 2 and len(potential_reward) <= 10 and potential_reward.isalpha():
+                                        reward_coin_name = potential_reward
+                            if not reward_coin_name:
+                                reward_coin_name = 'BNB'  # Дефолтная награда
+                            logger.debug(f"🔍 Определён USDT стейкинг с наградой в {reward_coin_name} (APR: {apy_float}%)")
+                        
+                        # ПРИОРИТЕТ 2: Извлекаем монету из тега
+                        elif tag:
+                            tag_upper = tag.upper()
+                            # Специальные паттерны для USDT
+                            if 'USDT' in tag_upper:
+                                coin_name = 'USDT'
+                            # Извлекаем символ из начала тега (например IMU_RC_tag -> IMU, ELSA_tag -> ELSA)
+                            elif '_' in tag:
+                                potential_symbol = tag.split('_')[0].upper()
+                                # Проверяем что это похоже на символ токена (2-10 букв)
+                                if len(potential_symbol) >= 2 and len(potential_symbol) <= 10 and potential_symbol.isalpha():
+                                    # Исключаем служебные слова
+                                    if potential_symbol not in ['CRAZY', 'NEW', 'VIP', 'CIS', 'NEWUSER']:
+                                        coin_name = potential_symbol
+                        
+                        # Если не определили - пробуем другие источники
+                        if not coin_name:
+                            if api_coin_name:
+                                coin_name = api_coin_name
+                            elif return_coin and return_coin != 0:
+                                # return_coin указывает на монету которую получаем обратно
+                                coin_name = BYBIT_COIN_MAPPING.get(return_coin, f"COIN_{return_coin}")
                             else:
-                                # Для остальных используем coin из product или coin_product
-                                coin_id = product_coin_id
-                        else:
-                            # Стандартный случай: стейкаем и получаем ту же монету
-                            coin_id = return_coin if return_coin else api_coin_id
-
-                        coin_name = BYBIT_COIN_MAPPING.get(coin_id, f"COIN_{coin_id}")
+                                # Fallback: маппинг по product_coin_id
+                                coin_name = BYBIT_COIN_MAPPING.get(product_coin_id, f"COIN_{product_coin_id}")
 
                         # Проверяем все текстовые поля на наличие < или >
                         for key, value in product.items():
