@@ -470,20 +470,22 @@ class StakingParser:
 
                         # Заполненность
                         # Bybit API возвращает значения в минимальных единицах (разные decimals для разных токенов)
+                        # Проверено по скриншоту сайта Bybit:
+                        #   - USDT 242,000 = API 2,420,000,000 → делим на 10^4
+                        #   - USDT 800,000 = API 8,000,000,000 → делим на 10^4
+                        #   - IMU 6,517,857 = API 651,785,700,000,000 → делим на 10^8
                         raw_max_share = float(product.get('product_max_share', 0))
                         raw_deposit = float(product.get('total_deposit_share', 0))
                         
                         # Определяем decimals на основе типа токена
-                        # USDT/USDC: 3 decimals (внутренняя система Bybit)
-                        # Другие токены: эвристика по масштабу числа
                         if coin_name in ['USDT', 'USDC']:
-                            decimals_divisor = 1000  # 10^3
-                        elif raw_max_share > 10**14:  # Очень большие числа - вероятно 8 decimals
+                            decimals_divisor = 10000  # 10^4 - проверено по скриншоту сайта
+                        elif raw_max_share > 10**14:  # Очень большие числа - 8 decimals
                             decimals_divisor = 10**8
-                        elif raw_max_share > 10**11:  # Большие числа - вероятно 6 decimals  
+                        elif raw_max_share > 10**11:  # Большие числа - 6 decimals  
                             decimals_divisor = 10**6
-                        elif raw_max_share > 10**9:  # Средние числа - 3 decimals
-                            decimals_divisor = 1000
+                        elif raw_max_share > 10**9:  # Средние числа - 4 decimals
+                            decimals_divisor = 10000
                         else:
                             decimals_divisor = 1  # Маленькие числа - без деления
                         
