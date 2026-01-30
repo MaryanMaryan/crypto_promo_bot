@@ -492,7 +492,7 @@ def get_category_management_menu():
     builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="category_launches"))
     builder.add(InlineKeyboardButton(text="📢 Анонс", callback_data="category_announcement"))
     builder.add(InlineKeyboardButton(text="❌ Назад", callback_data="back_to_main_menu"))
-    builder.adjust(1)
+    builder.adjust(2, 2, 2)
     return builder.as_markup()
 
 def get_staking_management_keyboard(link=None):
@@ -2163,7 +2163,7 @@ async def main_categories_handler(callback: CallbackQuery):
     builder.add(InlineKeyboardButton(text="🚀 Лаучи", callback_data="category_launches"))
     builder.add(InlineKeyboardButton(text="📢 Анонсы", callback_data="category_announcement"))
     builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main_menu"))
-    builder.adjust(1, 2, 2, 1)
+    builder.adjust(2, 2, 2)
     
     await callback.message.edit_text(
         "🗂️ <b>Категории</b>\n\n"
@@ -6506,19 +6506,20 @@ async def force_parse_stakings(callback: CallbackQuery):
 # ОБРАБОТЧИКИ ТЕКУЩИХ ПРОМОАКЦИЙ (AIRDROP)
 # =============================================================================
 
-def get_promos_from_db(link_id: int, exchange_name: str = None) -> list:
+def get_promos_from_db(link_id: int, exchange_name: str = None, sort_by_reward: bool = True) -> list:
     """
     Получить промоакции из БД для конкретной ссылки.
     
     Args:
         link_id: ID ссылки в БД
         exchange_name: Название биржи (для фильтрации)
+        sort_by_reward: Сортировать по награде на место (топ награды сверху)
     
     Returns:
         Список словарей с данными промоакций
     """
     from data.models import PromoHistory
-    from sqlalchemy import or_
+    from sqlalchemy import or_, desc
     
     try:
         now = datetime.utcnow()
@@ -6551,8 +6552,12 @@ def get_promos_from_db(link_id: int, exchange_name: str = None) -> list:
                 )
             )
             
-            # Сортируем по дате создания (новые первые)
-            query = query.order_by(PromoHistory.created_at.desc())
+            # Сортируем: по награде на место (топ награды сверху), затем по дате создания
+            # reward_per_winner_usd DESC (NULL в конец), потом created_at DESC
+            query = query.order_by(
+                desc(PromoHistory.reward_per_winner_usd).nulls_last(),
+                PromoHistory.created_at.desc()
+            )
             
             promos = query.all()
             
@@ -12090,7 +12095,8 @@ async def show_top_stakings(callback: CallbackQuery):
         await callback.message.edit_text(
             message,
             parse_mode="HTML",
-            reply_markup=get_top_stakings_keyboard(1, total_pages)
+            reply_markup=get_top_stakings_keyboard(1, total_pages),
+            disable_web_page_preview=True
         )
         await safe_answer_callback(callback)
         
@@ -12134,7 +12140,8 @@ async def navigate_top_stakings(callback: CallbackQuery):
         await callback.message.edit_text(
             message,
             parse_mode="HTML",
-            reply_markup=get_top_stakings_keyboard(current_page, total_pages)
+            reply_markup=get_top_stakings_keyboard(current_page, total_pages),
+            disable_web_page_preview=True
         )
         await safe_answer_callback(callback)
         
@@ -12390,15 +12397,174 @@ async def top_activity_page_info(callback: CallbackQuery):
     await callback.answer("📄 Текущая страница")
 
 
+def create_progress_bar(percentage: float, width: int = 20) -> str:
+    """
+    Создаёт визуальный прогресс-бар без рамки (для использования в <code>).
+    
+    Args:
+        percentage: Процент заполнения (0-100)
+        width: Ширина прогресс-бара в символах
+        
+    Returns:
+        Прогресс-бар в виде строки
+    """
+    if percentage is None:
+        percentage = 0
+    
+    # Ограничиваем от 0 до 100
+    percentage = max(0, min(100, percentage))
+    
+    # Вычисляем количество заполненных блоков
+    filled = int((percentage / 100) * width)
+    empty = width - filled
+    
+    # Создаем бар
+    bar = "▓" * filled + "░" * empty
+    
+    return f"{bar} {percentage:.2f}%"
+
+
+def calculate_potential_income(apr: float, user_limit_usd: float, term_days: int, is_flexible: bool, free_usd: float = 0, exchange: str = '') -> dict:
+    """
+    Рассчитывает потенциальный доход от стейкинга.
+    
+    Args:
+        apr: Годовой процент
+        user_limit_usd: Максимальный лимит в USD
+        term_days: Срок в днях
+        is_flexible: Флаг Flexible стейкинга
+        free_usd: Свободное место в USD (для Flexible)
+        exchange: Название биржи
+        
+    Returns:
+        Словарь с вариантами дохода
+    """
+    if is_flexible:
+        # Для Flexible - 3 варианта: $500, $1000, свободное место
+        max_amount = free_usd if free_usd > 0 else 5000  # Дефолт $5000 если нет данных
+        
+        # Собираем варианты
+        variants = []
+        for amount in [500, 1000]:
+            if amount < max_amount:
+                daily = (amount * apr / 100) / 365
+                variants.append({'amount': amount, 'daily_profit': daily, 'is_max': False})
+        
+        # Добавляем максимум (свободное место)
+        max_daily = (max_amount * apr / 100) / 365
+        variants.append({'amount': int(max_amount), 'daily_profit': max_daily, 'is_max': True})
+        
+        return {
+            'type': 'flexible',
+            'max_amount': int(max_amount),
+            'max_daily_profit': max_daily,
+            'variants': variants
+        }
+    else:
+        # Для Fixed - варианты депозита зависят от биржи
+        exchange_lower = exchange.lower() if exchange else ''
+        if exchange_lower in ['kucoin', 'bybit']:
+            # Kucoin и Bybit - меньшие лимиты
+            amounts = [250, 500, 1000]
+        else:
+            # Остальные биржи - стандартные суммы
+            amounts = [2500, 5000, 10000]
+        
+        # Если не указан срок, используем 7 дней
+        days = term_days if term_days else 7
+        
+        results = []
+        for amount in amounts:
+            annual_profit = amount * (apr / 100)
+            period_profit = annual_profit * (days / 365)
+            results.append({
+                'amount': amount,
+                'profit': period_profit
+            })
+        
+        return {
+            'type': 'fixed',
+            'days': days,
+            'variants': results
+        }
+
+
+def format_end_time(end_time_str: str) -> str:
+    """
+    Форматирует время окончания стейкинга в формат "DD.MM.YYYY (X дней)".
+    
+    Args:
+        end_time_str: Строка с timestamp окончания
+        
+    Returns:
+        Отформатированная строка с датой и днями
+    """
+    if not end_time_str:
+        return "н/д"
+    
+    try:
+        # end_time хранится как timestamp в миллисекундах
+        end_timestamp = int(end_time_str) / 1000
+        end_dt = datetime.fromtimestamp(end_timestamp)
+        now = datetime.now()
+        
+        if end_dt <= now:
+            return "завершён"
+        
+        delta = end_dt - now
+        days = delta.days
+        
+        date_str = end_dt.strftime("%d.%m.%Y")
+        
+        if days > 0:
+            return f"{date_str} ({days} дней)"
+        else:
+            hours = delta.seconds // 3600
+            if hours > 0:
+                return f"{date_str} ({hours} часов)"
+            else:
+                return f"{date_str} (< 1 час)"
+                
+    except (ValueError, TypeError, OSError):
+        return "н/д"
+
+
+def get_exchange_staking_url(exchange: str) -> str:
+    """
+    Возвращает базовую ссылку на страницу стейкинга биржи.
+    
+    Args:
+        exchange: Название биржи
+        
+    Returns:
+        URL страницы стейкинга
+    """
+    exchange_lower = exchange.lower().replace('.io', '').strip()
+    
+    urls = {
+        'bybit': 'https://www.bybit.com/en/earn/easy-earn',
+        'gate': 'https://www.gate.com/ru/simple-earn',
+        'gateio': 'https://www.gate.com/ru/simple-earn',
+        'gate.io': 'https://www.gate.com/ru/simple-earn',
+        'kucoin': 'https://www.kucoin.com/earn',
+        'binance': 'https://www.binance.com/ru-UA/earn',
+        'okx': 'https://www.okx.com/earn',
+        'mexc': 'https://www.mexc.com/uk-UA/earn',
+        'bitget': 'https://www.bitget.com/earn',
+        'htx': 'https://www.htx.com/earn',
+        'bingx': 'https://www.bingx.com/earn',
+    }
+    
+    return urls.get(exchange_lower, f'https://{exchange_lower}.com')
+
+
 def format_top_stakings_page(stakings: list, page: int, total_pages: int, items_per_page: int) -> str:
-    """Форматирует страницу ТОП стейкингов"""
+    """Форматирует страницу ТОП стейкингов с новым дизайном"""
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
     
     message = (
-        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🔥 <b>СТЕЙКИНГИ</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n\n"
+        f"🔥 <b>СТЕЙКИНГИ</b>\n\n"
     )
     
     # Вычисляем срез для текущей страницы
@@ -12432,32 +12598,132 @@ def format_top_stakings_page(stakings: list, page: int, total_pages: int, items_
         # Заработок
         profit_display = staking.get('profit_display', 'N/A')
         
-        # Макс сумма и заполненность
-        user_limit = staking.get('user_limit_usd', 0)
-        fill_pct = staking.get('fill_percentage')
+        # Данные о заполненности и депозите
+        user_limit_usd = staking.get('user_limit_usd', 0) or 0
+        user_limit_tokens = staking.get('user_limit_tokens', 0) or 0
+        fill_pct = staking.get('fill_percentage') or 0
+        max_capacity = staking.get('max_capacity')
+        current_deposit = staking.get('current_deposit')
         
-        if user_limit:
-            limit_str = f"${user_limit:,.0f}"
-        else:
-            limit_str = "нет данных"
-        
-        if fill_pct is not None:
-            fill_str = f"({fill_pct:.0f}% заполнено)"
-        else:
-            fill_str = ""
+        # Рассчитываем свободное место для Flexible
+        free_usd = 0
+        if user_limit_usd and fill_pct < 100:
+            free_usd = user_limit_usd * (100 - fill_pct) / 100
         
         # Оставшееся время
         time_remaining = staking.get('time_remaining', 'нет данных')
         
-        # Формируем карточку
-        message += f"{number} <b>{coin}</b> ({exchange}) • {type_str}\n"
-        message += f"🚀 APR: {apr:.1f}%\n"
-        message += f"💸 Заработок: {profit_display}\n"
-        message += f"🏦 Макс: {limit_str} {fill_str}\n"
-        message += f"⏰ Осталось: {time_remaining}\n\n"
+        # Получаем ссылку на биржу
+        exchange_url = get_exchange_staking_url(exchange)
+        
+        # Рассчитываем потенциальный доход заранее для использования в заголовке
+        income_data = calculate_potential_income(apr, user_limit_usd, term_days, is_flexible, free_usd, exchange)
+        
+        # ═══════════════════════════════════════════════════════════
+        # ФОРМИРУЕМ КАРТОЧКУ В НОВОМ СТИЛЕ
+        # ═══════════════════════════════════════════════════════════
+        
+        # Заголовок: номер | токен (биржа) | потенциальный доход пользователя
+        if income_data['type'] == 'flexible':
+            # Для Flexible: максимальный заработок (на свободное место)
+            header_profit = f"${income_data['max_daily_profit']:.2f}/день"
+        else:
+            # Для Fixed берём последний вариант (максимальный)
+            last_variant = income_data['variants'][-1]
+            header_profit = f"${last_variant['profit']:.2f}"
+        
+        message += f"{number} <b>{coin}</b> ({exchange}) | 💰 <b>{header_profit}</b>\n"
+        
+        # APR и тип (используем точку вместо |)
+        message += f"🚀 {apr:.1f}% APR • {type_str}\n"
+        
+        # Прогресс-бар заполненности (если данные есть) - оборачиваем в <code> для синего фона
+        if fill_pct is not None and fill_pct > 0:
+            progress_bar = create_progress_bar(fill_pct, width=20)
+            message += f"📊 <code>{progress_bar}</code>\n"
+            
+            # Информация о депозите в одну строку
+            parts = []
+            if user_limit_tokens and max_capacity:
+                # Форматируем числа
+                if user_limit_tokens >= 1_000_000:
+                    tokens_str = f"{user_limit_tokens/1_000_000:.2f}M"
+                elif user_limit_tokens >= 1_000:
+                    tokens_str = f"{user_limit_tokens/1_000:.2f}K"
+                else:
+                    tokens_str = f"{user_limit_tokens:,.0f}"
+                
+                if max_capacity >= 1_000_000:
+                    capacity_str = f"{max_capacity/1_000_000:.2f}M"
+                elif max_capacity >= 1_000:
+                    capacity_str = f"{max_capacity/1_000:.2f}K"
+                else:
+                    capacity_str = f"{max_capacity:,.0f}"
+                
+                parts.append(f"📥 {tokens_str}/{capacity_str} {coin}")
+            
+            # Свободное место в USD
+            if user_limit_usd and fill_pct < 100:
+                free_usd = user_limit_usd * (100 - fill_pct) / 100
+                if free_usd > 0:
+                    parts.append(f"🟢 ${free_usd:,.0f}")
+            
+            if parts:
+                message += " • ".join(parts) + "\n"
+        elif user_limit_usd:
+            # Если нет процента заполнения, показываем только лимит
+            message += f"🏦 Макс: ${user_limit_usd:,.0f}\n"
+        
+        message += "\n"  # Пустая строка перед доходом
+        
+        # Потенциальный доход (income_data уже рассчитан выше для заголовка)
+        if income_data['type'] == 'flexible':
+            # Для Flexible - 3 варианта: $500, $1000, свободное место
+            message += f"💰 Потенциальный доход (/день):\n"
+            variants = income_data['variants']
+            for i, variant in enumerate(variants):
+                amount = variant['amount']
+                daily = variant['daily_profit']
+                is_last = i == len(variants) - 1
+                is_max = variant.get('is_max', False)
+                prefix = "└─" if is_last else "├─"
+                
+                # Максимальный вариант с пометкой и выделением
+                if is_max:
+                    message += f"   {prefix} ${amount:,} (макс) → <b>+${daily:.2f}</b>\n"
+                else:
+                    message += f"   {prefix} ${amount:,} → +${daily:.2f}\n"
+        else:
+            # Для Fixed - 3 варианта
+            message += f"💰 Потенциальный доход:\n"
+            variants = income_data['variants']
+            for i, variant in enumerate(variants):
+                amount = variant['amount']
+                profit = variant['profit']
+                is_last = i == len(variants) - 1
+                prefix = "└─" if is_last else "├─"
+                # Выделяем только последний вариант
+                if is_last:
+                    message += f"   {prefix} ${amount:,} → <b>+${profit:.2f}</b>\n"
+                else:
+                    message += f"   {prefix} ${amount:,} → +${profit:.2f}\n"
+        
+        # Время окончания и ссылка на биржу
+        end_time_formatted = format_end_time(staking.get('end_time'))
+        exchange_name = exchange.replace('.io', '').replace('Gate', 'Gate').title()
+        exchange_link = f'<a href="{exchange_url}">{exchange_name}</a>'
+        
+        # Если есть дата - показываем с временем, если нет - только ссылку
+        if end_time_formatted and end_time_formatted != 'н/д':
+            message += f"\n⏰ {end_time_formatted} • 🔗 {exchange_link}\n"
+        else:
+            message += f"\n🔗 {exchange_link}\n"
+        
+        # Пустая строка между карточками (только если это не последняя)
+        if idx < len(page_stakings) - 1:
+            message += "\n"
     
-    message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    message += f"📄 {page}/{total_pages}"
+    message += f"\n📄 {page}/{total_pages}"
     
     return message
 
@@ -12666,13 +12932,13 @@ def format_airdrop_page(
         # 💰 Награда
         if reward_display:
             if reward_usd:
-                message += f"   💰 Награда: {reward_display} ({reward_usd})\n"
+                message += f"   💰 Награда: <b>{reward_display} ({reward_usd})</b>\n"
             elif expected_reward > 0:
-                message += f"   💰 Награда: {reward_display} (~${expected_reward:,.2f})\n"
+                message += f"   💰 Награда: <b>{reward_display} (~${expected_reward:,.2f})</b>\n"
             else:
-                message += f"   💰 Награда: {reward_display}\n"
+                message += f"   💰 Награда: <b>{reward_display}</b>\n"
         elif expected_reward > 0:
-            message += f"   💰 Награда: ~${expected_reward:,.2f}\n"
+            message += f"   💰 Награда: <b>~${expected_reward:,.2f}</b>\n"
         
         # 📋 Условия
         if conditions:
@@ -13120,9 +13386,9 @@ def format_other_page(
         
         # 💰 Награда
         if expected_reward > 0:
-            message += f"   💰 Награда: ~${expected_reward:,.2f}\n"
+            message += f"   💰 Награда: <b>~${expected_reward:,.2f}</b>\n"
         elif reward_display:
-            message += f"   💰 Награда: {reward_display}\n"
+            message += f"   💰 Награда: <b>{reward_display}</b>\n"
         
         # ⏰ Время
         if remaining_str:

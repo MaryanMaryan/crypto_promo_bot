@@ -1880,7 +1880,11 @@ class NotificationService:
                             return amount_usd * (apr_pct / 100) * (days / 365)
                     
                     message += f"\n💰 <b>Потенциальный доход:</b>\n"
-                    amounts = [100, 500, 1000]
+                    # Для USDT стейкингов лимит на аккаунт ~$300, используем реалистичные суммы
+                    if coin in ['USDT', 'USDC']:
+                        amounts = [100, 150, 300]
+                    else:
+                        amounts = [100, 500, 1000]
                     for i, amount in enumerate(amounts):
                         earnings = calc_bybit_earnings(amount, apr, term_days if term_days > 0 else 1)
                         prefix = "├─" if i < len(amounts) - 1 else "└─"
@@ -1906,9 +1910,70 @@ class NotificationService:
                             else:
                                 message += f" ({term_days} дней)"
                         message += "\n"
+                    
+                    # Ссылка на страницу стейкинга
+                    message += f"\n🔗 <a href=\"https://www.bybit.com/en/earn/easy-earn\">Открыть на Bybit</a>\n"
 
                 # ═══════════════════════════════════════════════════════════
-                # ОБЫЧНЫЙ ПРОДУКТ (MEXC, KuCoin и др.)
+                # KUCOIN EARN (улучшенный формат)
+                # ═══════════════════════════════════════════════════════════
+                elif 'kucoin' in exchange_name.lower() or staking.get('exchange', '').lower() == 'kucoin':
+                    # Формат периода
+                    if term_days == 0:
+                        term_text = "Flexible"
+                    elif term_days == 1:
+                        term_text = "1 день"
+                    elif term_days < 5:
+                        term_text = f"{term_days} дня"
+                    else:
+                        term_text = f"{term_days} дней"
+
+                    # ЗАГОЛОВОК
+                    message += f"💰 <b>{coin}</b> | {apr:.1f}% APR | {term_text}\n"
+
+                    # СТАТУС
+                    status = staking.get('status')
+                    if status:
+                        status_lower = status.lower()
+                        if status_lower in ['active', 'ongoing']:
+                            status_emoji = "✅"
+                        elif 'sold' in status_lower:
+                            status_emoji = "🔴"
+                        elif status_lower == 'interesting':
+                            status_emoji = "⭐"
+                        else:
+                            status_emoji = "⚪"
+                        message += f"📈 <b>Статус:</b> {status_emoji} {self.escape_html(status)}\n"
+
+                    # КАТЕГОРИЯ
+                    category = staking.get('category')
+                    if category:
+                        if category == 'ACTIVITY':
+                            message += f"🏷 <b>Категория:</b> 🎯 Акция\n"
+                        elif category == 'DEMAND':
+                            message += f"🏷 <b>Категория:</b> 💰 Сбережения\n"
+                        else:
+                            message += f"🏷 <b>Категория:</b> {self.escape_html(category)}\n"
+                    
+                    # ПОТЕНЦИАЛЬНЫЙ ДОХОД
+                    def calc_kucoin_earnings(amount_usd: float, apr_pct: float, days: int) -> float:
+                        if days == 0:
+                            return amount_usd * (apr_pct / 100) / 365
+                        else:
+                            return amount_usd * (apr_pct / 100) * (days / 365)
+                    
+                    message += f"\n💰 <b>Потенциальный доход:</b>\n"
+                    amounts = [100, 500, 1000]
+                    for i, amount in enumerate(amounts):
+                        earnings = calc_kucoin_earnings(amount, apr, term_days if term_days > 0 else 1)
+                        prefix = "├─" if i < len(amounts) - 1 else "└─"
+                        if term_days == 0:
+                            message += f"   {prefix} ${amount} → <b>+${earnings:.2f}</b>/день\n"
+                        else:
+                            message += f"   {prefix} ${amount} → <b>+${earnings:.2f}</b>\n"
+
+                # ═══════════════════════════════════════════════════════════
+                # ОБЫЧНЫЙ ПРОДУКТ (MEXC и др.)
                 # ═══════════════════════════════════════════════════════════
                 else:
                     # ЗАГОЛОВОК: Монета | APR | Срок
@@ -2197,9 +2262,9 @@ class NotificationService:
                     
                     if reward_per_winner:
                         if reward_per_winner_usd:
-                            message += f"   • Награда на место: {self.escape_html(str(reward_per_winner))} (~${reward_per_winner_usd:,.2f})\n"
+                            message += f"   • Награда на место: <b>{self.escape_html(str(reward_per_winner))} (~${reward_per_winner_usd:,.2f})</b>\n"
                         else:
-                            message += f"   • Награда на место: {self.escape_html(str(reward_per_winner))}\n"
+                            message += f"   • Награда на место: <b>{self.escape_html(str(reward_per_winner))}</b>\n"
                     
                     # Призовые места теперь в секции НАГРАДА
                     if winners:

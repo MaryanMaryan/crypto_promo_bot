@@ -39,12 +39,13 @@ class TopActivityService:
             staking: Словарь с данными стейкинга
             
         Returns:
-            Словарь с profit, period, profit_display
+            Словарь с profit, period, profit_display, is_flexible
         """
         apr = staking.get('apr', 0) or 0
         user_limit_usd = staking.get('user_limit_usd', 0) or 0
         term_days = staking.get('term_days') or self.DEFAULT_FLEXIBLE_DAYS
         staking_type = staking.get('type', '') or ''
+        fill_percentage = staking.get('fill_percentage', 0) or 0
         
         # Определяем тип стейкинга
         is_flexible = 'flex' in staking_type.lower() if staking_type else False
@@ -53,21 +54,27 @@ class TopActivityService:
         if not user_limit_usd and staking.get('user_limit_tokens') and staking.get('token_price_usd'):
             user_limit_usd = staking['user_limit_tokens'] * staking['token_price_usd']
         
-        # Если всё ещё нет - используем дефолт
-        if not user_limit_usd:
-            user_limit_usd = 100  # Дефолтный депозит для расчёта
-        
-        # Расчёт заработка
-        # annual_profit = deposit * APR%
-        # actual_profit = annual_profit * (days / 365)
-        annual_profit = user_limit_usd * (apr / 100)
-        actual_profit = annual_profit * (term_days / 365)
-        
-        # Формируем период
         if is_flexible:
+            # Для Flexible: profit = заработок на свободное место (для сортировки)
+            free_usd = 0
+            if user_limit_usd and fill_percentage < 100:
+                free_usd = user_limit_usd * (100 - fill_percentage) / 100
+            
+            if free_usd <= 0:
+                free_usd = 5000  # Дефолт если нет данных
+            
+            # Дневной заработок на свободное место
+            daily_profit = (free_usd * apr / 100) / 365
+            
             period = "день"
-            profit_display = f"${actual_profit:.2f}/день"
+            profit_display = f"${daily_profit:.2f}/день"
+            actual_profit = daily_profit  # Для сортировки используем дневной заработок на макс
         else:
+            # Для Fixed: profit = заработок на $10,000 (фиксированная сумма для сортировки)
+            deposit_for_sort = 10000
+            annual_profit = deposit_for_sort * (apr / 100)
+            actual_profit = annual_profit * (term_days / 365)
+            
             if term_days < 30:
                 period = f"{term_days}д"
             else:
@@ -391,11 +398,19 @@ class TopActivityService:
                     
                     result.append(staking_dict)
                 
-                # Сортируем по заработку (profit) по убыванию
-                result.sort(key=lambda x: x.get('profit', 0), reverse=True)
+                # Сортировка: Fixed первыми, потом Flexible
+                # Внутри каждой группы - по заработку (profit) по убыванию
+                fixed_stakings = [s for s in result if not s.get('is_flexible', False)]
+                flexible_stakings = [s for s in result if s.get('is_flexible', False)]
+                
+                fixed_stakings.sort(key=lambda x: x.get('profit', 0), reverse=True)
+                flexible_stakings.sort(key=lambda x: x.get('profit', 0), reverse=True)
+                
+                # Объединяем: сначала Fixed, потом Flexible
+                sorted_result = fixed_stakings + flexible_stakings
                 
                 # Возвращаем топ N
-                return result[:limit]
+                return sorted_result[:limit]
                 
         except Exception as e:
             self.logger.error(f"❌ Ошибка получения ТОП стейкингов: {e}", exc_info=True)

@@ -873,10 +873,23 @@ class ParserService:
                 except Exception as e:
                     logger.debug(f"⚠️ Не удалось получить цену {token_pool_currency}: {e}")
 
-            # Gate.io возвращает некорректные USD цены - всегда пересчитываем через price_fetcher
-            force_recalculate = existing.exchange and 'gate' in existing.exchange.lower()
+            # Определяем когда нужно пересчитывать USD цены:
+            # - Gate.io возвращает некорректные USD цены
+            # - BybitTS (token-splash) - цены токенов меняются, нужно обновлять
+            is_gate = existing.exchange and 'gate' in existing.exchange.lower()
+            is_bybit_tokensplash = (
+                (link_url and 'token-splash' in link_url.lower()) or 
+                (existing.link and 'token-splash' in existing.link.lower()) or
+                (promo_id and promo_id.startswith('bybit_') and promo_id.replace('bybit_', '').replace('_', '').isdigit())
+            )
             
-            # Обновляем USD-эквиваленты если их нет (и не Gate.io)
+            # Для Gate.io и BybitTS - ВСЕГДА пересчитываем USD эквиваленты
+            force_recalculate = is_gate or is_bybit_tokensplash
+            
+            if force_recalculate:
+                logger.info(f"💵 Force recalculate USD для {existing.title} (is_gate={is_gate}, is_bybit_ts={is_bybit_tokensplash})")
+            
+            # Для остальных - обновляем только если значений нет
             if not force_recalculate:
                 total_prize_pool_usd = promo.get('total_prize_pool_usd')
                 reward_per_winner_usd = promo.get('reward_per_winner_usd')
@@ -889,7 +902,7 @@ class ParserService:
                     existing.reward_per_winner_usd = self._safe_float(reward_per_winner_usd)
                     updated = True
             
-            # Если USD-эквиваленты всё ещё пустые (или Gate.io) - пробуем рассчитать через price_fetcher
+            # Если USD-эквиваленты пустые ИЛИ нужно пересчитать - получаем актуальные цены
             should_calculate_pool = force_recalculate or not existing.total_prize_pool_usd
             should_calculate_reward = force_recalculate or not existing.reward_per_winner_usd
             
