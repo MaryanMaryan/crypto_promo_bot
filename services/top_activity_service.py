@@ -46,6 +46,7 @@ class TopActivityService:
         term_days = staking.get('term_days') or self.DEFAULT_FLEXIBLE_DAYS
         staking_type = staking.get('type', '') or ''
         fill_percentage = staking.get('fill_percentage', 0) or 0
+        exchange = staking.get('exchange', '') or ''
         
         # Определяем тип стейкинга
         is_flexible = 'flex' in staking_type.lower() if staking_type else False
@@ -70,8 +71,18 @@ class TopActivityService:
             profit_display = f"${daily_profit:.2f}/день"
             actual_profit = daily_profit  # Для сортировки используем дневной заработок на макс
         else:
-            # Для Fixed: profit = заработок на $10,000 (фиксированная сумма для сортировки)
-            deposit_for_sort = 10000
+            # Для Fixed: прибуток рахуємо на максимальний депозит, що показується у виводі
+            # Kucoin/Bybit показують $250/$500/$1000, інші - $1000/$2500/$5000
+            exchange_lower = exchange.lower()
+            if exchange_lower in ['kucoin', 'bybit']:
+                deposit_for_sort = 1000  # Максимум що показується для цих бірж
+            else:
+                deposit_for_sort = 5000  # Максимум для Gate, MEXC та інших
+            
+            # Якщо є user_limit і він менше стандартного - використовуємо його
+            if user_limit_usd and user_limit_usd > 0 and user_limit_usd < deposit_for_sort:
+                deposit_for_sort = user_limit_usd
+            
             annual_profit = deposit_for_sort * (apr / 100)
             actual_profit = annual_profit * (term_days / 365)
             

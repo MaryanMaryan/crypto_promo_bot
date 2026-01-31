@@ -12467,11 +12467,20 @@ def calculate_potential_income(apr: float, user_limit_usd: float, term_days: int
             # Kucoin и Bybit - меньшие лимиты
             amounts = [250, 500, 1000]
         else:
-            # Остальные биржи - стандартные суммы
-            amounts = [2500, 5000, 10000]
+            # Остальные биржи (Gate, MEXC и др.) - средние суммы
+            amounts = [1000, 2500, 5000]
         
         # Если не указан срок, используем 7 дней
         days = term_days if term_days else 7
+        
+        # Если есть user_limit_usd и он меньше максимального варианта - используем его как максимум
+        if user_limit_usd and user_limit_usd > 0 and user_limit_usd < amounts[-1]:
+            # Фильтруем варианты, оставляя только те что <= лимиту
+            amounts = [a for a in amounts if a <= user_limit_usd]
+            # Если ни один не подходит или лимит маленький, добавляем сам лимит
+            if not amounts or user_limit_usd not in amounts:
+                amounts.append(int(user_limit_usd))
+                amounts = sorted(set(amounts))[-3:]  # Берём максимум 3 варианта
         
         results = []
         for amount in amounts:
@@ -12722,8 +12731,6 @@ def format_top_stakings_page(stakings: list, page: int, total_pages: int, items_
         # Пустая строка между карточками (только если это не последняя)
         if idx < len(page_stakings) - 1:
             message += "\n"
-    
-    message += f"\n📄 {page}/{total_pages}"
     
     return message
 

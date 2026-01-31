@@ -41,6 +41,7 @@ class PriceFetcher:
     BYBIT_API = "https://api.bybit.com/v5/market/tickers"
     KUCOIN_API = "https://api.kucoin.com/api/v1/market/orderbook/level1"
     GATEIO_API = "https://api.gateio.ws/api/v4/spot/tickers"
+    MEXC_API = "https://api.mexc.com/api/v3/ticker/price"
     
     # Настройки
     CACHE_DURATION = 300  # 5 минут кэш
@@ -57,6 +58,7 @@ class PriceFetcher:
             'bybit_hits': 0,
             'kucoin_hits': 0,
             'gateio_hits': 0,
+            'mexc_hits': 0,
             'premarket_hits': 0,
             'cache_hits': 0,
             'not_found': 0
@@ -108,7 +110,7 @@ class PriceFetcher:
 
     def _get_exchange_order(self, preferred: Optional[str]) -> List[str]:
         """Определяет порядок опроса бирж"""
-        default_order = ['bybit', 'kucoin', 'gateio']
+        default_order = ['bybit', 'kucoin', 'gateio', 'mexc']
         
         if preferred and preferred.lower() in default_order:
             # Ставим предпочтительную биржу первой
@@ -127,6 +129,8 @@ class PriceFetcher:
                 return self._get_price_from_kucoin(symbol)
             elif exchange == 'gateio':
                 return self._get_price_from_gateio(symbol)
+            elif exchange == 'mexc':
+                return self._get_price_from_mexc(symbol)
         except Exception as e:
             logger.debug(f"⚠️ Ошибка {exchange} для {symbol}: {e}")
         return None
@@ -251,6 +255,34 @@ class PriceFetcher:
             return None
         except Exception as e:
             logger.debug(f"⚠️ Gate.io ошибка для {symbol}: {e}")
+            return None
+
+    def _get_price_from_mexc(self, symbol: str) -> Optional[float]:
+        """Получить цену с MEXC API"""
+        try:
+            # MEXC использует формат SUMRUSDT
+            pair = f"{symbol}USDT"
+            url = f"{self.MEXC_API}?symbol={pair}"
+            
+            response = requests.get(url, timeout=self.FAST_TIMEOUT)
+            
+            if response.status_code == 200:
+                data = response.json()
+                price_str = data.get('price')
+                if price_str:
+                    price = float(price_str)
+                    if price > 0:
+                        self._stats['mexc_hits'] += 1
+                        logger.debug(f"✅ {symbol}: ${price:.6f} (MEXC)")
+                        return price
+            
+            return None
+            
+        except requests.exceptions.Timeout:
+            logger.debug(f"⏱️ MEXC timeout для {symbol}")
+            return None
+        except Exception as e:
+            logger.debug(f"⚠️ MEXC ошибка для {symbol}: {e}")
             return None
 
     # ==================== BATCH ОПЕРАЦИИ ====================
