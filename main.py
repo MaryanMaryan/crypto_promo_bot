@@ -157,6 +157,10 @@ class CryptoPromoBot:
         self.dp.include_router(telegram_account_router)
         self.dp.include_router(exchange_credentials_router)
         self.dp.include_router(router)
+        
+        # Регистрируем роутер фьючерсов ПОСЛЕДНИМ (чтобы не перехватывать другие команды)
+        from bot.futures_handlers import setup_futures_handlers
+        setup_futures_handlers(self.dp)
 
         # Настройка обработчиков завершения
         self._setup_signal_handlers()
