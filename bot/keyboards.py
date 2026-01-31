@@ -298,26 +298,42 @@ def get_top_activity_menu_keyboard():
     return builder.as_markup()
 
 
-def get_top_stakings_keyboard(current_page: int, total_pages: int) -> InlineKeyboardMarkup:
+def get_staking_type_selection_keyboard() -> InlineKeyboardMarkup:
+    """Клавіатура вибору типу стейкінгу (FIXED/FLEXIBLE)"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(text="🔒 FIXED", callback_data="top_stakings_fixed"))
+    builder.add(InlineKeyboardButton(text="🔓 FLEXIBLE", callback_data="top_stakings_flexible"))
+    builder.add(InlineKeyboardButton(text="🔙 ТОП Меню", callback_data="top_activity_menu"))
+    
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+
+def get_top_stakings_keyboard(current_page: int, total_pages: int, staking_type: str = "fixed") -> InlineKeyboardMarkup:
     """Клавиатура для просмотра ТОП стейкингов"""
     builder = InlineKeyboardBuilder()
+    
+    # Callback prefix залежить від типу
+    type_suffix = "_fixed" if staking_type == "fixed" else "_flexible"
+    type_label = "🔒 FIXED" if staking_type == "fixed" else "🔓 FLEXIBLE"
     
     # Навигация по страницам
     nav_buttons = []
     if current_page > 1:
-        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data="top_stakings_prev"))
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"top_stakings{type_suffix}_prev"))
     
-    nav_buttons.append(InlineKeyboardButton(text=f"📄 {current_page}/{total_pages}", callback_data="top_stakings_info"))
+    nav_buttons.append(InlineKeyboardButton(text=f"{type_label} {current_page}/{total_pages}", callback_data="top_stakings_info"))
     
     if current_page < total_pages:
-        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data="top_stakings_next"))
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"top_stakings{type_suffix}_next"))
     
     for btn in nav_buttons:
         builder.add(btn)
     
     # Кнопки действий
-    builder.add(InlineKeyboardButton(text="🔄 Обновить", callback_data="top_activity_stakings"))
-    builder.add(InlineKeyboardButton(text="🔙 ТОП Меню", callback_data="top_activity_menu"))
+    builder.add(InlineKeyboardButton(text="🔄 Обновить", callback_data=f"top_stakings{type_suffix}"))
+    builder.add(InlineKeyboardButton(text="🔙 Категории", callback_data="top_activity_stakings"))
     
     # Расположение: навигация в одну строку, остальное по 2
     if len(nav_buttons) == 3:

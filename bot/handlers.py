@@ -12050,31 +12050,58 @@ async def refresh_top_activity(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "top_activity_stakings")
-async def show_top_stakings(callback: CallbackQuery):
-    """Показать ТОП стейкингов со всех бирж"""
+async def show_staking_type_selection(callback: CallbackQuery):
+    """Показать меню выбора типа стейкинга (FIXED/FLEXIBLE)"""
+    try:
+        from bot.keyboards import get_staking_type_selection_keyboard
+        
+        message = (
+            "📊 <b>ТОП СТЕЙКИНГОВ</b>\n\n"
+            "Виберіть тип стейкінгу:\n\n"
+            "🔒 <b>FIXED</b> - фіксований термін, гарантований APR\n"
+            "🔓 <b>FLEXIBLE</b> - гнучкий термін, можна вивести будь-коли"
+        )
+        
+        await callback.message.edit_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=get_staking_type_selection_keyboard()
+        )
+        await safe_answer_callback(callback)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка показа меню стейкингов: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка загрузки", show_alert=True)
+
+
+@router.callback_query(F.data.in_(["top_stakings_fixed", "top_stakings_flexible"]))
+async def show_top_stakings_by_type(callback: CallbackQuery):
+    """Показать ТОП стейкингов определённого типа (FIXED или FLEXIBLE)"""
     try:
         from services.top_activity_service import get_top_activity_service
         from bot.keyboards import get_top_stakings_keyboard
         
         user_id = callback.from_user.id
+        staking_type = "fixed" if callback.data == "top_stakings_fixed" else "flexible"
+        type_label = "🔒 FIXED" if staking_type == "fixed" else "🔓 FLEXIBLE"
         
         # Используем LoadingContext для отзывчивого UI
         async with LoadingContext(
             callback,
-            "⏳ <b>Загрузка ТОП стейкингов...</b>\n\n🔄 Агрегируем данные со всех бирж...",
+            f"⏳ <b>Загрузка {type_label} стейкингов...</b>\n\n🔄 Агрегируем данные со всех бирж...",
             delete_on_complete=True,
             edit_original=True
         ) as loading:
             service = get_top_activity_service()
-            stakings = service.get_top_stakings(limit=50)  # Получаем больше для пагинации
+            stakings = service.get_top_stakings(limit=50, staking_type=staking_type)
         
         if not stakings:
+            from bot.keyboards import get_staking_type_selection_keyboard
             await callback.message.edit_text(
-                "📊 <b>ТОП СТЕЙКИНГОВ</b>\n\n"
-                "📭 <i>Нет активных стейкингов в базе данных.\n"
-                "Убедитесь что добавлены ссылки на биржи с категорией 'staking'.</i>",
+                f"📊 <b>ТОП СТЕЙКИНГІВ {type_label}</b>\n\n"
+                f"📭 <i>Немає активних {type_label} стейкінгів в базі даних.</i>",
                 parse_mode="HTML",
-                reply_markup=get_top_stakings_keyboard(1, 1)
+                reply_markup=get_staking_type_selection_keyboard()
             )
             return
         
@@ -12084,18 +12111,19 @@ async def show_top_stakings(callback: CallbackQuery):
         
         top_activity_state[user_id] = {
             'stakings': stakings,
+            'staking_type': staking_type,
             'page': 1,
             'items_per_page': items_per_page,
             'total_pages': total_pages
         }
         
         # Форматируем первую страницу
-        message = format_top_stakings_page(stakings, 1, total_pages, items_per_page)
+        message = format_top_stakings_page(stakings, 1, total_pages, items_per_page, staking_type)
         
         await callback.message.edit_text(
             message,
             parse_mode="HTML",
-            reply_markup=get_top_stakings_keyboard(1, total_pages),
+            reply_markup=get_top_stakings_keyboard(1, total_pages, staking_type),
             disable_web_page_preview=True
         )
         await safe_answer_callback(callback)
@@ -12105,7 +12133,8 @@ async def show_top_stakings(callback: CallbackQuery):
         await callback.answer("❌ Ошибка загрузки", show_alert=True)
 
 
-@router.callback_query(F.data.in_(["top_stakings_prev", "top_stakings_next"]))
+@router.callback_query(F.data.in_(["top_stakings_fixed_prev", "top_stakings_fixed_next", 
+                                   "top_stakings_flexible_prev", "top_stakings_flexible_next"]))
 async def navigate_top_stakings(callback: CallbackQuery):
     """Навигация по страницам ТОП стейкингов"""
     try:
@@ -12118,13 +12147,17 @@ async def navigate_top_stakings(callback: CallbackQuery):
             await callback.answer("❌ Данные устарели, обновите список", show_alert=True)
             return
         
+        # Определяем тип и направление
+        staking_type = state.get('staking_type', 'fixed')
+        is_prev = callback.data.endswith("_prev")
+        
         # Изменяем страницу
         current_page = state['page']
         total_pages = state['total_pages']
         
-        if callback.data == "top_stakings_prev" and current_page > 1:
+        if is_prev and current_page > 1:
             current_page -= 1
-        elif callback.data == "top_stakings_next" and current_page < total_pages:
+        elif not is_prev and current_page < total_pages:
             current_page += 1
         
         state['page'] = current_page
@@ -12134,13 +12167,14 @@ async def navigate_top_stakings(callback: CallbackQuery):
             state['stakings'], 
             current_page, 
             total_pages, 
-            state['items_per_page']
+            state['items_per_page'],
+            staking_type
         )
         
         await callback.message.edit_text(
             message,
             parse_mode="HTML",
-            reply_markup=get_top_stakings_keyboard(current_page, total_pages),
+            reply_markup=get_top_stakings_keyboard(current_page, total_pages, staking_type),
             disable_web_page_preview=True
         )
         await safe_answer_callback(callback)
@@ -12567,13 +12601,15 @@ def get_exchange_staking_url(exchange: str) -> str:
     return urls.get(exchange_lower, f'https://{exchange_lower}.com')
 
 
-def format_top_stakings_page(stakings: list, page: int, total_pages: int, items_per_page: int) -> str:
+def format_top_stakings_page(stakings: list, page: int, total_pages: int, items_per_page: int, staking_type: str = "fixed") -> str:
     """Форматирует страницу ТОП стейкингов с новым дизайном"""
     now = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
     
+    type_label = "🔒 FIXED" if staking_type == "fixed" else "🔓 FLEXIBLE"
+    
     message = (
-        f"📊 <b>ТОП АКТИВНОСТИ</b> | {now}\n\n"
-        f"🔥 <b>СТЕЙКИНГИ</b>\n\n"
+        f"📊 <b>ТОП АКТИВНОСТІ</b> | {now}\n\n"
+        f"🔥 <b>СТЕЙКІНГИ {type_label}</b>\n\n"
     )
     
     # Вычисляем срез для текущей страницы
