@@ -50,19 +50,22 @@ class FuturesInfo:
             self.trade_url = self._generate_trade_url()
     
     def _generate_trade_url(self) -> str:
-        """Генерирует ссылку на торговлю"""
+        """Генерирует ссылку на торговлю с реферальными кодами"""
         symbol = self.symbol.upper()
+        symbol_lower = symbol.lower()
+        
+        # Реферальные коды
         urls = {
-            'binance': f'https://www.binance.com/en/futures/{symbol}USDT',
-            'bybit': f'https://www.bybit.com/trade/usdt/{symbol}USDT',
-            'okx': f'https://www.okx.com/trade-swap/{symbol.lower()}-usdt-swap',
-            'gateio': f'https://www.gate.io/futures_trade/USDT/{symbol}_USDT',
-            'bitget': f'https://www.bitget.com/futures/usdt/{symbol}USDT',
-            'kucoin': f'https://www.kucoin.com/futures/trade/{symbol}USDTM',
-            'mexc': f'https://futures.mexc.com/exchange/{symbol}_USDT',
-            'bingx': f'https://bingx.com/en-us/perpetual/{symbol}-USDT/',
-            'phemex': f'https://phemex.com/trade/{symbol}USDT',
-            'weex': f'https://www.weex.com/futures/{symbol}USDT',
+            'binance': f'https://www.binance.com/en/futures/{symbol}USDT?ref=37754157',
+            'bybit': f'https://www.bybit.com/trade/usdt/{symbol}USDT?affiliate_id=62234',
+            'okx': f'https://www.okx.com/trade-swap/{symbol_lower}-usdt-swap?channelId=ACE114651',
+            'gateio': f'https://www.gate.io/futures_trade/USDT/{symbol}_USDT?ref=3547662',
+            'bitget': f'https://www.bitget.com/futures/usdt/{symbol}USDT?ref=1hdu',
+            'kucoin': f'https://www.kucoin.com/futures/trade/{symbol}USDTM?rcode=CX82LHPV',
+            'mexc': f'https://futures.mexc.com/exchange/{symbol}_USDT?inviteCode=mexc-12BWh9',
+            'bingx': f'https://bingx.com/perpetual/{symbol}-USDT/?ref=1SEXFP',
+            'phemex': f'https://phemex.com/trade/{symbol}USDT?referralCode=BONUS50',
+            'weex': f'https://www.weex.com/futures/{symbol}-USDT?vipCode=17qt',
         }
         return urls.get(self.exchange, '')
 
@@ -652,142 +655,154 @@ class FuturesFetcher:
 
 # ==================== ФОРМАТИРОВАНИЕ ====================
 
+# Короткие названия бирж для компактного отображения
+EXCHANGE_SHORT_NAMES = {
+    'binance': 'Binance',
+    'bybit': 'Bybit',
+    'okx': 'OKX',
+    'gateio': 'Gate',
+    'bitget': 'Bitget',
+    'kucoin': 'KuCoin',
+    'mexc': 'MEXC',
+    'bingx': 'BingX',
+    'phemex': 'Phemex',
+    'weex': 'Weex',
+}
+
+
 def format_futures_compact(result: FuturesSearchResult) -> str:
-    """Форматирует результат в компактном виде"""
-    lines = [
-        f"🔍 <b>ФЬЮЧЕРСЫ: {result.symbol}</b>",
-        "",
-        f"📊 Найдено на <b>{result.available_count}/{result.total_count}</b> биржах:",
-        ""
-    ]
+    """Форматирует результат в компактном виде с цитатой"""
     
-    # Сортируем: сначала доступные, потом недоступные
-    sorted_results = sorted(result.results, key=lambda x: (not x.available, x.exchange))
+    # Доступные биржи
+    available = [r for r in result.results if r.available]
     
-    for info in sorted_results:
-        if info.available:
-            # Форматируем цену
-            price_str = f"${info.price:,.2f}" if info.price and info.price >= 1 else f"${info.price:.6f}" if info.price else "—"
-            
-            # Форматируем изменение
-            if info.price_change_24h is not None:
-                change_emoji = "📈" if info.price_change_24h >= 0 else "📉"
-                change_str = f"{info.price_change_24h:+.2f}%"
-            else:
-                change_emoji = ""
-                change_str = ""
-            
-            # Форматируем FR
-            if info.funding_rate is not None:
-                fr_str = f"FR: {info.funding_rate:.4f}%"
-            else:
-                fr_str = ""
-            
-            line = f"✅ <b>{info.exchange.capitalize()}</b>  {price_str}  {change_str}  {fr_str}"
-        else:
-            error_hint = f" ({info.error[:20]}...)" if info.error and len(info.error) > 5 else ""
-            line = f"❌ <b>{info.exchange.capitalize()}</b> — нет фьючерса{error_hint}"
-        
-        lines.append(line)
+    if not available:
+        return f"❌ <b>Фьючерс {result.symbol} не найден</b>\n\nПроверено {result.total_count} бирж."
     
-    # Рекомендации по FR
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    # Средняя цена
+    prices = [r.price for r in available if r.price]
+    avg_price = sum(prices) / len(prices) if prices else 0
     
+    # Среднее изменение
+    changes = [r.price_change_24h for r in available if r.price_change_24h is not None]
+    avg_change = sum(changes) / len(changes) if changes else 0
+    
+    # Общий объём и OI
+    total_volume = sum(r.volume_24h for r in available if r.volume_24h) 
+    total_oi = sum(r.open_interest for r in available if r.open_interest)
+    
+    # Диапазон FR
+    funding_rates = [r.funding_rate for r in available if r.funding_rate is not None]
+    min_fr = min(funding_rates) if funding_rates else None
+    max_fr = max(funding_rates) if funding_rates else None
+    
+    # Лучшие для LONG/SHORT
     best_long = result.best_long_fr
     best_short = result.best_short_fr
     
+    # === ФОРМИРУЕМ СООБЩЕНИЕ ===
+    lines = []
+    
+    # Заголовок
+    lines.append(f"🪙 <b>{result.symbol}</b>")
+    lines.append("")
+    
+    # Цена
+    price_str = f"${avg_price:,.2f}" if avg_price >= 1 else f"${avg_price:.6f}"
+    change_emoji = "📈" if avg_change >= 0 else "📉"
+    lines.append(f"💵 Цена: <b>{price_str}</b>")
+    lines.append(f"{change_emoji} 24h: <b>{avg_change:+.2f}%</b>")
+    
+    # Объём и OI
+    vol_str = format_volume(total_volume) if total_volume else "—"
+    oi_str = format_volume(total_oi) if total_oi else "—"
+    lines.append(f"📊 Объём: {vol_str} / OI: {oi_str}")
+    
+    # Funding Rate диапазон
+    if min_fr is not None and max_fr is not None:
+        lines.append(f"💰 FR: {min_fr:.4f}% — {max_fr:.4f}%")
+    
+    # Лучшие для LONG/SHORT со ссылками
     if best_long and best_long.funding_rate is not None:
-        lines.append(f"💚 Лучший FR для LONG: <b>{best_long.exchange.capitalize()}</b> ({best_long.funding_rate:.4f}%)")
+        name = EXCHANGE_SHORT_NAMES.get(best_long.exchange, best_long.exchange)
+        url = best_long.trade_url
+        lines.append(f"💚 LONG: <a href=\"{url}\">{name}</a> ({best_long.funding_rate:.4f}%)")
     
     if best_short and best_short.funding_rate is not None:
-        lines.append(f"💰 Лучший FR для SHORT: <b>{best_short.exchange.capitalize()}</b> ({best_short.funding_rate:.4f}%)")
+        name = EXCHANGE_SHORT_NAMES.get(best_short.exchange, best_short.exchange)
+        url = best_short.trade_url
+        lines.append(f"🔴 SHORT: <a href=\"{url}\">{name}</a> ({best_short.funding_rate:.4f}%)")
+    
+    lines.append("")
+    
+    # === ЦИТАТА С ФЬЮЧЕРСАМИ ===
+    # Сортируем по объёму (от большего к меньшему)
+    sorted_available = sorted(available, key=lambda x: x.volume_24h or 0, reverse=True)
+    
+    futures_parts = []
+    for info in sorted_available:
+        name = EXCHANGE_SHORT_NAMES.get(info.exchange, info.exchange)
+        url = info.trade_url
+        vol = format_volume(info.volume_24h) if info.volume_24h else "$0"
+        futures_parts.append(f"<a href=\"{url}\">{name}</a> ({vol})")
+    
+    futures_line = ", ".join(futures_parts)
+    
+    lines.append(f"┃ 📈 <b>Futures</b> ({len(available)} бирж)")
+    lines.append(f"┃ {futures_line}")
     
     return "\n".join(lines)
 
 
 def format_futures_detailed(result: FuturesSearchResult) -> str:
-    """Форматирует результат в детальном виде"""
-    lines = [
-        f"🔍 <b>ФЬЮЧЕРСЫ: {result.symbol}</b> | <b>ДЕТАЛИ</b>",
-        ""
-    ]
+    """Форматирует результат в детальном виде — каждая биржа отдельно"""
     
     # Только доступные биржи
     available = [r for r in result.results if r.available]
     
     if not available:
-        lines.append("❌ Фьючерс не найден ни на одной бирже")
-        return "\n".join(lines)
+        return f"❌ <b>Фьючерс {result.symbol} не найден</b>\n\nПроверено {result.total_count} бирж."
     
-    for info in available:
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"🟢 <b>{info.exchange.upper()}</b>")
+    lines = [f"🪙 <b>{result.symbol}</b> | Детали", ""]
+    
+    # Сортируем по объёму
+    sorted_available = sorted(available, key=lambda x: x.volume_24h or 0, reverse=True)
+    
+    for info in sorted_available:
+        name = EXCHANGE_SHORT_NAMES.get(info.exchange, info.exchange)
+        url = info.trade_url
         
-        # Цена
+        lines.append(f"━━ <a href=\"{url}\"><b>{name}</b></a> ━━")
+        
+        # Цена и изменение
         if info.price:
             price_str = f"${info.price:,.2f}" if info.price >= 1 else f"${info.price:.6f}"
-            lines.append(f"├ 💵 Цена: <b>{price_str}</b>")
+            change_str = f" ({info.price_change_24h:+.2f}%)" if info.price_change_24h is not None else ""
+            lines.append(f"💵 {price_str}{change_str}")
         
-        # 24h изменение
-        if info.price_change_24h is not None:
-            emoji = "📈" if info.price_change_24h >= 0 else "📉"
-            lines.append(f"├ {emoji} 24h: <b>{info.price_change_24h:+.2f}%</b>")
-        
-        # Объём
+        # Объём и OI в одну строку
+        parts = []
         if info.volume_24h:
-            vol_str = format_volume(info.volume_24h)
-            lines.append(f"├ 📊 Объём 24h: {vol_str}")
-        
-        # Funding Rate
-        if info.funding_rate is not None:
-            fr_emoji = "🟢" if info.funding_rate >= 0 else "🔴"
-            lines.append(f"├ {fr_emoji} Funding Rate: <b>{info.funding_rate:.4f}%</b>")
-        
-        # Open Interest
+            parts.append(f"Vol: {format_volume(info.volume_24h)}")
         if info.open_interest:
-            oi_str = format_volume(info.open_interest)
-            lines.append(f"├ 📉 Open Interest: {oi_str}")
+            parts.append(f"OI: {format_volume(info.open_interest)}")
+        if parts:
+            lines.append(f"📊 {' / '.join(parts)}")
         
-        # Max Leverage
+        # FR и плечо в одну строку
+        parts2 = []
+        if info.funding_rate is not None:
+            parts2.append(f"FR: {info.funding_rate:.4f}%")
         if info.max_leverage:
-            lines.append(f"├ ⚡ Макс. плечо: {info.max_leverage}x")
-        
-        # Mark Price
-        if info.mark_price:
-            mp_str = f"${info.mark_price:,.2f}" if info.mark_price >= 1 else f"${info.mark_price:.6f}"
-            lines.append(f"├ 🎯 Mark Price: {mp_str}")
-        
-        # Ссылка
-        if info.trade_url:
-            lines.append(f"└ 🔗 <a href=\"{info.trade_url}\">Торговать</a>")
-        else:
-            lines.append("└")
+            parts2.append(f"Плечо: {info.max_leverage}x")
+        if parts2:
+            lines.append(f"💰 {' / '.join(parts2)}")
         
         lines.append("")
     
-    # Сводка
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("📊 <b>СВОДКА:</b>")
-    
-    if result.avg_price:
-        avg_str = f"${result.avg_price:,.2f}" if result.avg_price >= 1 else f"${result.avg_price:.6f}"
-        lines.append(f"• Средняя цена: {avg_str}")
-    
-    # Разброс цен
-    prices = [r.price for r in available if r.price]
-    if len(prices) > 1:
-        spread = max(prices) - min(prices)
-        spread_pct = (spread / min(prices)) * 100 if min(prices) > 0 else 0
-        lines.append(f"• Разброс цен: ${spread:.2f} ({spread_pct:.3f}%)")
-    
-    best_long = result.best_long_fr
-    best_short = result.best_short_fr
-    
-    if best_long and best_long.funding_rate is not None:
-        lines.append(f"• Лучший FR LONG: {best_long.exchange.capitalize()}")
-    if best_short and best_short.funding_rate is not None:
-        lines.append(f"• Лучший FR SHORT: {best_short.exchange.capitalize()}")
+    # Убираем последнюю пустую строку
+    if lines and lines[-1] == "":
+        lines.pop()
     
     return "\n".join(lines)
 
