@@ -144,7 +144,7 @@ async def search_and_show_futures(message: Message, symbol: str):
     text = format_futures_compact(result)
     keyboard = get_futures_keyboard(symbol, is_detailed=False)
     
-    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
 
 
 # ==================== CALLBACK ОБРАБОТЧИКИ ====================
@@ -194,7 +194,7 @@ async def show_detailed_view(callback: CallbackQuery, symbol: str, user_id: int)
     keyboard = get_futures_keyboard(symbol, is_detailed=True)
     
     try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
     except Exception as e:
         logger.debug(f"Не удалось отредактировать сообщение: {e}")
 
@@ -217,7 +217,7 @@ async def show_compact_view(callback: CallbackQuery, symbol: str, user_id: int):
     keyboard = get_futures_keyboard(symbol, is_detailed=False)
     
     try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
     except Exception as e:
         logger.debug(f"Не удалось отредактировать сообщение: {e}")
 
@@ -251,7 +251,7 @@ async def refresh_futures(callback: CallbackQuery, symbol: str, user_id: int):
     keyboard = get_futures_keyboard(symbol, is_detailed=is_detailed)
     
     try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
     except Exception as e:
         logger.debug(f"Не удалось отредактировать сообщение: {e}")
 

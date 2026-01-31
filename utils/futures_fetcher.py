@@ -97,7 +97,7 @@ class FuturesSearchResult:
     
     @property
     def best_short_fr(self) -> Optional[FuturesInfo]:
-        """Лучший FR для шорта (самый высокий)"""
+        """Лучший FR для шорта/хеджирования (самый высокий - при +FR шорты получают, при -FR меньше платят)"""
         available = [r for r in self.results if r.available and r.funding_rate is not None]
         if not available:
             return None
@@ -340,13 +340,17 @@ class FuturesFetcher:
             open_24h = float(ticker.get('open24h', 0))
             change_24h = ((last - open_24h) / open_24h * 100) if open_24h > 0 else 0
             
+            # OKX: volCcy24h в базовой валюте, нужно умножить на цену для USD
+            vol_base = float(ticker.get('volCcy24h', 0))
+            vol_usd = vol_base * last if last > 0 else 0
+            
             return FuturesInfo(
                 exchange='okx',
                 symbol=symbol,
                 available=True,
                 price=last,
                 price_change_24h=change_24h,
-                volume_24h=float(ticker.get('volCcy24h', 0)),
+                volume_24h=vol_usd,
                 funding_rate=funding_rate,
                 next_funding_time=next_funding,
                 max_leverage=125,
@@ -489,15 +493,24 @@ class FuturesFetcher:
             
             ticker = data['data']
             
+            # MEXC: amount24 в токенах, нужно умножить на цену
+            last_price = float(ticker.get('lastPrice', 0))
+            vol_base = float(ticker.get('amount24', 0))
+            vol_usd = vol_base * last_price if last_price > 0 else 0
+            
+            # holdVol тоже в токенах
+            hold_vol = float(ticker.get('holdVol', 0)) if ticker.get('holdVol') else 0
+            oi_usd = hold_vol * last_price if last_price > 0 and hold_vol else None
+            
             return FuturesInfo(
                 exchange='mexc',
                 symbol=symbol,
                 available=True,
-                price=float(ticker.get('lastPrice', 0)),
+                price=last_price,
                 price_change_24h=float(ticker.get('riseFallRate', 0)) * 100 if ticker.get('riseFallRate') else 0,
-                volume_24h=float(ticker.get('amount24', 0)),
+                volume_24h=vol_usd,
                 funding_rate=float(ticker.get('fundingRate', 0)) * 100 if ticker.get('fundingRate') else None,
-                open_interest=float(ticker.get('holdVol', 0)) if ticker.get('holdVol') else None,
+                open_interest=oi_usd,
                 max_leverage=200,
             )
         except Exception as e:
@@ -704,7 +717,7 @@ def format_futures_compact(result: FuturesSearchResult) -> str:
     lines = []
     
     # Заголовок
-    lines.append(f"🪙 <b>{result.symbol}</b>")
+    lines.append(f"<b>{result.symbol}</b>")
     lines.append("")
     
     # Цена
@@ -722,16 +735,19 @@ def format_futures_compact(result: FuturesSearchResult) -> str:
     if min_fr is not None and max_fr is not None:
         lines.append(f"💰 FR: {min_fr:.4f}% — {max_fr:.4f}%")
     
-    # Лучшие для LONG/SHORT со ссылками
-    if best_long and best_long.funding_rate is not None:
-        name = EXCHANGE_SHORT_NAMES.get(best_long.exchange, best_long.exchange)
-        url = best_long.trade_url
-        lines.append(f"💚 LONG: <a href=\"{url}\">{name}</a> ({best_long.funding_rate:.4f}%)")
+    # Лучшие биржи для SHORT (хеджирование спота)
+    # Сортируем по FR от высокого к низкому (лучше для шорта)
+    with_fr = [r for r in available if r.funding_rate is not None]
+    sorted_by_fr = sorted(with_fr, key=lambda x: x.funding_rate, reverse=True)
     
-    if best_short and best_short.funding_rate is not None:
-        name = EXCHANGE_SHORT_NAMES.get(best_short.exchange, best_short.exchange)
-        url = best_short.trade_url
-        lines.append(f"🔴 SHORT: <a href=\"{url}\">{name}</a> ({best_short.funding_rate:.4f}%)")
+    # Показываем топ-3 лучших для шорта
+    if sorted_by_fr:
+        short_parts = []
+        for info in sorted_by_fr[:3]:
+            name = EXCHANGE_SHORT_NAMES.get(info.exchange, info.exchange)
+            url = info.trade_url
+            short_parts.append(f"<a href=\"{url}\">{name}</a> ({info.funding_rate:.4f}%)")
+        lines.append(f"� SHORT: {', '.join(short_parts)}")
     
     lines.append("")
     
@@ -748,8 +764,8 @@ def format_futures_compact(result: FuturesSearchResult) -> str:
     
     futures_line = ", ".join(futures_parts)
     
-    lines.append(f"┃ 📈 <b>Futures</b> ({len(available)} бирж)")
-    lines.append(f"┃ {futures_line}")
+    # Используем > для цитаты в Telegram
+    lines.append(f"<blockquote>📈 <b>Futures</b> ({len(available)} бирж)\n{futures_line}</blockquote>")
     
     return "\n".join(lines)
 
@@ -763,7 +779,7 @@ def format_futures_detailed(result: FuturesSearchResult) -> str:
     if not available:
         return f"❌ <b>Фьючерс {result.symbol} не найден</b>\n\nПроверено {result.total_count} бирж."
     
-    lines = [f"🪙 <b>{result.symbol}</b> | Детали", ""]
+    lines = [f"<b>{result.symbol}</b> | Детали", ""]
     
     # Сортируем по объёму
     sorted_available = sorted(available, key=lambda x: x.volume_24h or 0, reverse=True)
