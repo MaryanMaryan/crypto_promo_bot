@@ -3620,8 +3620,11 @@ class NotificationService:
                                             tokens_fmt = f"{tokens_get/1000:.1f}K" if tokens_get >= 1000 else f"{tokens_get:.0f}"
                                             
                                             prefix = "└─" if i == len(example_amounts) - 1 else "├─"
-                                            star = " ⭐" if i == len(example_amounts) - 1 else ""
-                                            message += f"         {prefix} {fmt_number(dep_amount)}$ → {tokens_fmt} {token} → <b>{market_value:.0f}$ (+{profit:.0f}$)</b>{star}\n"
+                                            is_max = i == len(example_amounts) - 1
+                                            if is_max:
+                                                message += f"         {prefix} <b>{fmt_number(dep_amount)}$ → {tokens_fmt} {token} → {market_value:.0f}$ (+{profit:.0f}$)</b>\n"
+                                            else:
+                                                message += f"         {prefix} {fmt_number(dep_amount)}$ → {tokens_fmt} {token} → <b>{market_value:.0f}$ (+{profit:.0f}$)</b>\n"
                         except Exception as e:
                             # Не удалось рассчитать - пропускаем
                             logger.debug(f"⚠️ Не удалось рассчитать аллокацию: {e}")
@@ -3860,10 +3863,8 @@ class NotificationService:
                     for i, pool in enumerate(project.pools, 1):
                         message += "\n"
                         
-                        # Название пула с APR и звездой для лучшего
-                        is_best_apr = pool.apr == project.max_apr
-                        pool_star = " ⭐" if is_best_apr and len(project.pools) > 1 else ""
-                        pool_name = f"📦 <b>ПУЛ #{i}: {pool.stake_coin} | {pool.apr:.0f}%{pool_star}</b>"
+                        # Название пула с APR
+                        pool_name = f"📦 <b>ПУЛ #{i}: {pool.stake_coin} | {pool.apr:.0f}%</b>"
                         message += f"{pool_name}\n"
                         
                         stake_price = token_prices.get(pool.stake_coin, 0)
@@ -3894,31 +3895,32 @@ class NotificationService:
                                 for amt in amounts:
                                     earnings = amt * (pool.apr / 100) * (days_for_calc / 365)
                                     is_max = amt == pool.max_stake
-                                    star = " ⭐️" if is_max else ""
                                     
                                     if stake_price > 0:
                                         deposit_usd = amt * stake_price
                                         earnings_usd = earnings * stake_price
-                                        message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin} ({fmt_usd(deposit_usd)}){star}\n"
                                         if is_max:
+                                            message += f"      🔸 <b>Депозит: {fmt_number(amt)} {pool.stake_coin} ({fmt_usd(deposit_usd)})</b>\n"
                                             message += f"         <b>Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin} ({fmt_usd(earnings_usd)})</b>\n"
                                         else:
+                                            message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin} ({fmt_usd(deposit_usd)})\n"
                                             message += f"         Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin} ({fmt_usd(earnings_usd)})\n"
                                     else:
-                                        message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin}{star}\n"
                                         if is_max:
+                                            message += f"      🔸 <b>Депозит: {fmt_number(amt)} {pool.stake_coin}</b>\n"
                                             message += f"         <b>Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin}</b>\n"
                                         else:
+                                            message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin}\n"
                                             message += f"         Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin}\n"
                             else:
                                 for usd in [1000, 2500, 5000]:
                                     earnings_usd = usd * (pool.apr / 100) * (days_for_calc / 365)
                                     is_max = usd == 5000
-                                    star = " ⭐️" if is_max else ""
-                                    message += f"      🔸 Депозит: ${fmt_number(usd)}{star}\n"
                                     if is_max:
+                                        message += f"      🔸 <b>Депозит: ${fmt_number(usd)}</b>\n"
                                         message += f"         <b>Доход: ~{fmt_usd(earnings_usd)}</b>\n"
                                     else:
+                                        message += f"      🔸 Депозит: ${fmt_number(usd)}\n"
                                         message += f"         Доход: ~{fmt_usd(earnings_usd)}\n"
                     
                     message += f"\n⏰ <b>ПЕРІОД:</b>\n"
@@ -4142,10 +4144,8 @@ class NotificationService:
                     for i, pool in enumerate(project.pools, 1):
                         message += "\n"
                         
-                        # Название пула с APR и звездой для лучшего
-                        is_best_apr = pool.apr == project.max_apr
-                        pool_star = " ⭐" if is_best_apr and len(project.pools) > 1 else ""
-                        pool_name = f"📦 <b>ПУЛ #{i}: {pool.stake_coin} | {pool.apr:.0f}%{pool_star}</b>"
+                        # Название пула с APR
+                        pool_name = f"📦 <b>ПУЛ #{i}: {pool.stake_coin} | {pool.apr:.0f}%</b>"
                         message += f"{pool_name}\n"
                         
                         # Макс депозит с USD
@@ -4177,31 +4177,32 @@ class NotificationService:
                                 for amt in amounts:
                                     earnings = amt * (pool.apr / 100) * (days_for_calc / 365)
                                     is_max = amt == pool.max_stake
-                                    star = " ⭐️" if is_max else ""
                                     
                                     if stake_price > 0:
                                         deposit_usd = amt * stake_price
                                         earnings_usd = earnings * stake_price
-                                        message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin} ({fmt_usd(deposit_usd)}){star}\n"
                                         if is_max:
+                                            message += f"      🔸 <b>Депозит: {fmt_number(amt)} {pool.stake_coin} ({fmt_usd(deposit_usd)})</b>\n"
                                             message += f"         <b>Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin} ({fmt_usd(earnings_usd)})</b>\n"
                                         else:
+                                            message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin} ({fmt_usd(deposit_usd)})\n"
                                             message += f"         Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin} ({fmt_usd(earnings_usd)})\n"
                                     else:
-                                        message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin}{star}\n"
                                         if is_max:
+                                            message += f"      🔸 <b>Депозит: {fmt_number(amt)} {pool.stake_coin}</b>\n"
                                             message += f"         <b>Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin}</b>\n"
                                         else:
+                                            message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin}\n"
                                             message += f"         Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin}\n"
                             else:
                                 for usd in [1000, 2500, 5000]:
                                     earnings_usd = usd * (pool.apr / 100) * (days_for_calc / 365)
                                     is_max = usd == 5000
-                                    star = " ⭐️" if is_max else ""
-                                    message += f"      🔸 Депозит: ${fmt_number(usd)}{star}\n"
                                     if is_max:
+                                        message += f"      🔸 <b>Депозит: ${fmt_number(usd)}</b>\n"
                                         message += f"         <b>Доход: ~{fmt_usd(earnings_usd)}</b>\n"
                                     else:
+                                        message += f"      🔸 Депозит: ${fmt_number(usd)}\n"
                                         message += f"         Доход: ~{fmt_usd(earnings_usd)}\n"
                     
                     # Период
@@ -4344,10 +4345,8 @@ class NotificationService:
                     for i, pool in enumerate(project.pools, 1):
                         message += "\n"
                         
-                        # Название пула с APR и звездой для лучшего
-                        is_best_apr = pool.apr == project.max_apr
-                        star = " ⭐" if is_best_apr and len(project.pools) > 1 else ""
-                        pool_name = f"📦 <b>ПУЛ #{i}: {pool.stake_coin} | {pool.apr:.0f}%{star}</b>"
+                        # Название пула с APR
+                        pool_name = f"📦 <b>ПУЛ #{i}: {pool.stake_coin} | {pool.apr:.0f}%</b>"
                         message += f"{pool_name}\n"
                         
                         # Макс депозит с USD
@@ -4386,33 +4385,34 @@ class NotificationService:
                                     # Используем days_for_calc для точного расчёта
                                     earnings = amt * (pool.apr / 100) * (days_for_calc / 365)
                                     is_max = amt == pool.max_stake
-                                    star = " ⭐️" if is_max else ""
                                     
                                     # Форматируем депозит с USD
                                     if stake_price > 0:
                                         deposit_usd = amt * stake_price
                                         earnings_usd = earnings * stake_price
-                                        message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin} ({fmt_usd(deposit_usd)}){star}\n"
                                         if is_max:
+                                            message += f"      🔸 <b>Депозит: {fmt_number(amt)} {pool.stake_coin} ({fmt_usd(deposit_usd)})</b>\n"
                                             message += f"         <b>Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin} ({fmt_usd(earnings_usd)})</b>\n"
                                         else:
+                                            message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin} ({fmt_usd(deposit_usd)})\n"
                                             message += f"         Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin} ({fmt_usd(earnings_usd)})\n"
                                     else:
-                                        message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin}{star}\n"
                                         if is_max:
+                                            message += f"      🔸 <b>Депозит: {fmt_number(amt)} {pool.stake_coin}</b>\n"
                                             message += f"         <b>Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin}</b>\n"
                                         else:
+                                            message += f"      🔸 Депозит: {fmt_number(amt)} {pool.stake_coin}\n"
                                             message += f"         Доход: ~{fmt_number(earnings, 0)} {pool.stake_coin}\n"
                             else:
                                 # Нет лимита - показываем $1000, $2500, $5000
                                 for usd in [1000, 2500, 5000]:
                                     earnings_usd = usd * (pool.apr / 100) * (days_for_calc / 365)
                                     is_max = usd == 5000
-                                    star = " ⭐️" if is_max else ""
-                                    message += f"      🔸 Депозит: ${fmt_number(usd)}{star}\n"
                                     if is_max:
+                                        message += f"      🔸 <b>Депозит: ${fmt_number(usd)}</b>\n"
                                         message += f"         <b>Доход: ~{fmt_usd(earnings_usd)}</b>\n"
                                     else:
+                                        message += f"      🔸 Депозит: ${fmt_number(usd)}\n"
                                         message += f"         Доход: ~{fmt_usd(earnings_usd)}\n"
                     
                     # Период

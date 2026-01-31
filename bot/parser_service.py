@@ -787,10 +787,24 @@ class ParserService:
                     existing.participants_count = new_count
                     updated = True
             
-            # Обновляем только если текущие значения пустые
-            if winners_count and not existing.winners_count:
-                existing.winners_count = self._safe_int(winners_count)
-                updated = True
+            # Определяем BybitTS для принудительного обновления winners_count
+            is_bybit_ts = (
+                (link_url and 'token-splash' in link_url.lower()) or 
+                (existing.link and 'token-splash' in existing.link.lower()) or
+                (promo_id and promo_id.startswith('bybit_') and promo_id.replace('bybit_', '').replace('_', '').isdigit())
+            )
+            
+            # Для BybitTS ВСЕГДА обновляем winners_count (исправлена логика расчёта)
+            # Для остальных - только если пустое
+            if winners_count:
+                new_winners = self._safe_int(winners_count)
+                if is_bybit_ts and new_winners and new_winners != existing.winners_count:
+                    existing.winners_count = new_winners
+                    updated = True
+                    logger.info(f"📊 Обновлено winners_count для BybitTS: {new_winners}")
+                elif not existing.winners_count and new_winners:
+                    existing.winners_count = new_winners
+                    updated = True
                 
             if reward_per_winner and not existing.reward_per_winner:
                 existing.reward_per_winner = str(reward_per_winner)

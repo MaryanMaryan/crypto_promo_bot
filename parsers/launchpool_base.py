@@ -298,15 +298,13 @@ class LaunchpoolBaseParser(ABC):
                     ]
                     for amt in amounts:
                         earnings = pool.calculate_earnings(amt, days_left)
-                        star = " ⭐" if amt == pool.max_stake else ""
-                        lines.append(f"      {amt:,.0f} {pool.stake_coin[:4]:4} │ ~{earnings:,.2f} {pool.stake_coin[:4]}{star}")
+                        lines.append(f"      {amt:,.0f} {pool.stake_coin[:4]:4} │ ~{earnings:,.2f} {pool.stake_coin[:4]}")
                 else:
                     # Нет лимита - показываем $1000, $2500, $5000
                     for usd in [1000, 2500, 5000]:
                         earnings_pct = (pool.apr / 100) * (days_left / 365) * 100
                         earnings_usd = usd * (pool.apr / 100) * (days_left / 365)
-                        star = " ⭐" if usd == 5000 else ""
-                        lines.append(f"      ${usd:,}         │ ~${earnings_usd:,.2f}{star}")
+                        lines.append(f"      ${usd:,}         │ ~${earnings_usd:,.2f}")
         
         # Период
         lines.append("")

@@ -973,9 +973,14 @@ class UniversalParser(BaseParser):
                     logger.debug(f"📊 Bybit: установлена стандартная минимальная сумма торговли = 500 {trade_token_symbol}")
             
             # Устанавливаем результаты
-            if total_winners > 0:
+            # ВАЖНО: Для BybitTS отображаем только призовые места для НОВЫХ пользователей
+            # (это наиболее релевантная информация для пользователя)
+            if promo_data.get('new_user_winners_count'):
+                promo_data['winners_count'] = promo_data['new_user_winners_count']
+                logger.info(f"✅ Bybit (details): {promo_data['winners_count']} призовых мест для новых пользователей")
+            elif total_winners > 0:
                 promo_data['winners_count'] = total_winners
-                logger.info(f"✅ Bybit (details): {total_winners} призовых мест")
+                logger.info(f"✅ Bybit (details): {total_winners} призовых мест (общее)")
             
             # Формируем reward_per_winner - берём ТОЛЬКО награду New Users (НЕ Trade Competition!)
             if rewards_info:
