@@ -9,6 +9,39 @@
 - **Локация:** Warsaw, Poland
 - **Тариф:** vhf-2c-4gb ($24/месяц)
 - **Ресурсы:** 4GB RAM, 2 vCPU, 128GB NVMe SSD
+- **Путь проекта:** `/opt/crypto_promo_bot`
+
+## 🚀 Быстрый деплой (основной способ)
+
+**Мы используем прямое копирование файлов через SCP** (без git на сервере).
+
+### Деплой одного/нескольких файлов:
+```powershell
+# Windows PowerShell - копируем изменённые файлы:
+scp "bot\notification_service.py" root@70.34.246.30:/opt/crypto_promo_bot/bot/
+scp "parsers\staking_parser.py" root@70.34.246.30:/opt/crypto_promo_bot/parsers/
+
+# Перезапускаем бота:
+ssh root@70.34.246.30 "sudo systemctl restart crypto_promo_bot"
+
+# Проверяем статус:
+ssh root@70.34.246.30 "sudo systemctl status crypto_promo_bot --no-pager"
+```
+
+### Деплой всего проекта:
+```powershell
+# Копируем всю папку (исключая venv, __pycache__, .git):
+scp -r bot parsers services utils data config root@70.34.246.30:/opt/crypto_promo_bot/
+scp main.py config.py requirements.txt root@70.34.246.30:/opt/crypto_promo_bot/
+
+# Перезапуск
+ssh root@70.34.246.30 "sudo systemctl restart crypto_promo_bot"
+```
+
+### Однострочный деплой с проверкой:
+```powershell
+scp "bot\notification_service.py" root@70.34.246.30:/opt/crypto_promo_bot/bot/ ; ssh root@70.34.246.30 "sudo systemctl restart crypto_promo_bot && sleep 2 && sudo systemctl status crypto_promo_bot --no-pager"
+```
 
 ## 📁 Файлы
 
@@ -157,11 +190,12 @@ df -h
 
 ## 🔄 Обновление кода
 
-### Способ 1: SCP отдельных файлов
-```bash
-# С локальной машины:
-scp parsers/staking_parser.py root@70.34.246.30:/opt/crypto_promo_bot/parsers/
-ssh root@70.34.246.30 "systemctl restart crypto_promo_bot"
+### Способ 1: SCP отдельных файлов (рекомендуется)
+```powershell
+# С Windows PowerShell:
+scp "bot\handlers.py" root@70.34.246.30:/opt/crypto_promo_bot/bot/
+scp "parsers\universal_parser.py" root@70.34.246.30:/opt/crypto_promo_bot/parsers/
+ssh root@70.34.246.30 "sudo systemctl restart crypto_promo_bot"
 ```
 
 ### Способ 2: Полная синхронизация через архив

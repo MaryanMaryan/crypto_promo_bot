@@ -3469,6 +3469,36 @@ class NotificationService:
                 total_supply = raw_data.get('totalSupply', promo.get('total_prize_pool', ''))
                 launchpad_id = raw_data.get('launchpadId', raw_data.get('id', ''))
                 
+                # === ПОЛУЧАЕМ РЕАЛЬНУЮ ЦЕНУ ТОКЕНА ===
+                # Приоритет: PriceFetcher (реальная цена) > linePrice (цена биржи)
+                real_market_price = None
+                price_source = None
+                
+                if token:
+                    try:
+                        from utils.price_fetcher import get_price_fetcher
+                        price_fetcher = get_price_fetcher()
+                        real_market_price = price_fetcher.get_token_price(token)
+                        if real_market_price:
+                            price_source = "real"
+                            logger.debug(f"💰 {token}: реальная цена ${real_market_price:.6f}")
+                    except Exception as e:
+                        logger.debug(f"⚠️ PriceFetcher недоступен для {token}: {e}")
+                
+                # Fallback на цену биржи
+                taking_coins = raw_data.get('launchpadTakingCoins', [])
+                exchange_line_price = None
+                if taking_coins:
+                    try:
+                        exchange_line_price = float(taking_coins[0].get('linePrice', 0))
+                    except:
+                        pass
+                
+                # Если реальная цена не найдена, используем биржевую
+                if not real_market_price and exchange_line_price:
+                    real_market_price = exchange_line_price
+                    price_source = "exchange"
+                
                 # === ЗАГОЛОВОК ПРОЕКТА ===
                 if full_name and full_name != token:
                     message += f"🪙 <b>{self.escape_html(full_name)} ({token})</b>\n"
@@ -3478,26 +3508,21 @@ class NotificationService:
                 # Статус
                 message += f"📊 <b>Статус:</b> {get_status_emoji(status)}\n"
                 
-                # === ВАРИАНТЫ ПОДПИСКИ ===
-                taking_coins = raw_data.get('launchpadTakingCoins', [])
-                
-                # Общее распределение (с эквивалентом в USDT по рыночной цене)
+                # Общее распределение (с эквивалентом в USDT по реальной цене)
                 if total_supply:
                     total_supply_usdt = ""
-                    if taking_coins:
-                        try:
-                            market_price_for_total = float(taking_coins[0].get('linePrice', 0))
-                            total_supply_num = float(str(total_supply).replace(',', ''))
-                            if market_price_for_total > 0 and total_supply_num > 0:
-                                usdt_equiv = total_supply_num * market_price_for_total
-                                if usdt_equiv >= 1000000:
-                                    total_supply_usdt = f" <i>(~${usdt_equiv/1000000:.1f}M)</i>"
-                                elif usdt_equiv >= 1000:
-                                    total_supply_usdt = f" <i>(~${usdt_equiv/1000:.0f}K)</i>"
-                                else:
-                                    total_supply_usdt = f" <i>(~${usdt_equiv:.0f})</i>"
-                        except:
-                            pass
+                    try:
+                        total_supply_num = float(str(total_supply).replace(',', ''))
+                        if real_market_price and real_market_price > 0 and total_supply_num > 0:
+                            usdt_equiv = total_supply_num * real_market_price
+                            if usdt_equiv >= 1000000:
+                                total_supply_usdt = f" <i>(~${usdt_equiv/1000000:.1f}M)</i>"
+                            elif usdt_equiv >= 1000:
+                                total_supply_usdt = f" <i>(~${usdt_equiv/1000:.0f}K)</i>"
+                            else:
+                                total_supply_usdt = f" <i>(~${usdt_equiv:.0f})</i>"
+                    except:
+                        pass
                     message += f"📦 <b>Всего токенов:</b> {fmt_number(total_supply)} {token}{total_supply_usdt}\n"
                 
                 if taking_coins:
@@ -3506,7 +3531,7 @@ class NotificationService:
                     for tc_idx, tc in enumerate(taking_coins, 1):
                         invest_curr = tc.get('investCurrency', 'USDT')
                         taking_price = tc.get('takingPrice', '0')
-                        line_price = tc.get('linePrice')  # Рыночная цена
+                        line_price = tc.get('linePrice')  # Рыночная цена биржи (для отображения)
                         label = tc.get('label', '')  # Скидка (70% Off)
                         supply = tc.get('supply', '0')
                         taking_amount = tc.get('takingAmount', '0')
@@ -3541,22 +3566,30 @@ class NotificationService:
                             except:
                                 message += f"      • Рынок: {fmt_price(line_price)} {invest_curr}\n"
                         
-                        # Выделено токенов (с эквивалентом в USDT по рыночной цене)
-                        supply_usdt = ""
-                        if line_price:
+                        # Показываем реальную цену, если она отличается от биржевой
+                        if real_market_price and price_source == "real":
                             try:
-                                supply_num = float(str(supply).replace(',', ''))
-                                market_p = float(line_price)
-                                if market_p > 0 and supply_num > 0:
-                                    usdt_eq = supply_num * market_p
-                                    if usdt_eq >= 1000000:
-                                        supply_usdt = f" <i>(~${usdt_eq/1000000:.1f}M)</i>"
-                                    elif usdt_eq >= 1000:
-                                        supply_usdt = f" <i>(~${usdt_eq/1000:.0f}K)</i>"
-                                    else:
-                                        supply_usdt = f" <i>(~${usdt_eq:.0f})</i>"
+                                exchange_price = float(line_price) if line_price else 0
+                                if exchange_price > 0 and abs(real_market_price - exchange_price) / exchange_price > 0.05:
+                                    # Разница более 5% - показываем
+                                    message += f"      • <b>Реальная цена:</b> {fmt_price(real_market_price)} USDT 📊\n"
                             except:
                                 pass
+                        
+                        # Выделено токенов (с эквивалентом в USDT по реальной цене)
+                        supply_usdt = ""
+                        try:
+                            supply_num = float(str(supply).replace(',', ''))
+                            if real_market_price and real_market_price > 0 and supply_num > 0:
+                                usdt_eq = supply_num * real_market_price
+                                if usdt_eq >= 1000000:
+                                    supply_usdt = f" <i>(~${usdt_eq/1000000:.1f}M)</i>"
+                                elif usdt_eq >= 1000:
+                                    supply_usdt = f" <i>(~${usdt_eq/1000:.0f}K)</i>"
+                                else:
+                                    supply_usdt = f" <i>(~${usdt_eq:.0f})</i>"
+                        except:
+                            pass
                         message += f"      • Выделено: {fmt_number(supply)} {token}{supply_usdt}\n"
                         
                         # Собрано
@@ -3583,12 +3616,9 @@ class NotificationService:
                             max_limit = float(str(taking_max).replace(',', '')) if taking_max else 5000
                             min_limit = float(str(taking_min).replace(',', '')) if taking_min else 100
                             
-                            # Рыночная цена для расчёта профита
-                            market_price = 0
-                            try:
-                                market_price = float(str(line_price).replace(',', '')) if line_price else 0
-                            except:
-                                pass
+                            # Используем реальную рыночную цену для расчёта профита
+                            # real_market_price уже получена выше (PriceFetcher или fallback на linePrice)
+                            market_price = real_market_price if real_market_price else 0
                             
                             if price_num > 0 and supply_num > 0:
                                 # Сколько токенов забронировано
