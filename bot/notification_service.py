@@ -994,9 +994,9 @@ class NotificationService:
                 else:
                     message += "\n"
 
-            # Ссылка
-            if page_url:
-                message += f"\n<b>🔗 Ссылка:</b> {self.escape_html(page_url)}"
+            # Ссылка (дефолтная для OKX Flash Earn если не передана)
+            okx_flash_earn_url = page_url or "https://www.okx.com/earn/flash-earn"
+            message += f"\n🔗 <b>Ссылка:</b> {self.escape_html(okx_flash_earn_url)}"
 
             # Проверяем лимит Telegram
             if len(message) > 4090:
