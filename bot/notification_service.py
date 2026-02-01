@@ -3442,7 +3442,7 @@ class NotificationService:
                 return status_map.get(status, f'❓ {status}')
 
             # Заголовок
-            message = f"� <b>MEXC</b> | 🚀 <b>LAUNCHPAD</b>\n\n"
+            message = f"🔵 <b>MEXC</b> | 🚀 <b>LAUNCHPAD</b>\n\n"
 
             # Если промоакций нет
             if not promos:
@@ -3478,12 +3478,27 @@ class NotificationService:
                 # Статус
                 message += f"📊 <b>Статус:</b> {get_status_emoji(status)}\n"
                 
-                # Общее распределение
-                if total_supply:
-                    message += f"📦 <b>Всего токенов:</b> {fmt_number(total_supply)} {token}\n"
-                
                 # === ВАРИАНТЫ ПОДПИСКИ ===
                 taking_coins = raw_data.get('launchpadTakingCoins', [])
+                
+                # Общее распределение (с эквивалентом в USDT по рыночной цене)
+                if total_supply:
+                    total_supply_usdt = ""
+                    if taking_coins:
+                        try:
+                            market_price_for_total = float(taking_coins[0].get('linePrice', 0))
+                            total_supply_num = float(str(total_supply).replace(',', ''))
+                            if market_price_for_total > 0 and total_supply_num > 0:
+                                usdt_equiv = total_supply_num * market_price_for_total
+                                if usdt_equiv >= 1000000:
+                                    total_supply_usdt = f" <i>(~${usdt_equiv/1000000:.1f}M)</i>"
+                                elif usdt_equiv >= 1000:
+                                    total_supply_usdt = f" <i>(~${usdt_equiv/1000:.0f}K)</i>"
+                                else:
+                                    total_supply_usdt = f" <i>(~${usdt_equiv:.0f})</i>"
+                        except:
+                            pass
+                    message += f"📦 <b>Всего токенов:</b> {fmt_number(total_supply)} {token}{total_supply_usdt}\n"
                 
                 if taking_coins:
                     message += f"\n💰 <b>ВАРИАНТЫ ПОДПИСКИ ({len(taking_coins)}):</b>\n"
@@ -3526,8 +3541,23 @@ class NotificationService:
                             except:
                                 message += f"      • Рынок: {fmt_price(line_price)} {invest_curr}\n"
                         
-                        # Выделено токенов
-                        message += f"      • Выделено: {fmt_number(supply)} {token}\n"
+                        # Выделено токенов (с эквивалентом в USDT по рыночной цене)
+                        supply_usdt = ""
+                        if line_price:
+                            try:
+                                supply_num = float(str(supply).replace(',', ''))
+                                market_p = float(line_price)
+                                if market_p > 0 and supply_num > 0:
+                                    usdt_eq = supply_num * market_p
+                                    if usdt_eq >= 1000000:
+                                        supply_usdt = f" <i>(~${usdt_eq/1000000:.1f}M)</i>"
+                                    elif usdt_eq >= 1000:
+                                        supply_usdt = f" <i>(~${usdt_eq/1000:.0f}K)</i>"
+                                    else:
+                                        supply_usdt = f" <i>(~${usdt_eq:.0f})</i>"
+                            except:
+                                pass
+                        message += f"      • Выделено: {fmt_number(supply)} {token}{supply_usdt}\n"
                         
                         # Собрано
                         try:

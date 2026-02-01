@@ -747,7 +747,7 @@ def format_futures_compact(result: FuturesSearchResult) -> str:
             name = EXCHANGE_SHORT_NAMES.get(info.exchange, info.exchange)
             url = info.trade_url
             short_parts.append(f"<a href=\"{url}\">{name}</a> ({info.funding_rate:.4f}%)")
-        lines.append(f"� SHORT: {', '.join(short_parts)}")
+        lines.append("🟥 SHORT: " + ', '.join(short_parts))
     
     lines.append("")
     
